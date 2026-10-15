@@ -2,17 +2,27 @@
 """
 Static sanity checker for MQL4 Expert Advisors.
 
-There is no MetaEditor compiler on macOS, so before shipping an .mq4 file this
-script checks the things a compiler would catch and that are easy to get wrong
-when code is written without one:
+A real compiler is available on this machine (Tools/mt4_compile.sh runs the
+MetaEditor bundled inside MetaTrader 4.app), and it is the authority. Use it
+before shipping anything. This script is the fast pass that needs no Wine and
+catches the mistakes that are easy to make when writing MQL4 from MQL5 muscle
+memory:
 
   * balanced braces / parens / brackets (outside comments and strings)
   * every called function is defined in the file or is a known MQL4 builtin
+  * no MQL5-only API that a C-eyeballed review waves straight through
   * no duplicate function definitions
   * no leftover merge/append markers
   * every `extern` input name is unique
   * every referenced global is declared
   * the OnInit/OnTick lifecycle hooks exist
+
+The BUILTIN and MQL5_ONLY sets below are not transcribed from documentation.
+Every name in them was compiled against MetaEditor build 1491 and classified by
+whether the compiler answered "undeclared identifier", which is what turned up
+nine names here that MQL4 has never had (OrderCalcMargin, AccountLogin,
+MODE_CONTRACTSIZE and friends) and twenty-odd MQL5 entry points that MQL4 also
+does not provide.
 
 Usage:
     python3 Tools/lint_mql4.py MQL4/Experts/HEX-FVG-Breaker.mq4
@@ -29,26 +39,105 @@ NormalizeDouble DoubleToString IntegerToString TimeToStr StrToTime StringTrimLef
 StringSubstr StringSplit StringReplace StringLen StringFind StringToUpper StringToLower
 TimeCurrent TimeLocal TimeToStruct StructToTime GetTickCount
 Symbol Period Digits Point Bid Ask Close Open High Low Time Volume Bars
-iATR iMA iCustom iHigh iLow iOpen iClose iTickValue iBars iTime
+iATR iMA iCustom iHigh iLow iOpen iClose iBars iTime
 OrdersTotal OrdersHistoryTotal OrderSelect OrderSend OrderClose OrderDelete OrderModify
 OrderTicket OrderType OrderLots OrderOpenPrice OrderStopLoss OrderTakeProfit OrderProfit
 OrderSwap OrderCommission OrderMagicNumber OrderSymbol OrderCloseTime OrderComment
-OrderOpenTime OrderClosePrice OrderExpertMagicNumber
+OrderOpenTime OrderClosePrice
 AccountEquity AccountBalance AccountFreeMargin AccountFreeMarginCheck AccountMargin
 AccountCurrency AccountName AccountNumber AccountServer AccountInfoDouble
-MarketInfo OrderCalcMargin
-FolderExist FolderCreate FileOpen FileClose FileWriteString FileReadString FileSeek FileDelete
-FileExists FileIsEnding FileFlush FileReadNumber FileWriteNumber FileSize FileGetInteger
+MarketInfo
+FolderCreate FileOpen FileClose FileWriteString FileReadString FileSeek FileDelete
+FileIsExist FileIsEnding FileFlush FileReadNumber FileSize FileGetInteger
 ArraySize ArrayResize ArrayFree ArrayCopy ArrayMaximum ArrayMinimum ArraySort ArrayInitialize
 ObjectCreate ObjectDelete ObjectsDeleteAll ObjectSetInteger ObjectSetString ObjectSetDouble
-ObjectFind ObjectMove ObjectDescription ObjectGetValue
+ObjectFind ObjectMove ObjectDescription
 Comment Alert Print PrintFormat GetLastError IsTesting IsTradeAllowed
 IsConnected IsTradeContextBusy TerminalInfoInteger TerminalPath ChartID
 WebRequest StringToCharArray CharArrayToString StringGetCharacter StringSetCharacter
-IsOptimization IsVisualMode IsTermination IsStopped
+IsOptimization IsVisualMode IsStopped UninitializeReason
 DoubleToStr StrToDouble StringFormat MathRound StrToInteger
-AccountLogin RefreshRates GetPreviousPos PriceToStr
+RefreshRates SendNotification TimeGMT
 """.split())
+
+# Names MQL4 build 1491 does not define. Each was compiled and answered
+# "undeclared identifier". Eleven of these used to sit in BUILTIN above, which is
+# why the EA passed the linter and then failed to compile with seven errors: an
+# allow-list that contains a name can never report it. They are recorded here
+# instead, so reaching for one by reflex is now a failure. The value is the MQL4
+# replacement where one exists.
+MQL5_ONLY = {
+    "AccountLogin": "AccountNumber()",
+    "CopyTick": None,
+    "FileExists": "FileIsExist()",
+    "FileWriteNumber": "FileWriteInteger() / FileWriteDouble()",
+    "FolderExist": "no equivalent; FolderCreate() is safe to call unconditionally",
+    "GetErrorMessage": None,
+    "GetPreviousPos": None,
+    "HistoryDealGetDouble": None,
+    "HistoryDealsTotal": None,
+    "HistorySelect": None,
+    "IndicatorCreate": None,
+    "IndicatorRelease": None,
+    "IsTermination": "IsStopped",
+    "Notify": "SendNotification()",
+    "ObjectGetValue": "ObjectGetString() / ObjectGetInteger()",
+    "OrderCalcMargin": "AccountFreeMargin() - AccountFreeMarginCheck(...)",
+    "OrderCalcProfit": None,
+    "OrderExpertMagicNumber": "OrderMagicNumber()",
+    "OrderGetTicket": None,
+    "OrderGetTime": None,
+    "PositionClose": None,
+    "PositionGetDouble": None,
+    "PositionGetInteger": None,
+    "PositionGetString": None,
+    "PositionModify": None,
+    "PositionOpen": None,
+    "PositionSelect": None,
+    "PositionSelectByTicket": None,
+    "PositionTotal": None,
+    "PriceToStr": "DoubleToString()",
+    "TimeTradeCurrent": "TimeCurrent()",
+    "TradeCalculateProfit": None,
+    "iTickValue": None,
+}
+
+# MarketInfo() mode constants that belong to MQL5. The identifier scan skips the
+# MODE_ prefix, so these need an explicit check.
+MQL5_ONLY_MODES = {
+    "MODE_CONTRACTSIZE": "MODE_LOTSIZE",
+    "MODE_LIMITS": None,
+}
+
+# Argument counts the MQL4 compiler accepts for builtins whose signature differs
+# from MQL5. Every range below was measured, not recalled: the call form was
+# compiled against build 1491 and counted as valid or "wrong parameters count".
+# Both directions occur in this file's history - iATR has no applied_price slot,
+# and WebRequest takes a data_size argument that MQL5 does not have.
+#
+#   iHigh/iLow/iOpen/iClose/iTime take (symbol, timeframe, shift); MQL5's
+#   4-argument (symbol, timeframe, shift, bar_index) form is rejected.
+#   iBars takes (symbol, timeframe); MQL5's 3-argument form is rejected.
+#   OrderClose needs at least (ticket, lots, price, slippage).
+#   OrderSend needs at least (symbol, cmd, lots, price, slippage, stoploss,
+#   takeprofit); comment, magic, expiration and colour are optional.
+#
+# iCustom is absent on purpose: its arity is open-ended and the compiler cannot
+# resolve it here without the indicator file present.
+BUILTIN_ARITY = {
+    "iATR": (4, 4),
+    "iMA": (7, 7),
+    "iHigh": (3, 3),
+    "iLow": (3, 3),
+    "iOpen": (3, 3),
+    "iClose": (3, 3),
+    "iTime": (3, 3),
+    "iBars": (2, 2),
+    "AccountFreeMarginCheck": (3, 3),
+    "OrderClose": (4, 5),
+    "OrderSend": (7, 11),
+    "WebRequest": (9, 9),
+}
 
 SIG = r"(?:int|double|bool|void|string|color|datetime|long|ulong|uint|short|ushort|char|uchar|float|TradeRec|ZoneRec|MqlDateTime)"
 
@@ -115,6 +204,21 @@ def next_nonspace(s, i):
     while i < len(s) and s[i].isspace():
         i += 1
     return s[i] if i < len(s) else ""
+
+
+def matching_brace(s, open_idx):
+    """Index of the '}' closing the '{' at open_idx, or -1 if unbalanced."""
+    depth = 0
+    k = open_idx
+    while k < len(s):
+        if s[k] == "{":
+            depth += 1
+        elif s[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+    return -1
 
 
 def preceding_token(s, start):
@@ -205,10 +309,91 @@ def strip_noise(src):
     return "".join(out)
 
 
+def struct_members(clean):
+    """Map struct name -> set of member names for every struct defined in the file.
+
+    Also maps each variable declared with one of those types to the struct name, so
+    `g_rec[s].lots0` can be resolved to TradeRec's member list. Structs whose
+    definition is not in the file (MqlDateTime and friends) are simply absent, and
+    member accesses on them are left alone.
+    """
+    structs = {}
+    for m in re.finditer(r"\bstruct\s+([A-Za-z_]\w*)\s*\{", clean):
+        name = m.group(1)
+        open_i = m.end() - 1
+        close_i = matching_brace(clean, open_i)
+        if close_i < 0:
+            continue
+        body = clean[open_i + 1:close_i]
+        members = re.findall(r"^\s*[A-Za-z_]\w*\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*[;=]",
+                             body, re.M)
+        structs[name] = set(members)
+
+    vars_of = {}
+    for sname in structs:
+        for m in re.finditer(rf"\b{sname}\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*[;=]", clean):
+            vars_of[m.group(1)] = sname
+    return structs, vars_of
+
+
+def check_struct_members(clean, problems):
+    """Flag var.member where member is not in the struct's definition.
+
+    This is the bug that renaming a struct field leaves behind: the declaration is
+    gone, one assignment still uses the old name, and the compiler is the only
+    thing that notices. Two such leftovers lived in TradeRec for the whole life of
+    this file.
+    """
+    structs, vars_of = struct_members(clean)
+    if not structs:
+        return
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*\.\s*([A-Za-z_]\w*)", clean):
+        var, member = m.group(1), m.group(2)
+        sname = vars_of.get(var)
+        if sname is None:
+            continue
+        if member not in structs[sname]:
+            ln = clean[:m.start()].count("\n") + 1
+            problems.append(f"{sname} has no member '{member}' (line {ln}, via {var})")
+
+
 def check(path):
     raw = open(path, encoding="utf-8", errors="replace").read()
     clean = strip_noise(raw)
     problems = []
+    # MQL5 API that MQL4 does not have. This is the check that would have caught
+    # the errors the real compiler reported by hand: an allow-list can only say
+    # "not a known name", never "that one is from the other terminal".
+    for name, repl in sorted(MQL5_ONLY.items()):
+        m = re.search(rf"\b{re.escape(name)}\s*[(\[]", clean)
+        if not m:
+            continue
+        ln = clean[:m.start()].count("\n") + 1
+        hint = f"; use {repl}" if repl else " (no MQL4 equivalent)"
+        problems.append(f"MQL5-only {name} at line {ln}{hint}")
+    for name, repl in sorted(MQL5_ONLY_MODES.items()):
+        m = re.search(rf"\b{re.escape(name)}\b", clean)
+        if not m:
+            continue
+        ln = clean[:m.start()].count("\n") + 1
+        hint = f"; use {repl}" if repl else ""
+        problems.append(f"MQL5-only constant {name} at line {ln}{hint}")
+
+    # argument counts for builtins whose signature moved between MQL4 and MQL5
+    for name, (lo, hi) in sorted(BUILTIN_ARITY.items()):
+        for m in re.finditer(rf"\b{re.escape(name)}\s*\(", clean):
+            oi = m.end() - 1
+            ci = matching_paren(clean, oi)
+            if ci < 0:
+                continue
+            if preceding_token(clean, m.start()) in TYPE_WORDS:
+                continue              # a locally defined function of that name
+            n = len(split_args(clean[oi + 1:ci]))
+            if n < lo or n > hi:
+                ln = clean[:oi].count("\n") + 1
+                rng = str(lo) if lo == hi else f"{lo} to {hi}"
+                problems.append(f"{name}() called with {n} arg(s) at line {ln}; "
+                                f"MQL4 takes {rng}")
 
     for a, b in (("{", "}"), ("(", ")"), ("[", "]")):
         ca, cb = clean.count(a), clean.count(b)
@@ -259,6 +444,8 @@ def check(path):
     if missing_g:
         problems.append(f"undeclared globals: {missing_g}")
 
+    check_struct_members(clean, problems)
+
     for hook in ("OnInit", "OnTick"):
         if hook not in defs:
             problems.append(f"missing lifecycle function {hook}()")
@@ -273,7 +460,8 @@ def check(path):
         for p in problems:
             print("   FAIL " + p)
         return 1
-    print("   PASS structure, identifiers, markers, externs, globals, order-error handling")
+    print("   PASS structure, identifiers, MQL5-only API, builtin arity, "
+          "struct members, externs, globals, order-error handling")
     return 0
 
 

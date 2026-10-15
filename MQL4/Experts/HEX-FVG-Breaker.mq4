@@ -101,7 +101,7 @@ struct TradeRec
 ZoneRec   g_zones[];
 TradeRec  g_rec[8];
 int       g_zoneMax   = 120;
-int       g_barTime   = 0;      // Time[0] of last processed bar
+datetime  g_barTime   = 0;      // Time[0] of last processed bar
 int       g_tickCount = 0;
 double    g_ddPeak    = 0.0;
 double    g_dayStart  = 0.0;
@@ -318,9 +318,12 @@ double UsdPerPointPerLot()
    return(v * Point / ts);
   }
 
+// Size of one lot in the symbol's base units. MQL4 exposes this as MODE_LOTSIZE;
+// MODE_CONTRACTSIZE is the MQL5 name and does not compile here (verified against
+// MetaEditor build 1491).
 double ContractSize()
   {
-   return(MarketInfo(Symbol(), MODE_CONTRACTSIZE));
+   return(MarketInfo(Symbol(), MODE_LOTSIZE));
   }
 
 double SpreadPoints()
@@ -629,7 +632,9 @@ void SnapshotEquity()
 //+------------------------------------------------------------------+
 double AtrVal(int tf, int shift)
   {
-   return(iATR(Symbol(), tf, 14, PRICE_CLOSE, shift));
+   // MQL4's iATR takes (symbol, period, ma_period, shift). The applied-price
+   // argument that MQL5 has in slot 4 does not exist here; ATR is close-based.
+   return(iATR(Symbol(), tf, 14, shift));
   }
 
 double BodySize(int shift)   { return(MathAbs(Close[shift] - Open[shift])); }
@@ -1120,7 +1125,7 @@ void RecWrite(int i, string exitReason, double profit,
    int holdBars   = (int)((tEnd - g_rec[i].tOpen) / (Period() * 60));
    CsvAppend("trades.csv",
      "ticket,login,symbol,tf,type,signal_type,confluence,open_time,close_time,entry,sl,tp,exit_price,lots,stop_pts,spread_pts_at_entry,pnl_net,r_multiple,risk_usd,mae_pts,mfe_pts,mfe_r,hold_bars,session,exit_reason,balance_after,atr_at_entry",
-     IntegerToString(g_rec[i].ticket) + "," + IntegerToString(AccountLogin()) + "," + Symbol() + "," +
+     IntegerToString(g_rec[i].ticket) + "," + IntegerToString(AccountNumber()) + "," + Symbol() + "," +
      IntegerToString(Period()) + "," + DirName(g_rec[i].dir) + "," +
      g_rec[i].sigType + "," + IntegerToString(g_rec[i].confluence) + "," +
      CsvTime(g_rec[i].tOpen) + "," + CsvTime(tEnd) + "," +
@@ -1263,12 +1268,17 @@ int PushHttp(string url, string contentType, string body, bool isGet, string &er
      }
 
    uchar  result[];
-   // MQL4 differs from MQL5 here: result_headers is a single string, not an
-   // array, and the cookie slot sits where MQL5 has user_agent/referer. Do not
-   // paste an MQL5 example onto this line.
+   // Build 1491 resolves WebRequest by arity, and the arity differs from MQL5.
+   // MQL4 takes (verb, url, headers, cookie, timeout, data, data_size,
+   // result[], result_headers_string) - nine arguments, with data_size between
+   // the payload and the result buffer. Passing MQL5's eight arguments here is a
+   // hard compile error ("no one of the overloads can be applied"), which is how
+   // this file failed to compile until build 1491 was run over it. result_headers
+   // is a plain string, not an array.
    string resHeaders;
    string verb = isGet ? "GET" : "POST";
-   int rc = WebRequest(verb, url, hdrs, "", timeout, post, result, resHeaders);
+   int    postDataSize = ArraySize(post);
+   int rc = WebRequest(verb, url, hdrs, "", timeout, post, postDataSize, result, resHeaders);
    if(rc < 0)
       err = "webrequest failed, err " + IntegerToString(GetLastError()) +
             " (is the address allowed in Tools > Options > Expert Advisors?)";
@@ -1518,10 +1528,23 @@ double NormalizeLots(double lots)
   }
 
 // Margin the position would consume, in account currency.
+// MQL4 has no OrderCalcMargin - that is an MQL5 function, and calling it here
+// was one of the reasons the file did not compile. The MQL4 route is
+// AccountFreeMarginCheck: it reports the free margin that would remain if the
+// position were opened, so the margin it consumes is simply the difference.
+// When funds are insufficient it returns the shortfall as a negative number,
+// and the same subtraction still yields the margin required, so no error-state
+// sniffing is needed. The figure already reflects the broker's leverage,
+// contract size and any positions already open.
 double MarginNeeded(double lots, int opType, double price)
   {
-   double m = 0.0;
-   if(!OrderCalcMargin(opType, Symbol(), lots, price, m)) return(1e10);
+   double m = AccountFreeMargin() - AccountFreeMarginCheck(Symbol(), opType, lots);
+   if(m <= 0.0)
+     {
+      double perLot = MarketInfo(Symbol(), MODE_MARGINREQUIRED);
+      if(perLot > 0.0) m = perLot * lots;
+     }
+   if(m <= 0.0) return(1e10);
    return(m);
   }
 
@@ -1653,8 +1676,6 @@ void SendEntry(int dir, string sigLabel, int confl, bool pending, double entryPr
       g_rec[s].tp         = OrderTakeProfit();
       g_rec[s].riskDist   = MathAbs(OrderOpenPrice() - OrderStopLoss()) / Point;
       g_rec[s].lots       = OrderLots();
-      g_rec[s].lots0      = OrderLots();
-      g_rec[s].pnlBanked  = 0.0;
       g_rec[s].atr        = g_atr;
       g_rec[s].spreadPts  = SpreadPoints();
       g_rec[s].mae        = 0.0;
