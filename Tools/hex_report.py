@@ -907,6 +907,52 @@ def selftest(tmp):
     return rows
 
 
+def _path_checks():
+    """Where the EA writes and where this tool looks must be the same place.
+
+    Regression cover: the candidate list used to omit the Files/ segment that
+    MQL4's FileOpen resolves relative paths against, so only the slow `find`
+    fallback could ever locate a real log folder. The fallback is disabled here
+    on purpose, otherwise it papers over a wrong candidate list.
+    """
+    import shutil
+    import tempfile
+
+    files_suffix = os.path.join("MQL4", "Files", "Common", "HEX-Logs")
+    cds = candidate_dirs()
+    out = [
+        ("log suffix is Files-relative", files_suffix in LOG_SUFFIXES),
+        ("candidates cover the Files layout",
+         any(d.endswith(files_suffix) for d in cds)),
+        ("candidates contain no duplicates", len(cds) == len(set(cds))),
+    ]
+
+    fakehome = tempfile.mkdtemp(prefix="hex_home_")
+    leaf = os.path.join(fakehome, "Library/Application Support",
+                        "net.metaquotes.wine.metatrader4", "drive_c",
+                        "Program Files", "MetaTrader 4",
+                        *files_suffix.split(os.sep))
+    old_run, old_home = subprocess.run, os.environ.get("HOME")
+    try:
+        os.makedirs(leaf)
+        with open(os.path.join(leaf, "notify.csv"), "w"):
+            pass
+        os.environ["HOME"] = fakehome
+
+        def no_find(*a, **kw):
+            raise FileNotFoundError("find fallback disabled for this check")
+
+        subprocess.run = no_find
+        out.append(("locate_logs resolves the macOS wrapper layout",
+                    locate_logs(verbose=False) == leaf))
+    finally:
+        subprocess.run = old_run
+        if old_home is not None:
+            os.environ["HOME"] = old_home
+        shutil.rmtree(fakehome, ignore_errors=True)
+    return out
+
+
 def run_selftest():
     import shutil
     import tempfile
@@ -949,6 +995,7 @@ def run_selftest():
         checks.append(("slice table rendered", "BREAKER" in text and "win%" in text))
         checks.append(("spread cost computed", rep["spread"]["spread_cost_r"] > 0))
         checks.append(("mfe efficiency computed", rep["mfe_efficiency"]["trades_with_mfe"] > 0))
+        checks.extend(_path_checks())
         print(text)
         print("=" * 78)
         bad = [name for name, ok in checks if not ok]
