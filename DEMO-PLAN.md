@@ -7,6 +7,9 @@ writing it, it is refusing to kid yourself about whether it works.
 Read this before you change any setting, and change **one** setting per test
 window. If you change three things at once you have learned nothing.
 
+If the EA is not yet compiled, attached and logging, start with **`FIRST-RUN.md`**
+— the install-to-first-notification checklist. This file begins where that ends.
+
 ---
 
 ## 1. What you are actually testing

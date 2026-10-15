@@ -55,6 +55,20 @@ In the settings window, go to the "Common" tab. Check the boxes for "Allow Algo 
 
 The strategy is now active. It will monitor the market and execute trades automatically according to its rules. You can see its status in the top-right corner of the chart (it should show a smiley face or the EA name).
 
+### Want It Verified Instead Of Just Running?
+
+Two documents go further than the eight steps above:
+
+- **`FIRST-RUN.md`** — a checklist from an empty computer to "the EA is live on a
+  demo account and sending me notifications", with something to check after every
+  step. It covers compiling in MetaEditor, allowing the notification address, and
+  exactly where the log files land.
+- **`DEMO-PLAN.md`** — a 30-day protocol for deciding whether the strategy
+  deserves real money, and how to read the log files the EA produces.
+
+Both assume a **MetaTrader 4** installation. MetaTrader 5 cannot run this
+strategy: it is written in MQL4, a different language.
+
 ## 📊 Recommended Settings
 
 For best results, use these initial settings:
