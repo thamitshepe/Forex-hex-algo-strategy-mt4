@@ -3,7 +3,8 @@
 HEX report - turns the EA's CSV logs into a decision, not just numbers.
 
 The EA (MQL4/Experts/HEX-FVG-Breaker.mq4) writes to
-<MT4 Data Folder>/MQL4/Common/HEX-Logs/ :
+<MT4 Data Folder>/MQL4/Files/Common/HEX-Logs/ (MQL4 FileOpen resolves
+relative paths inside the Files sandbox):
 
     trades.csv      one row per closed position (R multiple, MAE/MFE, session, exit reason)
     signals.csv     one row per signal, taken OR simulated (dry run / blocked)
@@ -64,20 +65,78 @@ def txt(row, key, default="?"):
 
 # ---------------------------------------------------------------- loading
 
+# Relative path of the log folder inside an MT4 data folder. FileOpen() in
+# MQL4 resolves relative names inside <data>/MQL4/Files, so "Common\\HEX-Logs"
+# from the EA is <data>/MQL4/Files/Common/HEX-Logs on disk. The bare
+# MQL4/Common/HEX-Logs form is kept too: it is what a manual copy of the
+# folder looks like, and what a build that resolves outside Files/ would write.
+LOG_SUFFIXES = (
+    os.path.join("MQL4", "Files", "Common", "HEX-Logs"),
+    os.path.join("MQL4", "Files", "HEX-Logs"),  # UseCommonFolder = false
+    os.path.join("MQL4", "Common", "HEX-Logs"),
+)
+
+
 def candidate_dirs():
     """Where MT4's Common folder tends to live on macOS/Linux/Windows."""
     home = os.path.expanduser("~")
-    out = [
-        os.path.join(home, "Library/Application Support/CrossOver/Bottles/MT4/drive_c/users/crossover/Application Data/MetaTrader Ltd/MQL4/Common/HEX-Logs"),
-        os.path.join(home, "Library/Application Support/CrossOver/Bottles/Default/drive_c/users/crossover/Application Data/MetaTrader Ltd/MQL4/Common/HEX-Logs"),
-        os.path.join(home, ".wine/drive_c/users/$USER/AppData/Roaming/MetaTrader Ltd/MQL4/Common/HEX-Logs".replace("$USER", os.path.basename(home))),
-        os.path.join(home, "Library/Application Support/PTD/MetaTrader 4/drive_c/users/steamuser/AppData/Roaming/MetaTrader Ltd/MQL4/Common/HEX-Logs"),
-        os.environ.get("HOME_MT4", ""),
+    user = os.path.basename(home)
+
+    # Every plausible MT4 data folder. The install path differs per installer:
+    # MetaQuotes' own Mac wrapper, CrossOver bottles, plain Wine, PlayOnMac and
+    # Parallels Tool Download each nest the data folder somewhere else.
+    roots = [
+        # MetaQuotes official macOS package (MetaTrader 4.app -> wine wrapper)
+        os.path.join(home, "Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files/MetaTrader 4"),
+        os.path.join(home, "Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/Program Files (x86)/MetaTrader 4"),
+        # CrossOver
+        os.path.join(home, "Library/Application Support/CrossOver/Bottles/MT4/drive_c/Program Files/MetaTrader 4"),
+        os.path.join(home, "Library/Application Support/CrossOver/Bottles/Default/drive_c/Program Files/MetaTrader 4"),
+        # plain Wine
+        os.path.join(home, ".wine/drive_c/Program Files/MetaTrader 4"),
+        # PlayOnMac / PlayOnLinux
+        os.path.join(home, "PlayOnMac/Wine/Programs/MetaTrader 4"),
+        # Parallels Tool Download (PTD)
+        os.path.join(home, "Library/Application Support/PTD/MetaTrader 4/drive_c/users/steamuser/AppData/Roaming/MetaTrader 4"),
+        # Windows, when run there
+        os.environ.get("PROGRAMFILES", ""),
+        os.path.join(os.environ.get("APPDATA", ""), "MetaTrader Ltd") if os.environ.get("APPDATA") else "",
     ]
-    win = os.environ.get("APPDATA")
-    if win:
-        out.append(os.path.join(win, "MetaTrader Ltd", "MQL4", "Common", "HEX-Logs"))
-    return [d for d in out if d]
+
+    out = []
+    for root in roots:
+        if not root:
+            continue
+        for suffix in LOG_SUFFIXES:
+            out.append(os.path.join(root, suffix))
+
+    # Wine layouts that address the data folder through the fake user profile
+    # instead of Program Files.
+    wine_users = [
+        os.path.join(home, "Library/Application Support/net.metaquotes.wine.metatrader4/drive_c/users"),
+        os.path.join(home, "Library/Application Support/CrossOver/Bottles/MT4/drive_c/users"),
+        os.path.join(home, ".wine/drive_c/users"),
+    ]
+    appdata_names = ("Application Data", "AppData/Roaming")
+    for wuser in wine_users:
+        for who in (user, "crossover", "steamuser", "user"):
+            for appdata in appdata_names:
+                for suffix in LOG_SUFFIXES:
+                    out.append(os.path.join(wuser, who, appdata,
+                                            "MetaTrader Ltd", *suffix.split(os.sep)))
+                    out.append(os.path.join(wuser, who, appdata,
+                                            "MetaTrader 4", *suffix.split(os.sep)))
+
+    env_home = os.environ.get("HOME_MT4", "")
+    if env_home:
+        out.append(env_home)
+
+    seen, uniq = set(), []
+    for d in out:
+        if d and d not in seen:
+            seen.add(d)
+            uniq.append(d)
+    return uniq
 
 
 def locate_logs(cli_dir=None, verbose=True):

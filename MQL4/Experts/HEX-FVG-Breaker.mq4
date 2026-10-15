@@ -239,7 +239,7 @@ extern bool    FlattenOnKill       = true;
 
 extern string  S11_Report          = "=== Reporting / visual ===";
 extern bool    WriteCsvLogs        = true;
-extern bool    UseCommonFolder     = true;             // true = MQL4/Common/HEX-Logs (macOS readable)
+extern bool    UseCommonFolder     = true;             // true = <data>/MQL4/Files/Common/HEX-Logs, false = <data>/MQL4/Files/HEX-Logs
 extern string  LogFolderName       = "HEX-Logs";
 extern int     LogEveryNTicks      = 300;             // equity snapshot cadence
 extern bool    ShowDashboard       = true;
