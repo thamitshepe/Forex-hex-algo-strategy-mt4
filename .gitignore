@@ -1,0 +1,14 @@
+# MT4 runtime artifacts and generated reports
+logs/
+*.ex4
+*.ex5
+*.imp
+*.htm
+
+# Python
+__pycache__/
+*.pyc
+
+# OS / editor noise
+.DS_Store
+*.swp
