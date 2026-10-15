@@ -1,0 +1,109 @@
+;+------------------------------------------------------------------
+;| HEX-FVG-Breaker - shadow mode (logs everything, trades nothing)
+;+------------------------------------------------------------------
+; Run this to see what the EA would do without risking the demo balance.
+; Every signal, zone and rejection still goes to the CSV logs, so after one
+; or two weeks you can run Tools/hex_report.py and judge the logic before
+; any money is exposed.
+;
+; DryRun=1 short-circuits SendEntry(): the setup is computed, drawn and
+; logged, then discarded. Those signals appear with mode=DRY in signals.csv,
+; which the report counts separately as shadow signals.
+;
+; differs from the EA default:
+;   DryRun: 0  ->  1
+;   MaxSignalsPerDay: 6  ->  10
+;-------------------------------------------------------------------
+MagicNumber=20261015
+TradeSymbol=
+MaxSpreadDollars=0.45
+MaxSlippagePoints=30.0
+MaxOpenTrades=1
+DryRun=1
+MaxSignalsPerDay=10
+RequireNewBar=1
+CloseOnWeekend=1
+StopTradingHourUTC=21
+StartTradingHourUTC=1
+TrendTimeframe=60
+TrendMode=2
+FastEMAPeriod=21
+SlowEMAPeriod=50
+TrendSwingLookback=5
+MinTrendSlopeDollars=0.15
+TrendSlopeBars=6
+MaxDistFromEmaDollars=9.00
+SwingLookback=3
+MinSwingRangeDollars=1.20
+MinDisplacementPct=55.0
+MinDisplacementAtr=1.10
+UseFVG=1
+FvgMinSizeAtrPct=55
+FvgMaxSizeAtrPct=420
+MitigatePct=50.0
+EntryZonePct=62.0
+MaxZoneAgeBars=180
+RequireFVGConfluence=1
+ConfluenceLookback=60
+UseBreaker=1
+BreakerMinAtr=0.70
+BreakerMaxAtr=6.0
+UseMitigation=1
+MitigConsolBars=4
+MitigConsolAtrMax=0.65
+MitigBreakAtr=1.20
+EntryModel=0
+MaxEntryDistanceDollars=7.00
+MinRejectionWickPct=30.0
+MinTriggerRangeAtr=0.35
+MinTriggerClosePct=45.0
+MaxBarsSinceTouch=6
+AllowMarketEntry=1
+LimitExpiryBars=4
+RiskPercent=0.0
+FixedLot=0.01
+MaxLot=0.02
+MaxMarginUsagePct=50.0
+StopBufferAtrPct=25.0
+MinStopDollars=1.20
+MaxStopDollars=14.00
+MaxRiskAmount=0.0
+ExitMode=0
+Tp1RR=1.0
+Tp1Percent=50.0
+Tp2RR=2.5
+BreakEvenTriggerRR=0.80
+BreakEvenOffsetDollars=0.05
+UseAtrTrail=1
+TrailAtrMult=2.20
+TrailStartRR=1.0
+MinHoldBars=2
+MaxDailyLossPct=5.0
+MaxTotalDrawdownPct=15.0
+MinFreeMarginUsd=40.0
+FlattenOnKill=1
+WriteCsvLogs=1
+UseCommonFolder=1
+LogFolderName=HEX-Logs
+LogEveryNTicks=300
+ShowDashboard=1
+DrawZones=1
+ZoneMaxDraw=12
+Prefix=HEX
+ClrBuyZone=16748574
+ClrSellZone=4678655
+ClrBreaker=13850042
+ClrMitigation=755384
+NotifyEnabled=1
+NotifyUrl=
+NotifyFormat=0
+NotifyTitle=HEX XAUUSD
+NotifyToken=
+NotifyTimeoutMs=3000
+NotifyOnSignal=1
+NotifyOnClose=1
+NotifyOnTp1=0
+NotifyOnKill=1
+NotifyMinMinutes=2
+NotifyMaxPerHour=30
+NotifyTestOnInit=1
