@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+Generate MT4 .set presets from the extern block of HEX-FVG-Breaker.mq4.
+
+Hand-writing .set files is how you end up with a preset that silently drops a
+parameter, so every preset is derived from the EA's own defaults and then
+patched with the values that preset is about.
+
+    python3 Tools/make_presets.py            # write presets to MQL4/Presets/
+    python3 Tools/make_presets.py --check    # verify presets still cover real inputs
+
+MT4 .set notes: booleans are 1/0, enums are their integer value, colors are
+BGR integers (value = R + G*256 + B*65536), strings are written bare.
+"""
+import os
+import re
+import sys
+
+EA = os.path.join("MQL4", "Experts", "HEX-FVG-Breaker.mq4")
+OUT = os.path.join("MQL4", "Presets")
+
+# CSS/X11 triples for the color inputs, converted to MT4's BGR integer form.
+COLORS = {
+    "clrDodgerBlue": (30, 144, 255),
+    "clrTomato": (255, 99, 71),
+    "clrMediumOrchid": (186, 85, 211),
+    "clrDarkGoldenrod": (184, 134, 11),
+    "clrRed": (255, 0, 0),
+    "clrGreen": (0, 255, 0),
+    "clrBlue": (0, 0, 255),
+    "clrGold": (255, 215, 0),
+    "clrGray": (128, 128, 128),
+    "clrSilver": (192, 192, 192),
+    "clrWhite": (255, 255, 255),
+    "clrBlack": (0, 0, 0),
+    "clrYellow": (255, 255, 0),
+}
+
+ENUMS = {
+    "ENUM_TREND_MODE": {"TREND_EMA": 0, "TREND_STRUCTURE": 1, "TREND_BOTH": 2},
+    "ENUM_EXIT_MODE": {"EXIT_FIXED_RR": 0, "EXIT_ZONE_RR": 1, "EXIT_TRAIL_ONLY": 2},
+    "ENUM_ENTRY_MODEL": {"ENTRY_LIMIT": 0, "ENTRY_TRIGGER": 1},
+    "ENUM_NOTIFY_FORMAT": {"NOTIFY_FORM": 0, "NOTIFY_PLAIN": 1, "NOTIFY_JSON": 2,
+                           "NOTIFY_GET": 3},
+}
+
+EXTERN_RE = re.compile(r'^extern\s+(?P<type>\w+)\s+(?P<name>\w+)\s*=\s*(?P<val>.*?);', re.M)
+
+
+def parse_inputs(path):
+    """Return [(type, name, value_literal)] in declaration order."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        src = fh.read()
+    out = []
+    for m in EXTERN_RE.finditer(src):
+        val = re.sub(r'//.*$', '', m.group("val").strip()).strip()
+        out.append((m.group("type"), m.group("name"), val))
+    return out
+
+
+def encode(mql_type, value):
+    """Turn an MQL4 literal into what MT4 writes into a .set file."""
+    value = value.strip()
+    if mql_type == "bool":
+        return "1" if value.lower().startswith("true") else "0"
+    if value.startswith("clr"):
+        if value in COLORS:
+            r, g, b = COLORS[value]
+            return str(r + g * 256 + b * 65536)
+        return value
+    if re.fullmatch(r'[A-Z_][A-Z0-9_]*', value):        # bare enum constant
+        for table in ENUMS.values():
+            if value in table:
+                return str(table[value])
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        return value[1:-1]                              # MT4 stores strings bare
+    return value
+
+
+def same_value(a, b):
+    """Compare two .set literals as MT4 would read them (0.0 and 0 are equal)."""
+    if a == b:
+        return True
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def is_section_header(mql_type, name):
+    """The EA groups inputs with string inputs named S0_Gen, S1_Exec, ..."""
+    return mql_type == "string" and re.fullmatch(r'S\d+_\w+', name) is not None
+
+
+def preset(inputs, name, title, notes, overrides):
+    """Full-input .set text: every parameter, defaults patched by `overrides`.
+
+    MT4's .set reader is unforgiving about trailing content on a value line, so
+    the header is pure comments and the body is strictly name=value."""
+    seen = {n for _, n, _ in inputs}
+    unknown = sorted(k for k in overrides if k not in seen)
+    if unknown:
+        raise SystemExit(f"{name}: override names not found in the EA: {unknown}")
+
+    lines = [";+" + "-" * 66, f";| {title}", ";+" + "-" * 66]
+    lines += ["; " + n if n else ";" for n in notes]
+    lines.append(";")
+    diffs = [(mt, pn, encode(mt, v), overrides[pn])
+             for mt, pn, v in inputs
+             if pn in overrides and not same_value(encode(mt, v), overrides[pn])]
+    if diffs:
+        lines.append("; differs from the EA default:")
+        for mt, pn, old, new in diffs:
+            lines.append(f";   {pn}: {old}  ->  {new}")
+    lines.append(";" + "-" * 67)
+    for mtype, pname, val in inputs:
+        if is_section_header(mtype, pname):
+            continue
+        lines.append(f"{pname}={overrides.get(pname, encode(mtype, val))}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- presets
+# (id, title, notes, overrides)
+
+PRESETS = [
+    ("100usd-demo",
+     "HEX-FVG-Breaker - $100 live-size demo (START HERE)",
+     ["Attach to XAUUSD M15. Recommended first preset: 0.01 lot, one position at",
+      "a time, a $2 hard risk cap, and kill switches that stop the EA before a bad",
+      "week can hurt.",
+      "",
+      "Why the numbers are what they are:",
+      "On a standard account 0.01 lot of gold is about $1 per $1/oz of movement.",
+      "A typical 2 $/oz stop therefore risks roughly $2 = 2% of a $100 account.",
+      "MinFreeMarginUsd 40 is the real binding constraint at 1:100 leverage - the",
+      "margin guard, not MaxLot, is what stops a second position opening.",
+      "MaxSpreadDollars 0.45 keeps the EA out of the roll-over hours when gold",
+      "spreads blow out and eat the entire edge.",
+      "RiskPercent 0 means FixedLot wins. Set RiskPercent 1.0 to size by equity."],
+     {"DryRun": "0", "FixedLot": "0.01", "MaxLot": "0.02", "RiskPercent": "0",
+      "MaxRiskAmount": "2.0", "MaxOpenTrades": "1", "MaxSignalsPerDay": "6",
+      "MaxSpreadDollars": "0.45", "MinFreeMarginUsd": "40", "MaxMarginUsagePct": "50",
+      "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15", "FlattenOnKill": "1"}),
+
+    ("100usd-shadow",
+     "HEX-FVG-Breaker - shadow mode (logs everything, trades nothing)",
+     ["Run this to see what the EA would do without risking the demo balance.",
+      "Every signal, zone and rejection still goes to the CSV logs, so after one",
+      "or two weeks you can run Tools/hex_report.py and judge the logic before",
+      "any money is exposed.",
+      "",
+      "DryRun=1 short-circuits SendEntry(): the setup is computed, drawn and",
+      "logged, then discarded. Those signals appear with mode=DRY in signals.csv,",
+      "which the report counts separately as shadow signals."],
+     {"DryRun": "1", "FixedLot": "0.01", "MaxOpenTrades": "1", "MaxSignalsPerDay": "10",
+      "MaxSpreadDollars": "0.45", "WriteCsvLogs": "1", "UseCommonFolder": "1"}),
+
+    ("london-ny-window",
+     "HEX-FVG-Breaker - tight session window (spread-first variant)",
+     ["Same risk settings as 100usd-demo but only trades 07:00-20:00 server time,",
+      "which brackets the London and New York sessions on a GMT+2/+3 broker.",
+      "",
+      "Why: on a $100 account the spread is the biggest opponent. Gold spreads are",
+      "tightest during London/NY overlap and widen badly in the Asian session and",
+      "at the roll-over. If the report says most of your setups are being rejected",
+      "on spread, this is the preset to try.",
+      "",
+      "Set StartTradingHourUTC/StopTradingHourUTC to YOUR broker's server clock.",
+      "Check Tools > Servers time in MT4, or read the server_time column that",
+      "equity.csv writes, then adjust both numbers accordingly."],
+     {"DryRun": "0", "FixedLot": "0.01", "MaxLot": "0.02", "RiskPercent": "0",
+      "MaxRiskAmount": "2.0", "MaxOpenTrades": "1", "MaxSpreadDollars": "0.40",
+      "MinFreeMarginUsd": "40", "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15",
+      "StartTradingHourUTC": "7", "StopTradingHourUTC": "20", "MaxSignalsPerDay": "4"}),
+
+    ("cent-account",
+     "HEX-FVG-Breaker - cent account (real money model, tiny stakes)",
+     ["For a cent account funded with $100 (displayed as 10,000 US cents). There",
+      "0.01 lot is roughly 1 cent per 0.01 move, so the same trade risks a couple",
+      "of cents of displayed equity. This is the honest way to test the money model",
+      "with real order execution.",
+      "",
+      "CHECK YOUR BROKER BEFORE TRUSTING THESE NUMBERS:",
+      "1. Contract size - a cent-account XAUUSD lot is often 10x or 100x smaller",
+      "   than a standard one. Verify what 0.01 lot actually costs you in cents.",
+      "2. MaxRiskAmount is in ACCOUNT CURRENCY: on a cent account 300 = $3.00 real.",
+      "3. MinFreeMarginUsd is also account currency, hence the larger number.",
+      "If any of those three are wrong, fix them before funding anything."],
+     {"DryRun": "0", "FixedLot": "0.01", "MaxLot": "1.0", "RiskPercent": "1.0",
+      "MaxRiskAmount": "300", "MaxOpenTrades": "1", "MaxSignalsPerDay": "8",
+      "MaxSpreadDollars": "0.45", "MinFreeMarginUsd": "500", "MaxMarginUsagePct": "60",
+      "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15", "FlattenOnKill": "1"}),
+
+    ("structure-only",
+     "HEX-FVG-Breaker - trend from structure only (A/B test)",
+     ["Identical to 100usd-demo except for the trend filter. TrendMode=1",
+      "(TREND_STRUCTURE) drops the EMA stack and reads direction from H1 market",
+      "structure (HH/HL versus LH/LL) alone.",
+      "",
+      "Use it as a later test window in DEMO-PLAN.md: run 100usd-demo for a",
+      "stretch, then this, and compare expectancy per trade in the report. One",
+      "change at a time, or the comparison means nothing."],
+     {"DryRun": "0", "FixedLot": "0.01", "MaxLot": "0.02", "RiskPercent": "0",
+      "MaxRiskAmount": "2.0", "MaxOpenTrades": "1", "MaxSpreadDollars": "0.45",
+      "MinFreeMarginUsd": "40", "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15",
+      "TrendMode": "1"}),
+
+    ("trigger-entry",
+     "HEX-FVG-Breaker - candle-trigger entry instead of limit (A/B test)",
+     ["Same as 100usd-demo except EntryModel=1 (ENTRY_TRIGGER): enter at market on",
+      "a rejection candle inside the zone instead of resting a limit order deep",
+      "inside it.",
+      "",
+      "Trade-off to watch in the report: limit entries get a better price but many",
+      "never fill (fewer trades, better R:R); trigger entries always fill at a",
+      "worse price. Which wins on a $100 account is a data question, not an opinion",
+      "question. Compare the taken-vs-shadow signal counts too."],
+     {"DryRun": "0", "FixedLot": "0.01", "MaxLot": "0.02", "RiskPercent": "0",
+      "MaxRiskAmount": "2.0", "MaxOpenTrades": "1", "MaxSpreadDollars": "0.45",
+      "MinFreeMarginUsd": "40", "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15",
+      "EntryModel": "1", "AllowMarketEntry": "1"}),
+]
+
+
+def main(argv):
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(root)
+    if not os.path.isfile(EA):
+        raise SystemExit(f"EA not found at {EA} (run this from the repo root)")
+
+    inputs = parse_inputs(EA)
+    names = [n for _, n, _ in inputs]
+    print(f"{EA}: {len(names)} extern inputs parsed")
+
+    if "--check" in argv:
+        bad = [f"{name}: {k}" for name, _, _, over in PRESETS for k in over if k not in names]
+        if bad:
+            print("STALE PRESET OVERRIDES:\n   " + "\n   ".join(bad))
+            return 1
+        print(f"OK - {len(PRESETS)} presets, every override matches a real input")
+        return 0
+
+    os.makedirs(OUT, exist_ok=True)
+    for name, title, notes, over in PRESETS:
+        path = os.path.join(OUT, name + ".set")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(preset(inputs, name, title, notes, over))
+        body = sum(1 for t, n, _ in inputs if not is_section_header(t, n))
+        print(f"  wrote {path}  ({body} inputs, {len(over)} overridden)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
