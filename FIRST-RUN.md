@@ -25,10 +25,21 @@ MT4 install is a hard prerequisite.
       `metatrader4` = good. Only `metatrader5` = you need MT4 before anything
       else in this file applies.
 
-- [ ] Install MT4 from your **broker's** MT4 download link (not MetaQuotes'
-      generic MT5 installer). Any broker with XAUUSD and algo trading allowed.
-      On macOS the broker's Windows installer runs through CrossOver /
-      Parallels / Whisky; on Windows it is a plain setup.exe.
+- [ ] Install MT4. On **macOS**, MetaQuotes ships a native MT4 package
+      (https://www.metatrader4.com/en/terminal — the `.pkg` download). It bundles
+      its own Wine, drops `MetaTrader 4.app` in `/Applications`, and creates the
+      `net.metaquotes.wine.metatrader4` prefix the first time you launch it — no
+      CrossOver, Parallels or Whisky needed. That native layout is what
+      `Tools/mt4_compile.sh` in this repo expects, so prefer it here. A broker's
+      own MT4 build is fine too if it is MQL4, but via the broker's installer it
+      runs through CrossOver/Parallels and its data folder lives elsewhere.
+      On Windows it is a plain `setup.exe`.
+
+      > The macOS `.pkg` extracts a payload rather than a signed installer, so if
+      > double-clicking it is blocked, the app can be placed by hand: mount the
+      > `.pkg`'s `Payload`, then `ditto` `MetaTrader 4.app` into `/Applications`
+      > (no `sudo` needed when `/Applications` is admin-writable), and launch it
+      > once to build the Wine prefix.
 
 - [ ] Open MT4 once, log into a **demo** account on the broker, and let it
       finish downloading its server list.
@@ -56,41 +67,52 @@ MT4 install is a hard prerequisite.
 
 ## 2. Compile in MetaEditor
 
-- [ ] In MT4: right-click `HEX-FVG-Breaker` → **Modify**, or press **F4** with
-      the file selected. MetaEditor opens.
-- [ ] Press **F7** (Compile).
+There is a real MetaEditor on this machine, so the compile is verifiable from the
+command line without opening the GUI. Pick one path; both produce the same
+`.ex4`.
 
-Expected: `0 errors, 0 warnings`, and `HEX-FVG-Breaker.ex4` appears next to the
-`.mq4`.
+**Headless (preferred):** from the repo root,
 
-### If the only error is on the `WebRequest` line
+```bash
+Tools/mt4_compile.sh
+```
 
-`int rc = WebRequest(verb, url, hdrs, "", timeout, post, result, resHeaders);`
-(MQL4/Experts/HEX-FVG-Breaker.mq4, in `PushHttp()`). This is the one line in the
-EA that no offline check can verify, because `WebRequest` does not exist in the
-strategy tester and its argument list has moved between builds. What is written
-is the documented MQL4 form — 8 arguments, the cookie slot fourth, and
-`result_headers` as a single string rather than MQL5's string array — so it
-should compile as-is. It is quarantined inside `PushHttp()`: nothing else depends
-on its shape. If the compiler rejects it anyway, try these in order and stop at
-the first that compiles:
+It runs the `metaeditor.exe` bundled inside `MetaTrader 4.app` against
+`MQL4/Experts/HEX-FVG-Breaker.mq4`, prints the compiler log, copies the `.ex4`
+next to the source and into the MT4 data folder, and exits non-zero if there are
+errors. Requires MT4 to have been launched once (that creates the Wine prefix it
+uses).
 
-1. The 7-argument form (drop the cookie slot):
-   ```mql4
-   int rc = WebRequest(verb, url, hdrs, timeout, post, result, resHeaders);
-   ```
-2. Keep 8 arguments but move `cookie` to the end:
-   ```mql4
-   int rc = WebRequest(verb, url, hdrs, timeout, post, result, resHeaders, "");
-   ```
-3. If the error says `result_headers` is not a `string` but an array, change
-   `string resHeaders;` to `string resHeaders[];` in the same function.
+**In the GUI:** right-click `HEX-FVG-Breaker` in MT4 → **Modify**, or press **F4**
+with the file selected, then press **F7** (Compile) in MetaEditor.
 
-Do not touch anything else, and do not accept an "auto-fix" that converts the
-file to MQL5. The exact signature printed by your MetaEditor's error message is
-the authority; the comment block above `PushHttp()` says the same thing.
+Expected either way: `0 errors, 0 warnings`, and `HEX-FVG-Breaker.ex4` appears
+next to the `.mq4`.
 
-**Proof:** `0 errors` in the MetaEditor log tab, `.ex4` file exists.
+### The `WebRequest` line (already fixed — do not "fix" it back)
+
+`PushHttp()` in `MQL4/Experts/HEX-FVG-Breaker.mq4` ends with:
+
+```mql4
+int rc = WebRequest(verb, url, hdrs, "", timeout, post, postDataSize, result, resHeaders);
+```
+
+That is the **nine-argument MQL4 form**: `data_size` (here `postDataSize`) sits
+between the payload and the result buffer, and `result_headers` is a plain
+`string`, not MQL5's string array. It compiles clean on build 1491.
+
+The earlier version of this file used MQL5's eight arguments (no `data_size`),
+which is a hard compile error in MQL4 — `"no one of the overloads can be
+applied"`. This whole class of bug (MQL5 API that MQL4 lacks) is now caught
+offline: `Tools/mt4_compile.sh` is authoritative, and `Tools/lint_mql4.py` blocks
+the MQL5-only names and checks the arity of calls like `WebRequest` and `iATR`.
+
+If your MetaEditor ever *does* reject this line, the signature in its error
+message is the authority — but build 1491 accepts the form above, so treat any
+regression here as an environment difference, not something to pre-emptively
+rewrite. Do not accept an "auto-fix" that converts the file to MQL5.
+
+**Proof:** `0 errors, 0 warnings` in the compiler output, `.ex4` file exists.
 
 ---
 
