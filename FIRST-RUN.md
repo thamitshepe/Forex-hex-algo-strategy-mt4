@@ -142,13 +142,22 @@ per-terminal setting and it is not remembered between installs.
 
 ## 4. Attach, load the preset
 
-- [ ] Open an **XAUUSD M15** chart. One chart only — two charts run two
+> Pre-seeded on this machine (MT4 closed when written, backed up first): the
+> Default profile already opens an **XAUUSD M15** chart, and every preset under
+> `MQL4/Presets/` has `NotifyUrl` filled with `https://ntfy.sh/hex-xauusd-e7b863cd`.
+> So skip the chart-creation and the NotifyUrl typing unless you want a different
+> topic. Steps below still apply as written.
+
+- [ ] Open an **XAUUSD M15** chart (already seeded — just confirm the tab reads
+      XAUUSD and the period is M15). One chart only — two charts run two
       independent instances that do not know about each other.
-- [ ] Drag `HEX-FVG-Breaker` from the Navigator onto the chart.
+- [ ] Drag `HEX-FVG-Breaker` from the Navigator onto the chart (or double-click
+      it while the chart is the active window).
 - [ ] **Common** tab: tick **Allow Algo Trading**.
 - [ ] **Inputs** tab → **Load** → `100usd-demo.set`.
-- [ ] Still on Inputs, set `NotifyUrl` to `https://ntfy.sh/<your-topic>`. The
-      preset leaves it empty, and an empty URL means silence.
+- [ ] Still on Inputs, confirm `NotifyUrl` is `https://ntfy.sh/<your-topic>` (the
+      preset now ships with `https://ntfy.sh/hex-xauusd-e7b863cd`). An empty URL
+      means silence, so if you change the preset, set it here.
 - [ ] Tick **AutoTrading** in the toolbar (must be green) and click OK.
 
 The settings that matter for a first run, all already in the preset:
