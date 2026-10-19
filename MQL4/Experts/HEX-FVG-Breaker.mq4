@@ -481,6 +481,12 @@ int OnInit()
                   (DryRun ? "DRY RUN" : "live trading") +
                   "\nAccount " + IntegerToString((int)AccountNumber()) +
                   " | balance " + DoubleToString(AccountBalance(), 2) +
+                  // On a server nobody can see the chart, so the one line that
+                  // says whether the robot may actually trade travels with the
+                  // hello. "not connected" is the usual cause of a startup
+                  // BLOCKED on a freshly launched terminal, not AutoTrading.
+                  "\nAutoTrading " + (IsTradeAllowed() ? "ON" : "BLOCKED") +
+                  (IsConnected() ? "" : " (terminal not connected yet)") +
                   "\nIf you read this, notifications work.");
       Print(Prefix, ": push -> ", NotifyUrl,
             " (must be listed in Tools > Options > Expert Advisors)");
@@ -2229,6 +2235,12 @@ void RenderDashboard()
    txt += "Signals   : " + IntegerToString(g_sigCount) + " taken, " + IntegerToString(g_rejCount) +
           " rejected   logs: " + LogDir() + "\n";
    txt += "Push      : " + PushStatusText() + "\n";
+   // AutoTrading is a terminal-wide toggle and nothing in MQL4 can turn it on.
+   // The Status line below only reports the kill switch, so "armed" and a dead
+   // button can both be true - which is exactly how a silent week starts.
+   // IsTradeAllowed() is the only view of that button the EA has, so print it.
+   txt += "Trading   : " + (IsTradeAllowed() ? "ON  (AutoTrading)" :
+                            "BLOCKED - enable AutoTrading") + "\n";
    if(g_killed) txt += "STATUS    : *** STOPPED - " + g_killReason + " ***\n";
    else         txt += "Status    : armed\n";
    Comment(txt);

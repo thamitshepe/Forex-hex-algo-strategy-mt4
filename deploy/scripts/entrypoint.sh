@@ -1,0 +1,355 @@
+#!/bin/bash
+# HEX-FVG-Breaker on a server: MetaTrader 4 under Wine, headless, in a container.
+#
+# Every start does the same five things, in this order:
+#
+#   1. make sure a portable MetaTrader 4 tree exists in $MT4DIR (the volume)
+#   2. copy this repo's .mq4 and presets into it and compile them with the real
+#      metaeditor.exe, so the EA that runs is the EA that is in git
+#   3. write startup.ini (login, server, symbol, expert, automated trading)
+#   4. start Xvfb, plus x11vnc and noVNC when VNC_PASSWORD is set
+#   5. run `wine terminal.exe /portable startup.ini`, then mirror MT4's journal
+#      and the EA's prints into the container log
+#
+# It deliberately does not restart the terminal after a crash: it exits non-zero
+# so Docker's restart policy decides, and the crash stays visible in the logs.
+#
+# Vocabulary used throughout: "distro" is a portable MT4 directory, "prefix" is
+# the Wine C: drive, "data folder" is where MT4 keeps profiles/config/MQL4 -
+# in portable mode that is $MT4DIR itself.
+set -euo pipefail
+
+MT4DIR="${MT4DIR:-/data/mt4}"
+MT4_SETUP_URL="${MT4_SETUP_URL:-https://download.mql5.com/cdn/web/metaquotes.software.corp/mt4/mt4setup.exe}"
+MT4_DISTRO_URL="${MT4_DISTRO_URL:-}"
+MT4_ALLOW_FRESH_INSTALL="${MT4_ALLOW_FRESH_INSTALL:-1}"
+MT4_LOGIN="${MT4_LOGIN:-}"
+MT4_PASSWORD="${MT4_PASSWORD:-}"
+MT4_SERVER="${MT4_SERVER:-}"
+MT4_SYMBOL="${MT4_SYMBOL:-XAUUSD}"
+MT4_PROFILE="${MT4_PROFILE:-default}"
+MT4_EXPERT="${MT4_EXPERT:-HEX-FVG-Breaker}"
+MT4_PRESET="${MT4_PRESET:-100usd-demo}"
+MT4_EA_PRESET_SYNC="${MT4_EA_PRESET_SYNC:-1}"
+MT4_EA_COMPILE="${MT4_EA_COMPILE:-1}"
+ENABLE_VNC="${ENABLE_VNC:-1}"
+VNC_PASSWORD="${VNC_PASSWORD:-}"
+VNC_PORT="${VNC_PORT:-5900}"
+NOVNC_PORT="${NOVNC_PORT:-6080}"
+SCREEN="${SCREEN:-1440x900x24}"
+DISPLAY="${DISPLAY:-:99}"
+export DISPLAY
+
+export WINEPREFIX="${WINEPREFIX:-/home/trader/.wine}"
+# win64, not win32. MetaQuotes ships a 64-bit installer (PE32+, machine 8664) and
+# a 32-bit terminal; a win64 prefix runs both through WoW64, which is the same
+# arrangement a normal Windows install has - and a win32 prefix cannot start the
+# installer at all (probed: it exits silently and installs nothing).
+export WINEARCH="${WINEARCH:-win64}"
+# No mono/gecko dialogs: this container must never wait on a modal window.
+export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree,mshtml=}"
+export WINEDEBUG="${WINEDEBUG:--all}"
+
+EA_SRC="/opt/ea/${MT4_EXPERT}.mq4"
+EA_BAKED_EX4="/opt/ea/${MT4_EXPERT}.ex4"
+
+XVFB_PID=""
+X11VNC_PID=""
+WEBSOCKIFY_PID=""
+TERMINAL_PID=""
+
+log()  { printf '%s [hex] %s\n'  "$(date -u +%H:%M:%S)" "$*"; }
+warn() { printf '%s [hex] WARN: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+
+# ------------------------------------------------------- the terminal tree ---
+
+# terminal.exe is the whole test. In portable mode everything else - config,
+# MQL4, profiles, history - lives in the same directory, which is why $MT4DIR
+# can be a volume and why a distro survives a redeploy untouched.
+have_terminal() { [ -f "$MT4DIR/terminal.exe" ]; }
+
+# Where the official installer dropped terminal.exe. /auto installs to a default
+# path that differs between a win32 and a win64 prefix, so look rather than guess.
+find_installed_terminal() {
+  find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal.exe' -print -quit 2>/dev/null
+}
+
+install_fresh_terminal() {
+  local setup=/tmp/mt4setup.exe src
+  log "no terminal in $MT4DIR - downloading the MetaQuotes installer"
+  curl -fsSL --retry 3 --retry-delay 5 -o "$setup" "$MT4_SETUP_URL" \
+    || die "download failed: $MT4_SETUP_URL"
+  log "running mt4setup.exe /auto - this is the path that is expected to fail"
+  # Honest expectation: this does not work. Probed on Wine 8 in the image build
+  # and in a container: mt4setup.exe is a 64-bit web installer that exits
+  # silently, installs nothing and never opens a window, in both prefix types.
+  # It is kept because a future Wine or a broker's own installer may behave, and
+  # because failing here with the installer's own output is more useful than not
+  # trying at all. The supported path is a prepared distro (DEPLOY.md §4B).
+  wine "$setup" /auto >/tmp/mt4setup.out 2>&1 \
+    || warn "the installer exited non-zero"
+  wineserver -w >/dev/null 2>&1 || true
+  src="$(find_installed_terminal)"
+  if [ -z "$src" ]; then
+    sed 's/^/[setup] /' /tmp/mt4setup.out 2>/dev/null | tail -20 || true
+    die "the installer produced no terminal under $WINEPREFIX/drive_c. MetaTrader has to be supplied: run deploy/scripts/prepare-distro.sh and point MT4_DISTRO_URL at the tarball (file:///data/mt4-portable.tar.gz). See DEPLOY.md section 4."
+  fi
+  log "installed terminal found at $src"
+  mkdir -p "$MT4DIR"
+  cp -a "$(dirname "$src")/." "$MT4DIR/"
+}
+
+resolve_distro() {
+  if have_terminal; then
+    log "terminal present: $MT4DIR/terminal.exe ($(stat -c %s "$MT4DIR/terminal.exe") bytes)"
+    return 0
+  fi
+  if [ -f /opt/mt4-distro/terminal.exe ]; then
+    log "seeding $MT4DIR from the MT4 distro baked into this image"
+    mkdir -p "$MT4DIR"
+    cp -a /opt/mt4-distro/. "$MT4DIR/"
+    return 0
+  fi
+  if [ -n "$MT4_DISTRO_URL" ]; then
+    local arc=/tmp/mt4-distro.tar
+    log "seeding $MT4DIR from MT4_DISTRO_URL"
+    curl -fsSL --retry 3 --retry-delay 5 -o "$arc" "$MT4_DISTRO_URL" \
+      || die "distro download failed: $MT4_DISTRO_URL"
+    mkdir -p "$MT4DIR"
+    case "$MT4_DISTRO_URL" in
+      *.zst|*.tzst) tar --use-compress-program=unzstd -xf "$arc" -C "$MT4DIR" ;;
+      *.gz|*.tgz)   tar -xzf "$arc" -C "$MT4DIR" ;;
+      *)            tar -xf  "$arc" -C "$MT4DIR" ;;
+    esac
+    rm -f "$arc"
+    have_terminal || die "the distro unpacked but $MT4DIR/terminal.exe is missing"
+    return 0
+  fi
+  [ "$MT4_ALLOW_FRESH_INSTALL" = "1" ] \
+    || die "no terminal in $MT4DIR and MT4_ALLOW_FRESH_INSTALL=$MT4_ALLOW_FRESH_INSTALL. Put a distro in the volume or allow the install."
+  install_fresh_terminal
+  have_terminal || die "still no $MT4DIR/terminal.exe after installing"
+}
+
+# ------------------------------------------------------------ the EA source ---
+
+sync_ea() {
+  [ -f "$EA_SRC" ] || die "EA source is missing from the image: $EA_SRC"
+  mkdir -p "$MT4DIR/MQL4/Experts" "$MT4DIR/MQL4/Presets"
+  cp -f "$EA_SRC" "$MT4DIR/MQL4/Experts/${MT4_EXPERT}.mq4"
+  if [ "$MT4_EA_PRESET_SYNC" = "1" ] && compgen -G "/opt/ea/presets/*.set" >/dev/null; then
+    cp -f /opt/ea/presets/*.set "$MT4DIR/MQL4/Presets/"
+    log "synced ${MT4_EXPERT}.mq4 and $(ls /opt/ea/presets/*.set | wc -l | tr -d ' ') presets into MQL4/"
+  fi
+  [ -f "$MT4DIR/MQL4/Presets/${MT4_PRESET}.set" ] || \
+    warn "preset ${MT4_PRESET}.set is missing - the expert will open with its own defaults"
+}
+
+compile_ea() {
+  if [ "$MT4_EA_COMPILE" != "1" ]; then
+    log "MT4_EA_COMPILE=0 - keeping whatever .ex4 is already in the volume"
+    return 0
+  fi
+  if [ ! -f "$MT4DIR/metaeditor.exe" ]; then
+    warn "metaeditor.exe is not in this distro - cannot compile from source"
+    fall_back_to_baked_ex4 "no metaeditor"
+    return 0
+  fi
+
+  local clog="$WINEPREFIX/drive_c/hexcompile.log"
+  local ex4="$MT4DIR/MQL4/Experts/${MT4_EXPERT}.ex4"
+  rm -f "$ex4" "$clog"
+  # MetaEditor returns 0 whether or not the compile succeeded, so the .ex4 is the
+  # verdict and the log is the explanation - the same rule Tools/mt4_compile.sh
+  # follows locally. Running this on every start is what keeps "the EA that is
+  # running" and "the EA that is in git" the same file.
+  ( cd "$MT4DIR" && wine metaeditor.exe "/compile:MQL4\\Experts\\${MT4_EXPERT}.mq4" \
+      '/log:C:\hexcompile.log' ) >/dev/null 2>&1 || true
+  wineserver -w >/dev/null 2>&1 || true
+  if [ -f "$clog" ]; then
+    iconv -f UTF-16LE -t UTF-8 "$clog" 2>/dev/null \
+      | sed -e 's|\r$||' -e '/^$/d' -e 's|^|[metaeditor] |' | tail -30 || true
+    rm -f "$clog"
+  fi
+  if [ -f "$ex4" ]; then
+    log "compiled ${MT4_EXPERT}.ex4 from source ($(stat -c %s "$ex4") bytes)"
+    return 0
+  fi
+  warn "the compile produced no .ex4"
+  fall_back_to_baked_ex4 "compile failed"
+}
+
+# The image carries an .ex4 built in CI from the same commit, so a runtime compile
+# failure (read-only volume, damaged distro, ...) is an environment problem rather
+# than a source problem. Trading the CI binary still means trading the code in git
+# and beats a container that will not start.
+fall_back_to_baked_ex4() {
+  [ -f "$EA_BAKED_EX4" ] || die "$1, and this image has no pre-built ${MT4_EXPERT}.ex4 to fall back on"
+  cp -f "$EA_BAKED_EX4" "$MT4DIR/MQL4/Experts/${MT4_EXPERT}.ex4"
+  warn "$1 - falling back to the .ex4 compiled at image build time"
+}
+
+write_startup_ini() {
+  local f="$MT4DIR/startup.ini"
+  # MetaTrader reads this file when it is named on the command line. Names are the
+  # long-standing MT4 set: Expert/ExpertParameters make the terminal attach the
+  # robot and load the preset even on a fresh profile, and ExpertsTrades is the
+  # "allow automated trading" switch a headless start has no button for.
+  #
+  # The chart itself (symbol, timeframe, inputs) comes from the profile in the
+  # data folder. A distro prepared from a machine that already runs the robot
+  # therefore starts with the exact chart that was verified on that machine.
+  umask 077
+  cat > "$f" <<EOF
+; written by deploy/scripts/entrypoint.sh on every start - change the env, not this file
+Profile=${MT4_PROFILE}
+Login=${MT4_LOGIN}
+Password=${MT4_PASSWORD}
+Server=${MT4_SERVER}
+EnableNews=false
+ProxyEnable=false
+FTPEnable=false
+ExpertsEnable=true
+ExpertsDllImport=true
+ExpertsExpImport=true
+ExpertsTrades=true
+Symbol=${MT4_SYMBOL}
+Expert=${MT4_EXPERT}
+ExpertParameters=${MT4_PRESET}.set
+EOF
+  log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol=$MT4_SYMBOL expert=$MT4_EXPERT preset=$MT4_PRESET"
+  [ -n "$MT4_LOGIN" ] || warn "MT4_LOGIN is empty - MT4 will wait at its login dialog (visible on the VNC desktop)"
+}
+
+start_display() {
+  Xvfb "$DISPLAY" -screen 0 "$SCREEN" +extension GLX +extension RANDR +extension RENDER \
+    >/tmp/xvfb.log 2>&1 &
+  XVFB_PID=$!
+  local n=${DISPLAY#:}; n=${n%%.*}
+  for _ in $(seq 1 50); do [ -e "/tmp/.X11-unix/X${n}" ] && break; sleep 0.2; done
+  [ -e "/tmp/.X11-unix/X${n}" ] || die "Xvfb did not start - see /tmp/xvfb.log"
+  log "virtual display $DISPLAY ($SCREEN)"
+}
+
+start_vnc() {
+  if [ "$ENABLE_VNC" != "1" ]; then
+    log "ENABLE_VNC=0 - no remote desktop"
+    return 0
+  fi
+  if [ -z "$VNC_PASSWORD" ]; then
+    # An unauthenticated desktop can place trades. Refuse, loudly, rather than
+    # publish one and hope the firewall is doing its job.
+    warn "ENABLE_VNC=1 but VNC_PASSWORD is empty - refusing to publish an unauthenticated desktop"
+    return 0
+  fi
+  x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -passwd "$VNC_PASSWORD" \
+    -forever -shared -nolookup -o /tmp/x11vnc.log >/dev/null 2>&1 &
+  X11VNC_PID=$!
+  sleep 1
+  websockify --web=/usr/share/novnc "$NOVNC_PORT" "localhost:$VNC_PORT" \
+    >/tmp/novnc.log 2>&1 &
+  WEBSOCKIFY_PID=$!
+  log "remote desktop: http://<this-host>:$NOVNC_PORT/vnc.html  (or tunnel it: ssh -L $NOVNC_PORT:localhost:$NOVNC_PORT user@server)"
+}
+
+launch_terminal() {
+  cd "$MT4DIR"
+  # /portable keeps config, MQL4 and profiles next to terminal.exe instead of the
+  # Wine user's AppData, which is what makes $MT4DIR a self-contained volume.
+  wine terminal.exe /portable startup.ini >>/tmp/terminal.out 2>&1 &
+  TERMINAL_PID=$!
+  log "terminal.exe started (pid $TERMINAL_PID)"
+}
+
+wait_for_terminal() {
+  for _ in $(seq 1 90); do
+    if pgrep -f 'terminal\.exe' >/dev/null; then
+      log "terminal.exe is up"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "terminal.exe did not appear within 3 minutes - see /tmp/terminal.out"
+}
+
+# MT4 buffers its journal to disk and only flushes on a clean exit, so `docker
+# logs` would otherwise show nothing at all until the container stops. This polls
+# the two log folders and re-prints new lines, which survives a day rollover and
+# a truncated file - the same way `tail -F` would if it could see new files.
+mirror_dir() {
+  local tag="$1" dir="$2"
+  declare -A seen=()
+  while :; do
+    for f in "$dir"/*.log; do
+      [ -f "$f" ] || continue
+      local n s
+      n=$(wc -l < "$f" 2>/dev/null || echo 0)
+      s=${seen[$f]:-0}
+      if [ "$n" -gt "$s" ]; then
+        tail -n "+$((s + 1))" "$f" 2>/dev/null | sed -u "s/^/${tag} /" || true
+      fi
+      seen[$f]="$n"
+    done
+    sleep 2
+  done
+}
+
+banner() {
+  log "----------------------------------------------------------------"
+  log " HEX-FVG-Breaker on MT4 | $MT4_SYMBOL | $MT4_EXPERT | preset $MT4_PRESET"
+  log " data folder  : $MT4DIR (portable, on the volume)"
+  log " mt4 journal  : $MT4DIR/logs          - mirrored below as [mt4]"
+  log " ea prints    : $MT4DIR/MQL4/Logs     - mirrored below as [ea]"
+  log " ea csv logs  : $MT4DIR/MQL4/Files/Common/HEX-Logs"
+  log " account      : ${MT4_LOGIN:-<unset>} @ ${MT4_SERVER:-<unset>}"
+  log " auto trading : requested through startup.ini (ExpertsTrades=true). The"
+  log "                button state is not stored on disk, so confirm it once in"
+  log "                the desktop - the EA's dashboard and its INIT push both say"
+  log "                whether trading is actually allowed."
+  log "----------------------------------------------------------------"
+}
+
+on_term() {
+  trap - TERM INT
+  log "SIGTERM - asking MT4 to close so it flushes its journal and the EA's CSVs"
+  wineserver -k >/dev/null 2>&1 || true
+  for _ in $(seq 1 25); do
+    pgrep -f 'terminal\.exe' >/dev/null || break
+    sleep 1
+  done
+  pgrep -f 'terminal\.exe' >/dev/null && warn "terminal.exe still alive after 25s, killing it"
+  [ -n "$X11VNC_PID" ] && kill "$X11VNC_PID" 2>/dev/null || true
+  [ -n "$WEBSOCKIFY_PID" ] && kill "$WEBSOCKIFY_PID" 2>/dev/null || true
+  [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null || true
+  log "stopped"
+  exit 0
+}
+
+main() {
+  trap on_term TERM INT
+  banner
+  mkdir -p "$MT4DIR"
+  resolve_distro
+  sync_ea
+  compile_ea
+  write_startup_ini
+  start_display
+  start_vnc
+  mirror_dir "[mt4]" "$MT4DIR/logs" &
+  mirror_dir "[ea] " "$MT4DIR/MQL4/Logs" &
+  launch_terminal
+  wait_for_terminal
+
+  # The terminal's exit code decides the container's. No silent restart loop: a
+  # crash belongs in `docker logs`, and the restart policy belongs to the operator.
+  local rc=0
+  wait "$TERMINAL_PID" || rc=$?
+  log "terminal.exe exited with code $rc"
+  exit "$rc"
+}
+
+main "$@"
+
+
+

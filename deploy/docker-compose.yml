@@ -1,0 +1,54 @@
+# HEX-FVG-Breaker on a server.
+#
+# Dokploy: create a Compose app, paste this in, set the environment variables, and
+# start it. The image comes from GHCR, nothing is built on the server.
+#
+# Two things have to be true before the robot actually trades:
+#   1. the container can log in (MT4_LOGIN / MT4_PASSWORD / MT4_SERVER)
+#   2. MetaTrader has the ntfy URL on its WebRequest allow-list, and AutoTrading
+#      on - see DEPLOY.md, "the one look you have to take"
+services:
+  mt4:
+    image: ghcr.io/thamitshepe/forex-hex-mt4:live
+    restart: unless-stopped
+    # MT4 flushes its journal and the EA's CSVs on the way out, so it gets a real
+    # window to close instead of being killed on the spot.
+    stop_grace_period: 30s
+    # Wine on some kernels needs ptrace to attach to the processes it spawns, and
+    # MetaTrader loads the EA in-process. This is the difference between "expert
+    # loaded successfully" and an EA that silently never attaches.
+    cap_add:
+      - SYS_PTRACE
+    # Xvfb and Wine share memory to draw windows. Too small a /dev/shm shows up as
+    # "BadAccess (MIT-SHM)" and a dead desktop.
+    shm_size: 512m
+    ports:
+      # noVNC desktop, for the one-time look and for emergencies. It is only as
+      # exposed as you make it - see DEPLOY.md for the SSH-tunnel option, which
+      # needs no published port at all.
+      - "6080:6080"
+    environment:
+      MT4_LOGIN: "${MT4_LOGIN:?set the demo account login}"
+      MT4_PASSWORD: "${MT4_PASSWORD:?set the demo account password}"
+      MT4_SERVER: "${MT4_SERVER:-MetaQuotes-Demo}"
+      MT4_SYMBOL: "${MT4_SYMBOL:-XAUUSD}"
+      MT4_PRESET: "${MT4_PRESET:-100usd-demo}"
+      MT4_PROFILE: "${MT4_PROFILE:-default}"
+      # Remote desktop. ENABLE_VNC=0 means no desktop at all; a VNC_PASSWORD that
+      # is empty means the entrypoint refuses to publish one.
+      ENABLE_VNC: "${ENABLE_VNC:-1}"
+      VNC_PASSWORD: "${VNC_PASSWORD:-}"
+      # Hours in the preset are UTC. Changing this moves the trading window.
+      TZ: "${TZ:-UTC}"
+      # Optional: a prepared terminal tarball. file:// works, so a distro dropped
+      # into the volume is 'file:///data/mt4-portable.tar.gz'.
+      MT4_DISTRO_URL: "${MT4_DISTRO_URL:-}"
+      HEX_HEARTBEAT_MAX_AGE_MIN: "180"
+    volumes:
+      # Everything that must survive a redeploy lives here: the terminal, the
+      # profile with the chart on it, the compiled EA, and the HEX-Logs CSVs that
+      # DEMO-PLAN.md reads.
+      - hex-mt4-data:/data
+
+volumes:
+  hex-mt4-data:
