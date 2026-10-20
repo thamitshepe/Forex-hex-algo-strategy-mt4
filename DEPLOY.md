@@ -65,7 +65,7 @@ compiled and checked in CI — see `deploy/scripts/entrypoint.sh`.
 
 ## 2. The 30-second version
 
-Once, on the server (Dokploy → Compose → new app, paste `deploy/docker-compose.yml`):
+Once, on the server (§6 is the same thing click by click):
 
 ```bash
 MT4_LOGIN=<demo login>
@@ -237,10 +237,68 @@ Leave all five unset and the workflow still does the useful half: it publishes
 
 ## 6. Dokploy
 
-**Compose app (what `deploy/docker-compose.yml` is for).** New Compose app →
-paste the file → set the environment. The file already carries the two settings
-that are easy to leave out and hard to debug: `cap_add: [SYS_PTRACE]` (Wine needs
-ptrace to attach to the processes it spawns; without it the EA never loads) and
+The Compose app, in the order you click it. Prerequisites: an **amd64** VPS with
+Dokploy installed (§8 costs this out), and a **Docker Compose** service — not a
+**Stack**, which is Docker Swarm and drops some Compose features (`build` among
+them; `cap_add` and `shm_size` do not behave the same there either).
+
+1. **Create it.** Project → Create Service → Compose. The name you give it
+   becomes the Compose *project* name, so pick something short and recognisable:
+   `hex-mt4`.
+2. **General.** Provider `Git` → GitHub →
+   `thamitshepe/Forex-hex-algo-strategy-mt4`, Branch `main`, Compose Path
+   `deploy/docker-compose.yml`. Turn **Auto Deploy** on — that is what makes a
+   push deploy by itself (see "Triggering a redeploy" below). With no Git
+   provider connected, set the provider to raw/paste instead and paste the file;
+   Auto Deploy is then unavailable and you deploy by pressing Deploy, or through
+   the API.
+3. **Environment.** Paste the block below with real values. Everything the
+   compose file interpolates lives here — there is no `env_file:` to add.
+
+   ```bash
+   MT4_LOGIN=<demo login>
+   MT4_PASSWORD=<demo password>
+   MT4_SERVER=MetaQuotes-Demo
+   MT4_SYMBOL=XAUUSD
+   MT4_PRESET=100usd-demo
+   MT4_PROFILE=default
+   ENABLE_VNC=1
+   VNC_PASSWORD=<something>
+   TZ=UTC
+   MT4_DISTRO_URL=file:///data/mt4-portable.tar.gz
+   HEX_HEARTBEAT_MAX_AGE_MIN=180
+   ```
+
+4. **Advanced → turn on "Pull latest images on deploy."** Without it a redeploy
+   can keep running the previous build of the moving `:live` tag.
+5. **Deploy**, and watch the Logs tab.
+6. **Get the terminal into the volume** (§4A). This is the one step the container
+   cannot do for itself, because MetaQuotes' installer does not run under Wine.
+   With the named volume the compose file declares:
+
+   ```bash
+   scp dist/mt4-portable.tar.gz user@server:/tmp/
+   ssh user@server 'c=$(docker ps \
+                        --filter ancestor=ghcr.io/thamitshepe/forex-hex-mt4:live \
+                        --format "{{.Names}}" | head -1);
+                    docker cp /tmp/mt4-portable.tar.gz "$c":/data/'
+   ```
+
+   `MT4_DISTRO_URL` is already set to `file:///data/mt4-portable.tar.gz` above, so
+   a redeploy or restart then logs `seeding /data/mt4 from MT4_DISTRO_URL`, and
+   `compiled HEX-FVG-Breaker.ex4 from source`. A **bind mount** is the simpler
+   alternative: change `- hex-mt4-data:/data` to `- ../files/mt4:/data`, `scp`
+   the tarball into the app's `files/mt4/` directory, and the same `file://` URL
+   works. Use `../files` rather than a repo-relative path — Dokploy re-clones the
+   repository on every deploy and warns that those mounts come back empty — and
+   note that named volumes are the ones Volume Backups can see.
+7. **The one look (§3).** `ssh -L 6080:localhost:6080 user@server`, then
+   `http://localhost:6080/vnc.html`. Set AutoTrading and the ntfy WebRequest entry
+   once; both persist in the volume from then on.
+
+The file already carries the two settings that are easy to leave out and hard to
+debug: `cap_add: [SYS_PTRACE]` (Wine needs ptrace to attach to the processes it
+spawns; without it the EA never loads, which looks exactly like a broken EA) and
 `shm_size: 512m` (Xvfb and Wine share memory to draw; too small shows up as
 `BadAccess (MIT-SHM)` and a dead desktop).
 
