@@ -189,33 +189,49 @@ the Mac copy: two terminals on one account is two robots, and the preset's
 `deploy/Dockerfile`, push to GHCR, tag `:live` for `main` plus the commit SHA.
 
 ```
-ghcr.io/<repository-owner>/forex-hex-mt4:live      <- what Dokploy runs
-ghcr.io/<repository-owner>/forex-hex-mt4:<sha>     <- the rollback tag
+ghcr.io/thamitshepe/forex-hex-mt4:live      <- what Dokploy runs
+ghcr.io/thamitshepe/forex-hex-mt4:<sha>     <- the rollback tag
 ```
 
-Three things worth knowing:
+Four things worth knowing, all of them checked rather than assumed:
 
 - **The owner is whoever owns the repo the workflow runs in.** `Manged3/...` is
-  read-only for the current token, so the workflow runs from the fork and the
-  image lands under that account's namespace (`ghcr.io/thamitshepe/forex-hex-mt4`).
-  If you publish somewhere else, change `image:` in `deploy/docker-compose.yml` to
-  match. The workflow itself needs no edit: it uses `${{ github.repository_owner }}`.
-- **The build fails if the EA does not compile.** That is a feature: green CI and
-  a working robot are the same fact here.
-- **Package visibility.** GHCR packages start private. Either set the package to
-  public (it holds no secrets — credentials live in env and on the volume, never
-  in the image), or give Dokploy a GitHub PAT with `read:packages` as the registry
-  credential. For a demo image, public is less to maintain.
+  read-only for the current token, so the workflow runs from the fork
+  (`thamitshepe/Forex-hex-algo-strategy-mt4`, wired up as the `fork` remote) and
+  the image lands under that account's namespace. If you publish somewhere else,
+  change `image:` in `deploy/docker-compose.yml` to match. The workflow itself
+  needs no edit: it uses `${{ github.repository_owner }}`.
+- **The package is public, so Dokploy needs no registry credential.**
+  `GET https://ghcr.io/v2/thamitshepe/forex-hex-mt4/tags/list` answers `200` to an
+  anonymous pull-scoped token and lists `live` and the commit SHA. If you would
+  rather have it private, flip it in the repo's Packages tab and add a registry
+  credential in Dokploy (registry `ghcr.io`, username = the GitHub account,
+  password = a PAT with `read:packages`). The image holds no secrets either way —
+  credentials live in the environment and on the volume, never in the image.
+- **The build fails if the EA does not compile** — once `MT4_DISTRO_URL` is set
+  as a repository variable. That is a feature: green CI and a working robot are
+  the same fact here. Without that variable the `ea-check` stage prints
+  `MT4_DISTRO_URL is not set` and skips, and the container compiles from source
+  at first start instead (slower to boot, same result).
+- **It is `linux/amd64` only**, which is what a normal VPS is. The published
+  manifest is an OCI index holding one `linux/amd64` image plus buildkit's
+  provenance attestation.
 
-`MT4_DISTRO_URL` does double duty. At runtime it is how the terminal arrives
-(§4A). If you also set it as a **repo variable** (Settings → Variables →
-`MT4_DISTRO_URL` = the tarball's URL), the `ea-check` build stage downloads it,
-compiles the EA with the real `metaeditor.exe` inside it, and bakes the resulting
-`.ex4` into the image. That is the version of "the build fails if the EA does not
-compile" that covers *every* commit rather than only the ones where someone
-remembers to compile locally. Without it the stage prints a notice and skips, and
-the container compiles from source at first start instead — slower to boot, same
-result.
+### What is left to set on GitHub
+
+Repository variables are not secrets — they are a URL, a UUID and a tarball URL —
+so they belong in Settings → Variables, not Settings → Secrets:
+
+| kind | name | what it is |
+|---|---|---|
+| variable | `MT4_DISTRO_URL` | the prepared terminal tarball from §4A. At runtime it is how the terminal arrives; passed to the build it is also what makes `ea-check` download it, compile the EA with the real `metaeditor.exe`, and bake the `.ex4` into the image — the version of "the build fails if the EA does not compile" that covers *every* commit rather than only the ones where someone remembers to compile locally |
+| variable | `DOKPLOY_URL` | the Dokploy instance, e.g. `https://dokploy.example.com`, no trailing slash |
+| variable | `DOKPLOY_COMPOSE_ID` | the Compose app's id. `GET <DOKPLOY_URL>/api/project.all` with the `x-api-key` header lists it |
+| secret | `DOKPLOY_API_TOKEN` | a Dokploy API token (Settings → API Keys). With the three above, the `deploy` job calls `POST /api/compose.deploy` |
+| secret | `DOKPLOY_WEBHOOK` | the alternative trigger: the webhook URL from the app's Deployments tab. Used only when the API triple is incomplete — and read as a git-provider push, so §6 applies |
+
+Leave all five unset and the workflow still does the useful half: it publishes
+`live` and the SHA, and the `deploy` job prints a notice instead of failing.
 
 ---
 
@@ -242,9 +258,43 @@ Volume: `hex-mt4-data` at `/data`. Everything that matters — the terminal, the
 profile with the chart, the compiled EA, the HEX-Logs CSVs — is under it, so a
 redeploy is not a restart of the demo.
 
-**Registry pull.** If the package is private, add a registry credential in Dokploy
-(registry `ghcr.io`, username = the GitHub account, password = a PAT with
-`read:packages`).
+**Registry pull: not needed.** The package is public (§5), so Dokploy pulls
+`ghcr.io/thamitshepe/forex-hex-mt4:live` with no credential at all. Only if you
+make the package private do you add one here (registry `ghcr.io`, username = the
+GitHub account, password = a PAT with `read:packages`).
+
+**Where the environment goes.** Dokploy's environment editor writes what you type
+to a `.env` file next to the compose file, and Compose reads that file for
+`${VAR}` substitution by itself. That is why `deploy/docker-compose.yml` spells
+`${MT4_LOGIN}` inside `environment:` instead of using an `env_file:` — no extra
+wiring, and the `:?` guards still work, so a Compose app started without
+`MT4_LOGIN` fails loudly rather than coming up with an empty login.
+
+**Triggering a redeploy.** Three ways, ordered by how little they ask of you:
+
+1. **Dokploy's GitHub App.** Point the Compose app at
+   `thamitshepe/Forex-hex-algo-strategy-mt4`, branch `main`, compose path
+   `deploy/docker-compose.yml`, and switch Auto Deploy on. Dokploy's GitHub
+   integration then deploys on push with no webhook and no CI change. The branch
+   configured here has to be the branch you push to — Dokploy answers
+   `301 Branch Not Match` otherwise.
+2. **The API, from CI.** Set `DOKPLOY_URL`, `DOKPLOY_COMPOSE_ID` and
+   `DOKPLOY_API_TOKEN` (§5) and the workflow calls `POST /api/compose.deploy`
+   once the image is pushed. This is Dokploy's documented CI path, and the only
+   one indifferent to source type, branch and Watch Paths.
+3. **The webhook URL.** `DOKPLOY_WEBHOOK` = the URL on the app's Deployments tab.
+   Dokploy reads that URL as a git-provider push: its handler compares `body.ref`
+   with the app's branch, and reads `commits[].{added,modified,removed}` to match
+   Watch Paths. The workflow sends the branch and an empty `commits[]`, which
+   passes only while **Watch Paths is unset** — so prefer 1 or 2 if you ever set
+   one.
+
+**Turn on "Pull latest images on deploy."** It is in the Compose app's Advanced
+tab, it adds `--pull always` to the `up -d` Dokploy runs, and it has no effect if
+you have set a custom command. Without it a redeploy of a *moving* tag like
+`:live` can reuse the image already on the host — Docker matches the tag, not the
+new digest. That is the difference between "the server picked up the new EA" and
+"the server is still trading last week's build".
 
 **Port 6080 is the remote desktop.** It is the only way to see the button in §3,
 and it is also a live trading terminal. Safest option: do not publish it at all,

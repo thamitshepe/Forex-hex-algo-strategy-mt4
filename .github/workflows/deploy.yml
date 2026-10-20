@@ -68,8 +68,26 @@ jobs:
           cache-from: type=gha,scope=mt4-${{ needs.meta.outputs.env_tag }}
           cache-to: type=gha,mode=max,scope=mt4-${{ needs.meta.outputs.env_tag }}
 
-  # Optional immediate deploy. Without DOKPLOY_WEBHOOK set this is a no-op notice:
-  # a published image is still a usable result, and Dokploy can pull it on demand.
+  # Optional immediate deploy. Two ways to ask Dokploy to pull the new :live, both
+  # a no-op notice when unset - a published image is still a usable result, and
+  # Dokploy can deploy on demand from its own UI.
+  #
+  #   API      vars.DOKPLOY_URL + vars.DOKPLOY_COMPOSE_ID + secrets.DOKPLOY_API_TOKEN
+  #            -> POST /api/compose.deploy with the x-api-key header. This is
+  #            Dokploy's documented CI path (docs.dokploy.com, "Auto Deploy"),
+  #            and the only one that does not care what the app's source type,
+  #            branch or Watch Paths are set to.
+  #   webhook  secrets.DOKPLOY_WEBHOOK, the URL in the app's Deployments tab.
+  #            Dokploy reads that URL as a git-provider push, and its handler
+  #            (apps/dokploy/pages/api/deploy/compose/[refreshToken].ts) compares
+  #            body.ref against the app's branch and looks for
+  #            commits[].{added,modified,removed} for Watch Paths - so the body
+  #            below has to look like a real push or the deploy is refused with
+  #            301 "Branch Not Match". Watch Paths must stay unset for this path
+  #            to work, because CI here has no changed-file list to send.
+  #
+  # Neither is needed if the app is sourced from GitHub through Dokploy's own
+  # GitHub App: that integration deploys on push with no configuration at all.
   deploy:
     needs: [meta, image]
     if: github.ref_name == 'main'
@@ -77,19 +95,39 @@ jobs:
     steps:
       - name: Trigger Dokploy
         env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
+          API_TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
           WEBHOOK: ${{ secrets.DOKPLOY_WEBHOOK }}
           SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
           TAG: ${{ needs.meta.outputs.env_tag }}
         run: |
           set -euo pipefail
-          if [ -z "${WEBHOOK:-}" ]; then
-            echo "DOKPLOY_WEBHOOK is not set - skipping the deploy trigger."
-            echo "Image published: ${IMAGE_NAME}:${TAG}"
+          if [ -n "${DOKPLOY_URL:-}" ] && [ -n "${COMPOSE_ID:-}" ] && [ -n "${API_TOKEN:-}" ]; then
+            echo "Dokploy API: deploying compose ${COMPOSE_ID}"
+            body="$(printf '{"composeId":"%s","title":"%s","description":"%s"}' \
+                      "$COMPOSE_ID" "GHCR forex-hex-mt4 ${TAG}" "${REPO}@${SHA}")"
+            curl -fsS -X POST "${DOKPLOY_URL%/}/api/compose.deploy" \
+              -H 'accept: application/json' \
+              -H 'Content-Type: application/json' \
+              -H "x-api-key: ${API_TOKEN}" \
+              -d "$body"
+            echo "Dokploy triggered for ${IMAGE_NAME}:${TAG}"
             exit 0
           fi
-          curl -fsS -X POST "$WEBHOOK" \
-            -H 'accept: application/json' \
-            -H 'Content-Type: application/json' \
-            -H 'x-github-event: push' \
-            -d "{\"head_commit\":{\"id\":\"${SHA}\",\"message\":\"GHCR forex-hex-mt4 ${TAG}\"}}"
-          echo "Dokploy triggered for ${IMAGE_NAME}:${TAG}"
+          if [ -n "${WEBHOOK:-}" ]; then
+            echo "Dokploy webhook: deploying from the push payload"
+            body="$(printf '{"ref":"%s","repository":{"full_name":"%s"},"commits":[],"head_commit":{"id":"%s","message":"%s"}}' \
+                      "$REF" "$REPO" "$SHA" "GHCR forex-hex-mt4 ${TAG}")"
+            curl -fsS -X POST "$WEBHOOK" \
+              -H 'accept: application/json' \
+              -H 'Content-Type: application/json' \
+              -H 'x-github-event: push' \
+              -d "$body"
+            echo "Dokploy triggered for ${IMAGE_NAME}:${TAG}"
+            exit 0
+          fi
+          echo "No DOKPLOY_API_TOKEN+DOKPLOY_COMPOSE_ID and no DOKPLOY_WEBHOOK - skipping the deploy trigger."
+          echo "Image published: ${IMAGE_NAME}:${TAG}"
