@@ -70,13 +70,21 @@ shared_var() { # NAME [DEFAULT]
 check_instance_env() {
   local name v
   [ "$MT4_INSTANCE" = "1" ] && return 0
-  for name in MT4_LOGIN MT4_PASSWORD MT4_SERVER MT4_SYMBOL MT4_PRESET; do
+  for name in MT4_LOGIN MT4_PASSWORD MT4_SYMBOL MT4_PRESET; do
     v="$(inst_var "$name")"
     if [ -z "$v" ]; then
       die "MT4_INSTANCE=$MT4_INSTANCE has no ${name}${MT4_INSTANCE}. ${name} alone belongs to instance 1 and is deliberately not reused - that fallback is how a copied application ends up trading the wrong account. Set ${name}${MT4_INSTANCE}=... for this instance."
       return 1
     fi
   done
+  # The server is the one value that may legitimately be missing: a terminal only
+  # knows the servers it has seen, so on a broker it has never met the exact name
+  # cannot be known yet. Empty is not a fallback to instance 1's server - it means
+  # no Server= is claimed, MT4 opens its login dialog once, and the name written
+  # there is the one to copy into MT4_SERVER$MT4_INSTANCE.
+  if [ -z "$(inst_var MT4_SERVER)" ]; then
+    warn "instance $MT4_INSTANCE has no MT4_SERVER$MT4_INSTANCE yet. That is allowed: the terminal will use the server saved on this volume, or show its login dialog once - log in there and copy the exact server name into MT4_SERVER$MT4_INSTANCE. It will not use instance 1's server."
+  fi
   # Sharing one account between two instances is legal (different symbol, different
   # magic) and occasionally intended - but it is also exactly what a duplicated
   # application looks like when only some of the values were replaced, so it says
@@ -524,6 +532,7 @@ EOF
     log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol from profile expert=$MT4_EXPERT preset=$MT4_PRESET"
   fi
   [ -n "$MT4_LOGIN" ] || warn "MT4_LOGIN is empty - MT4 will wait at its login dialog (visible on the VNC desktop)"
+  [ -n "$MT4_SERVER" ] || warn "MT4_SERVER is empty - no Server= is claimed, so MT4 uses the server saved on this volume or shows the login dialog once (visible on the VNC desktop)"
 }
 
 start_display() {

@@ -285,6 +285,8 @@ check_eq "instance 2 without its own symbol refuses to boot" "1" "$?"
 check_eq "instance 2 without its own preset refuses to boot" "1" "$?"
 ( MT4_INSTANCE=2; check_instance_env ) >/dev/null 2>&1
 check_eq "instance 2 fully configured boots" "0" "$?"
+( MT4_INSTANCE=2; MT4_SERVER2=""; check_instance_env ) >/dev/null 2>&1
+check_eq "an unknown server name does not block the boot (log in once instead)" "0" "$?"
 ( MT4_INSTANCE=1; MT4_LOGIN=""; check_instance_env ) >/dev/null 2>&1
 check_eq "instance 1 may still start without a login (login dialog)" "0" "$?"
 
@@ -375,6 +377,42 @@ mkdir -p "$TMP/newtree" && printf 'MZ\n' > "$TMP/newtree/terminal.exe"
 ( MT4DIR="$seedvol/mt4" swap_in_new_tree "$TMP/newtree" ) >/dev/null 2>&1
 check_eq "a re-seed re-arms neutralisation" "gone" \
   "$([ -f "$seedvol/.hex-neutralised" ] || echo gone)"
+
+echo "compose: one application, two services, one image"
+# The deployment shape itself is the fix for "both hostnames show the same
+# account": two services from one image, each with its own instance number and its
+# own volume, and the second never holding the first account's credentials. Pinned
+# here because every one of those is a line in a YAML file, which is exactly the
+# kind of thing that gets edited by hand and drifts.
+COMPOSE="$HERE/../docker-compose.yml"
+gold="$(awk '/^  mt4:$/{f=1} /^  mt4-doge:$/{f=0} f' "$COMPOSE")"
+doge="$(awk '/^  mt4-doge:$/{f=1} /^volumes:$/{f=0} f' "$COMPOSE")"
+check_eq "the compose file declares both services" "2" "$(grep -cE '^  (mt4|mt4-doge):$' "$COMPOSE")"
+check_contains "instance 1 is a property of the mt4 service" 'MT4_INSTANCE: "1"' "$gold"
+check_contains "instance 2 is a property of the mt4-doge service" 'MT4_INSTANCE: "2"' "$doge"
+check_eq "mt4-doge is not given the gold login" "0" \
+  "$(printf '%s\n' "$doge" | grep -c '^      MT4_LOGIN:')"
+check_eq "mt4-doge is not given the gold password" "0" \
+  "$(printf '%s\n' "$doge" | grep -c '^      MT4_PASSWORD:')"
+check_eq "mt4-doge is not given the gold server" "0" \
+  "$(printf '%s\n' "$doge" | grep -c '^      MT4_SERVER:')"
+check_contains "mt4-doge reads its own login" 'MT4_LOGIN2:' "$doge"
+check_contains "mt4-doge has its own volume" 'hex-mt4-doge-data:/data' "$doge"
+check_eq "mt4-doge publishes no host port (it has a hostname)" "0" \
+  "$(printf '%s\n' "$doge" | grep -c '^    ports:')"
+check_contains "the gold volume keeps its old name, so no data moves" 'hex-mt4-data:/data' "$gold"
+check_eq "both volumes are declared" "2" "$(grep -cE '^  hex-mt4(-doge)?-data:$' "$COMPOSE")"
+check_eq "one image, shared by both" "1" "$(grep -c '^  image:' "$COMPOSE")"
+if docker compose version >/dev/null 2>&1; then
+  out="$(docker compose -f "$COMPOSE" config 2>/dev/null)"
+  rc=$?
+  check_eq "docker compose accepts the file" "0" "$rc"
+  check_eq "and resolves it into two services" "2" \
+    "$(printf '%s\n' "$out" | grep -cE '^  (mt4|mt4-doge):$')"
+  check_contains "with the second on its own volume" "hex-mt4-doge-data" "$out"
+else
+  printf '  skip docker compose (not installed)\n'
+fi
 
 echo "dokploy-apply"
 # The provisioner is what makes the server side clickless, so it is worth knowing
