@@ -629,6 +629,48 @@ journal_hints() { # DIR
   done
 }
 
+# One TCP connect, with whatever tool is here. The container has bash with
+# /dev/tcp (Debian) and timeout; a Mac developer machine has neither and has nc -
+# the selftest runs this on the host, so both paths have to work.
+tcp_probe() { # HOST PORT
+  local host="$1" port="$2"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 4 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null && return 0
+  fi
+  command -v nc >/dev/null 2>&1 || return 1
+  nc -z -w 4 "$host" "$port" >/dev/null 2>&1
+}
+
+# "connect failed [No connection]" is one message for three different worlds: a
+# wrong password, a server name this terminal has no address for, and an address
+# that cannot be reached from this host. MT4 cannot tell them apart - it never
+# sends the password when the dial fails - and the third one is the host's fault,
+# not the login's. So the container checks the addresses itself, once, before the
+# terminal starts dialling them.
+server_route() {
+  local dir="$MT4DIR/config" srv ips ip list n=0 up=0
+  [ -n "$MT4_SERVER" ] || return 0
+  srv="$dir/$MT4_SERVER.srv"
+  if [ ! -f "$srv" ]; then
+    log "server route : no config/$MT4_SERVER.srv; this terminal keeps its servers in config/servers.ini ($(stat -c %s "$dir/servers.ini" 2>/dev/null || echo 0) bytes) - if the login window's Server dropdown does not offer $MT4_SERVER, that name has no address in this tree and the dial will fail whatever you type (DEPLOY.md section 4C)."
+    return 0
+  fi
+  ips="$(grep -aoE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$srv" 2>/dev/null | grep -vE '^(0|127|255)\.' | sort -u | head -8)"
+  if [ -z "$ips" ]; then
+    log "server route : $srv carries no address this probe can read - leaving the dial to MT4"
+    return 0
+  fi
+  for ip in $ips; do
+    n=$((n + 1))
+    if tcp_probe "$ip" 443; then up=$((up + 1)); list="$list $ip"; fi
+  done
+  if [ "$up" -gt 0 ]; then
+    log "server route : $MT4_SERVER answers on TCP 443 at$list ($up of $n access point(s) reachable), so a failed login from here is the account, not the route"
+  else
+    warn "server route: none of the $n access point(s) in config/$MT4_SERVER.srv ($(printf '%s ' $ips)) answers on TCP 443 from this host. MT4 reports that as 'connect failed [No connection]' and never sends the password, so no login detail can fix it: this server is not reachable from this machine. Either run this instance somewhere that can reach it, or ask the broker whether its demo access points accept this host's IP/ASN, or point MT4_SERVER at a server that does answer while the strategy is being validated."
+  fi
+}
+
 login_watch() {
   sleep "${HEX_LOGIN_WATCH:-90}"
   login_check && return 0
@@ -1081,6 +1123,10 @@ main() {
   lease_beat &
   resolve_distro
   neutralise_seed
+  # Before the terminal dials: is the route there at all? A failed TCP connect and
+  # a wrong password are the same journal line, and everything downstream of this
+  # one fact (symbols, charts, ticks, the expert) depends on it.
+  server_route
   # The display comes up before the compile, not after: metaeditor.exe is a GUI
   # binary and under Wine with no X server it exits without writing the .ex4 -
   # the same reason deploy/Dockerfile's ea-check stage runs it through xvfb-run.

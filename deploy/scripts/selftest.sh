@@ -298,6 +298,46 @@ check_contains "and the first line of it too" "[late] MetaTrader 4 build 1450 st
 # The journal names the reason and never the fix. This is the pair of lines that
 # cost an afternoon: a correct password, a server this terminal has no address
 # for, and a log that said nothing.
+echo "server route"
+# The three worlds behind "connect failed [No connection]" are indistinguishable in
+# the journal, and only one of them is the host's. This function says which, before
+# the terminal dials: no .srv = no address, .srv with answers = the route is fine,
+# .srv with nothing answering = the route is the problem.
+load_fn "$ENTRYPOINT" tcp_probe >/dev/null
+load_fn "$ENTRYPOINT" server_route >/dev/null
+mkdir -p "$TMP/route/mt4/config"
+: > "$TMP/route/mt4/config/servers.ini"
+route_run() {
+  ( log() { echo "$*"; }
+    warn() { echo "WARN: $*"; }
+    MT4DIR="$TMP/route/mt4" MT4_SERVER=TradeMaxGlobal-Demo-2 server_route ) 2>&1
+}
+check_contains "no server file -> says there is no address" \
+  "no config/TradeMaxGlobal-Demo-2.srv" "$(route_run)"
+# A .srv is a binary blob; the access points are in it in the clear. 203.0.113.0/24
+# is TEST-NET-3, reserved and unroutable, which is exactly the shape of an
+# access point this host cannot reach.
+printf 'x\000\001TradeMaxGlobal-Demo-2\000203.0.113.9\000' > "$TMP/route/mt4/config/TradeMaxGlobal-Demo-2.srv"
+out="$(route_run)"
+check_contains "a server file is read for its access points" "203.0.113.9" "$out"
+check_contains "an unreachable route is called what it is" "not reachable from this machine" "$out"
+check_contains "and it says the password never gets sent" "never sends the password" "$out"
+# The other half: a port that is open must be reported open, or the warning above
+# would fire on a healthy route and teach everyone to ignore it.
+if command -v python3 >/dev/null 2>&1; then
+  python3 -m http.server 18899 --bind 127.0.0.1 >/dev/null 2>&1 &
+  probe_srv=$!
+  sleep 1
+  rc=1; tcp_probe 127.0.0.1 18899 && rc=0
+  check_eq "an open port is reported reachable" "0" "$rc"
+  rc=1; tcp_probe 127.0.0.1 18898 && rc=0
+  check_eq "a closed port is not" "1" "$rc"
+  kill "$probe_srv" 2>/dev/null
+  wait "$probe_srv" 2>/dev/null
+else
+  printf '  skip open-port probe (no python3)\n'
+fi
+
 echo "journal hints"
 load_fn "$ENTRYPOINT" journal_hints >/dev/null
 hdir="$TMP/hints"; mkdir -p "$hdir"
