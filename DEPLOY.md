@@ -246,15 +246,35 @@ its broker's servers, cheapest first:
 1. **In the desktop** (`File → Open an Account`): the wizard downloads the broker's
    server list into `config/servers.ini`. Search the broker, let it load, close the
    wizard, then `File → Login` with the existing account. One time, on the volume.
-2. **Copy the cache** from a terminal that already logs into that account:
-   `docker cp servers.ini <container>:/data/mt4/config/`, restart. Nothing else in
-   that file is account-specific — it is a server list.
+   **Whether it worked is not a matter of opinion**: MT4 keeps the whole list in
+   `config/servers.ini` and rewrites that file when it learns a broker, so watch it —
+   ```bash
+   docker exec $(docker ps -qf name=mt4-doge) ls -l /data/mt4/config/servers.ini
+   ```
+   A timestamp from just now and a different size means the list arrived, the Server
+   dropdown in the login window will show the broker, and the login will dial. An
+   unchanged timestamp means the wizard found nothing (wrong broker name, or the
+   broker is not in MetaQuotes' directory) — go to 2 or 3.
+2. **Copy the server data** from a terminal that already logs into that account.
+   Two files hold it, and either is worth trying:
+   - `config/servers.ini` (the list MT4 dials from) —
+     `docker cp servers.ini <container>:/data/mt4/config/`;
+   - the per-server files `config/*.srv` — `terminal.exe` contains the paths
+     `%\config\*.srv` and `%\config\%s.srv`, so MT4 looks for them there and writes one
+     per server it learns. On Windows they sit in
+     `%APPDATA%\MetaQuotes\Terminal\<32 hex chars>\config\`, on the Mac inside the
+     terminal's portable folder, and a broker's installer carries them too —
+     `7z x <broker>setup.exe` unpacks the `.srv` without running anything.
+   Then restart, and open the Server dropdown to see whether the name appeared.
+   Nothing in either file is account-specific — they are a server list.
 3. **Prepare a distro from that broker's own terminal** with
    `deploy/scripts/prepare-distro.sh` and give *this* service its own URL:
    `MT4_DISTRO_URL2=<its tarball>` plus `MT4_FORCE_SEED2=1` once, so the tree is
    replaced. This is the only route that also brings the broker's charts, its
    WebRequest list and a saved login, and it is the one to take if the second
-   account is meant to be a permanent fixture rather than an experiment.
+   account is meant to be a permanent fixture rather than an experiment. It is also
+   the only one that works when the broker is not in MetaQuotes' directory and no
+   terminal with that account has ever run on a machine you control.
 
 The journal tells the three cases apart: `connect failed [No connection]` = no
 address / unreachable, `invalid account` = wrong login or expired demo, and
@@ -895,7 +915,7 @@ shows the EA's prints, and a rebuild is a `git push`.
 | no `[mt4]` lines at all for a whole session, though the terminal is clearly running | the journal mirror ended at its first poll: under the entrypoint's `set -e`, reading a `.seen` file that did not exist *yet* returned 1 and killed the background loop — so every message that would have explained the terminal (a failed login above all) went only to a file on the volume | fixed — the mirror prints `[mt4] following /data/mt4/logs (N file(s) there now)` at start and survives a failed command. If that line is missing, the mirror is the thing to look at, not the terminal |
 | the login window does not appear, or typing into a dialog does nothing | the image had no window manager, so MT4's dialogs are unmanaged: they can open *behind* the main window, and the keyboard focus stays on the window behind them | fixed — `openbox` starts with the display: title bars (that is where MT4 prints the account and server), dialogs raised and focused |
 | the desktop shows the chart (`DOGEUSD,M5` in the title) but `Waiting for update`, `No connection` in the corner and an empty Market Watch | not logged in — and not a chart problem: the chart comes from the profile, the terminal is offline. This is the first start of a volume with no `config/accounts.ini`, and `startup.ini`'s login can only re-use an account, never create one | `File → Login` once in the desktop with `MT4_LOGIN2`/`MT4_PASSWORD2`. The log line `login: this volume has no config/accounts.ini …` says the same thing; after the login it becomes `login : … - re-used from config/accounts.ini`. §3 |
-| the login window does not list the broker (`TradeMaxGlobal-Demo-2`), or the journal says `'990158154': connect failed [No connection]` right after you typed the credentials | the same cause, and it is not the password: MT4 cannot dial a server name it has no address for. `config/servers.ini` is a per-terminal, per-broker cache, and this tree came from the MetaQuotes demo build, so it knows `MetaQuotes-Demo` and nothing else. A typed-in name is accepted by the dialog and then fails at dialling | give the terminal its broker's servers, three routes in **§4C**: `File → Open an Account` in the desktop (downloads the list), `docker cp servers.ini <container>:/data/mt4/config/` from a terminal that knows the account, or `MT4_DISTRO_URL2` with a distro prepared from that broker's own terminal. Then `File → Login` once |
+| the login window does not list the broker (`TradeMaxGlobal-Demo-2`), or the journal says `'990158154': connect failed [No connection]` right after you typed the credentials | the same cause, and it is not the password: MT4 cannot dial a server name it has no address for. `config/servers.ini` is a per-terminal, per-broker cache, and this tree came from the MetaQuotes demo build, so it knows `MetaQuotes-Demo` and nothing else. A typed-in name is accepted by the dialog and then fails at dialling | give the terminal its broker's servers, three routes in **§4C**: `File → Open an Account` in the desktop (downloads the list — check by watching `config/servers.ini`'s timestamp change), `docker cp` of `servers.ini` and/or `config/*.srv` from a terminal that knows the account, or `MT4_DISTRO_URL2` with a distro prepared from that broker's own terminal. Then `File → Login` once. If the login window's Server dropdown *does* list the name, the address exists and the problem is elsewhere: `connect failed` then means the address is unreachable from this host, and `invalid account` means the demo expired |
 | `app not found` at both hostnames, containers running | the domain was added *after* the last deploy, so no Traefik label points at the container (labels are written at container creation) | **Deploy** once more after adding the domains. Verify: `docker inspect <container> --format '{{index .Config.Labels "traefik.http.routers.<app>.rule"}}'` must print your `Host(...)` rule, and `docker logs dokploy-traefik 2>&1 \| tail` must not say "no such service" |
 | `502 Bad Gateway` instead of `app not found` | the label exists but Traefik cannot reach the container: the service is not on `dokploy-network` | the compose file already puts both services there (`networks: [dokploy-network]`, declared `external: true`); if you edited it, `docker network ls \| grep dokploy` shows the name |
 | `line 860: MT4_PERIODm: unbound variable`, restart loop, only on `mt4-doge` | a banner line wrote `$MT4_PERIODm`, which bash reads as the variable `MT4_PERIODm`; with `MT4_PERIOD` set (instance 2 has `MT4_PERIOD2=5`) the word is expanded and the variable does not exist. Instance 1 has an empty period, so it never showed | fixed in the image (and the selftest now renders the banner for both instances under `set -u`). Redeploy to pick up the new `:live` |
