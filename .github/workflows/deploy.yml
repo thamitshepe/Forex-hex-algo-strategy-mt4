@@ -40,8 +40,20 @@ jobs:
             echo "env_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+  # The shell logic between the interesting steps: startup.ini's contents, the log
+  # mirror reporting a line once, the healthcheck failing when it should, both
+  # services in the compose file, and dokploy-apply.sh against stand-ins. None of
+  # that is visible to the image build, and it used to be a script run by hand on
+  # one machine. Now a red check stops the push instead of reaching the server.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: selftest
+        run: deploy/scripts/selftest.sh
+
   image:
-    needs: meta
+    needs: [meta, checks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
