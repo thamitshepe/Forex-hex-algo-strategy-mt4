@@ -53,6 +53,7 @@ echo "startup.ini"
 MT4DIR="$TMP/mt4"; MT4_PROFILE=default; MT4_LOGIN=176428789
 MT4_PASSWORD=secret; MT4_SERVER=MetaQuotes-Demo; MT4_SYMBOL=XAUUSD
 MT4_EXPERT=HEX-FVG-Breaker; MT4_PRESET=100usd-demo
+load_fn "$ENTRYPOINT" profile_charts >/dev/null
 load_fn "$ENTRYPOINT" write_startup_ini >/dev/null
 write_startup_ini >/dev/null 2>&1
 ini="$TMP/mt4/startup.ini"
@@ -70,15 +71,39 @@ else
   bad "file written"
 fi
 
+echo "startup.ini symbol from profile"
+# The distro's default profile already carries the XAUUSD M15 chart. Naming the
+# symbol in startup.ini as well makes MT4 open a second chart, and a second chart
+# loads a second copy of the expert - the double load the MagicNumber lock exists
+# to refuse. So when the profile carries the symbol, Symbol= must be gone.
+MT4DIR="$TMP/mt4p"; mkdir -p "$MT4DIR/profiles/default"
+printf 'symbol=XAUUSD\nperiod=15\n' > "$MT4DIR/profiles/default/chart04.chr"
+write_startup_ini >/dev/null 2>&1
+inip="$MT4DIR/startup.ini"
+check_eq "profile carries symbol -> no Symbol= line" "0" "$(grep -c '^Symbol=' "$inip")"
+check_contains "profile carries symbol -> says why" "deliberately left out" "$(cat "$inip")"
+check_contains "profile carries symbol -> expert still set" "Expert=HEX-FVG-Breaker" "$(cat "$inip")"
+# A profile carrying something else must not suppress Symbol= for our symbol.
+printf 'symbol=EURUSD\nperiod=15\n' > "$MT4DIR/profiles/default/chart04.chr"
+write_startup_ini >/dev/null 2>&1
+check_contains "profile carries another symbol -> Symbol= kept" "Symbol=XAUUSD" "$(cat "$inip")"
+# No profile at all (a bare install): Symbol= has to be back, or the chart is empty.
+rm -rf "$MT4DIR/profiles"
+write_startup_ini >/dev/null 2>&1
+check_contains "no profile -> Symbol= kept" "Symbol=XAUUSD" "$(cat "$inip")"
+
 echo "log mirror"
-# The mirror has to survive the three things a naive tail does not: a file that
-# grows, a file that gets truncated under it, and two folders at once.
+# The mirror has to survive the four things a naive tail does not: a journal that
+# already holds a previous run (a restart must not replay it - two "loaded
+# successfully" lines read as a double expert load), a file that grows, a file
+# that gets truncated under it, and two folders at once.
 load_fn "$ENTRYPOINT" mirror_dir >/dev/null
 mdir="$TMP/logs"; mkdir -p "$mdir"
-printf 'one\ntwo\n' > "$mdir/today.log"
+printf 'old-one\nold-two\n' > "$mdir/today.log"   # left behind by a previous run
 mirror_dir "[mt4]" "$mdir" > "$TMP/mirror.out" 2>&1 &
 mirror_pid=$!
 sleep 3
+check_eq "previous run not replayed" "0" "$(grep -c '^\[mt4\] old-' "$TMP/mirror.out")"
 printf 'three\n' >> "$mdir/today.log"          # grew
 sleep 3
 printf 'reset\n'  > "$mdir/today.log"          # truncated
@@ -88,14 +113,15 @@ sleep 3
 kill "$mirror_pid" 2>/dev/null
 wait "$mirror_pid" 2>/dev/null
 out="$(cat "$TMP/mirror.out")"
-check_contains "first lines"  "[mt4] one"   "$out"
-check_contains "appended line" "[mt4] three" "$out"
-check_contains "after truncate" "[mt4] reset" "$out"
-check_contains "kept following" "[mt4] after" "$out"
+check_contains "says what it skipped" "previous run"  "$out"
+check_contains "appended line"        "[mt4] three"   "$out"
+check_contains "after truncate"       "[mt4] reset"   "$out"
+check_contains "kept following"       "[mt4] after"   "$out"
 # Each line must appear once: a mirror that re-prints the file is noise, and one
 # that skips lines is worse.
-check_eq "no duplicate lines" "1" "$(printf '%s\n' "$out" | grep -c '^\[mt4\] two$')"
-check_eq "line count" "5" "$(printf '%s\n' "$out" | grep -c '^\[mt4\] ')"
+check_eq "no duplicate lines" "1" "$(printf '%s\n' "$out" | grep -c '^\[mt4\] three$')"
+check_eq "mirrored lines are unique" "$(printf '%s\n' "$out" | grep '^\[mt4\] ' | sort -u | wc -l | tr -d ' ')" \
+                                     "$(printf '%s\n' "$out" | grep -c '^\[mt4\] ')"
 
 echo "healthcheck"
 # A fake process with terminal.exe in its argv, so the check is exercised without

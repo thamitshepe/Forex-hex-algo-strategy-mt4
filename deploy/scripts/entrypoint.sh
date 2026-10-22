@@ -316,6 +316,7 @@ write_startup_ini() {
     log "chart source: the $MT4_PROFILE profile (Symbol= omitted, so MT4 does not open a second chart)"
   fi
   umask 077
+  mkdir -p "$MT4DIR" 2>/dev/null || true
   cat > "$f" <<EOF
 ; written by deploy/scripts/entrypoint.sh on every start - change the env, not this file
 Profile=${MT4_PROFILE}
@@ -396,19 +397,50 @@ wait_for_terminal() {
 # logs` would otherwise show nothing at all until the container stops. This polls
 # the two log folders and re-prints new lines, which survives a day rollover and
 # a truncated file - the same way `tail -F` would if it could see new files.
+#
+# Progress is kept in one small file per journal, not an associative array: macOS
+# ships bash 3.2, where `declare -A` fails and takes the whole function with it -
+# silently, so the journal simply goes quiet. A counter file works on both.
+#
+# Anything already in the folder when this starts belongs to a previous run of the
+# container (the mirrors are started before terminal.exe), so it is not replayed.
+# A restart that reprinted it showed a second "loaded successfully" for a chart
+# that was loaded once - which reads exactly like a double expert load.
 mirror_dir() {
   local tag="$1" dir="$2"
-  declare -A seen=()
+  local state="${TMPDIR:-/tmp}/hex-mirror$(printf '%s' "$dir" | tr -c 'A-Za-z0-9' '_')" f n seen
+  mkdir -p "$state" 2>/dev/null || true
+  seen=0
+  for f in "$dir"/*.log; do
+    [ -f "$f" ] || continue
+    # BSD `wc -l < file` pads the count with spaces, and a padded number fails the
+    # numeric guard below - which would look like "no lines seen yet" on every
+    # poll and reprint the whole journal for ever.
+    n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s\n' "$n" > "$state/$(basename "$f").seen" 2>/dev/null || true
+    seen=$((seen + n))
+  done
+  if [ "$seen" -gt 0 ]; then
+    printf '%s %s line(s) from the previous run are already in %s - not replayed, the file is on the volume\n' \
+      "$tag" "$seen" "$dir"
+  fi
   while :; do
     for f in "$dir"/*.log; do
       [ -f "$f" ] || continue
-      local n s
-      n=$(wc -l < "$f" 2>/dev/null || echo 0)
-      s=${seen[$f]:-0}
+      local n s sf
+      sf="$state/$(basename "$f").seen"
+      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+      s=$(cat "$sf" 2>/dev/null | tr -d '[:space:]')
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      case "$s" in ''|*[!0-9]*) s=0 ;; esac
+      # Shrunk under us (new journal for the day, or MT4 rewriting it): what is in
+      # there now is new, so print it from the top instead of going quiet.
+      [ "$n" -lt "$s" ] && s=0
       if [ "$n" -gt "$s" ]; then
-        tail -n "+$((s + 1))" "$f" 2>/dev/null | sed -u "s/^/${tag} /" || true
+        tail -n "+$((s + 1))" "$f" 2>/dev/null | sed "s/^/${tag} /" || true
       fi
-      seen[$f]="$n"
+      printf '%s\n' "$n" > "$sf" 2>/dev/null || true
     done
     sleep 2
   done

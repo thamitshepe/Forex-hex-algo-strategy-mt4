@@ -17,6 +17,10 @@ MAX_AGE_MIN="${HEX_HEARTBEAT_MAX_AGE_MIN:-180}"
 
 fail() { echo "unhealthy: $*"; exit 1; }
 
+# `stat -c` is GNU, `stat -f` is BSD: the same check is run by hand on a dev
+# machine, where the container's coreutils are not the ones in $PATH.
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
 pgrep -f 'terminal\.exe' >/dev/null || fail "terminal.exe is not running"
 [ -f "$MT4DIR/startup.ini" ] || fail "startup.ini is missing - MT4 was not started by the entrypoint"
 
@@ -25,7 +29,7 @@ pgrep -f 'terminal\.exe' >/dev/null || fail "terminal.exe is not running"
 # window is generous; what this catches is a terminal that is up but not ticking
 # the EA any more.
 if [ -f "$LOGDIR/equity.csv" ]; then
-  age=$(( ( $(date +%s) - $(stat -c %Y "$LOGDIR/equity.csv") ) / 60 ))
+  age=$(( ( $(date +%s) - $(mtime "$LOGDIR/equity.csv") ) / 60 ))
   [ "$age" -le "$MAX_AGE_MIN" ] || fail "equity.csv heartbeat is ${age} min old (limit ${MAX_AGE_MIN})"
   echo "ok: terminal up, heartbeat ${age} min old"
 else
