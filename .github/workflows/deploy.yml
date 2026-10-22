@@ -85,9 +85,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # The values deploy/docker-compose.yml interpolates. Blank values fall
-      # through to that file's defaults (`${VAR:-default}`); MT4_LOGIN and
-      # MT4_PASSWORD are the two with `:?` guards, so a deploy missing them fails
-      # loudly instead of starting a container that idles without trading.
+      # through to that file's defaults (`${VAR:-default}`). CI deploys instance 1,
+      # the unsuffixed names; a second instance is a second application with
+      # MT4_INSTANCE=2 and the "2" copies of these, which is why the compose file
+      # no longer `:?`-guards the login: in the env file both instances share, the
+      # plain names are legitimately empty. Identity is enforced inside the
+      # container (check_instance_env), which knows about the suffix.
       # MT4_IMAGE is the exact tag this run published, so the compose file never
       # has to hardcode an owner and a rollback can pin a SHA.
       - name: Write the environment

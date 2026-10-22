@@ -372,9 +372,11 @@ untouched, so a Compose app is the only service type that can carry them.
 **The environment.** Dokploy writes what step 6 sends to a `.env` beside the
 compose file, and Compose reads that file for `${VAR}` substitution by itself —
 which is why `deploy/docker-compose.yml` spells `${MT4_LOGIN}` inside
-`environment:` instead of using an `env_file:`. The `:?` guards still work, so an
-app started without `MT4_LOGIN` fails loudly instead of coming up with an empty
-login.
+`environment:` instead of using an `env_file:`. A blank `MT4_LOGIN` is passed
+through as blank and the container says so at boot (an empty login means MT4 waits
+at its dialog, which is visible on the desktop); the identity of the account is
+checked inside the container, because that check is the one that knows this app may
+be instance 2 reading `MT4_LOGIN2`.
 
 Volume: `hex-mt4-data`, at `/data` in the container and really
 `hex-mt4_hex-mt4-data` on the host, because Compose prefixes named volumes with the
@@ -424,6 +426,7 @@ UI-made app and a script-made app cannot stay different for long.
 
 | variable | what it is |
 |---|---|
+| `MT4_INSTANCE` | which instance this container is (`1` by default). `1` reads the plain names in this table; `2` reads their `2` copies — `MT4_LOGIN2`, `MT4_SYMBOL2`, `MT4_PRESET2`, … — so one env file configures every application. Nothing falls back across instances: a missing `MT4_LOGIN2` stops the container instead of logging into instance 1's account |
 | `MT4_LOGIN` / `MT4_PASSWORD` / `MT4_SERVER` | the demo account the terminal logs into |
 | `MT4_SYMBOL` / `MT4_PRESET` | what to trade: `XAUUSD` + `100usd-demo.set` |
 | `MT4_PERIOD` | optional: move the volume's chart onto this timeframe (`5`, `15`, `60`). Empty = leave the chart alone. An instance whose symbol the profile does not carry gets the chart *moved* onto it — never a second chart, because a second chart loads a second expert |
@@ -438,17 +441,55 @@ UI-made app and a script-made app cannot stay different for long.
 ### A second instance (different account, different strategy)
 
 Scaling here means **one Dokploy application per instance**, never one container
-running two terminals. Each application has its own volume, its own environment,
-its own domain and its own logs; deleting the application is the whole of
-"downscale", and the other instances never notice.
+running two terminals. Each application has its own volume, its own hostname and
+its own logs; deleting the application is the whole of "downscale", and the other
+instances never notice.
+
+**One env file, `N` copies.** Every instance is configured from the same block of
+variables, with instance 2 and up reading a suffixed copy of the values that make
+it a different trader. You keep *one* file (`dist/dokploy.env`), paste it into
+every application, and change one line in each:
+
+```sh
+# the whole difference between the two applications
+MT4_INSTANCE=1        # gold app
+MT4_INSTANCE=2        # DOGE app
+
+# then, once, in the same file:
+MT4_LOGIN=…   MT4_PASSWORD=…   MT4_SERVER=MetaQuotes-Demo   MT4_SYMBOL=XAUUSD   MT4_PRESET=100usd-demo
+MT4_LOGIN2=…  MT4_PASSWORD2=…  MT4_SERVER2=TMGM-Demo        MT4_SYMBOL2=DOGEUSD MT4_PRESET2=doge-scalp-shadow  MT4_PERIOD2=5
+```
 
 | | instance 1 (gold) | instance 2 (DOGE scalp) |
 |---|---|---|
-| app | the one you have | a second application, same image |
-| env | `MT4_SYMBOL=XAUUSD`, `MT4_PRESET=100usd-demo` | `MT4_SYMBOL=DOGEUSD`, `MT4_PERIOD=5`, `MT4_PRESET=doge-scalp-shadow` |
-| volume | `hex-mt4-data` → `/data` | **its own** volume, e.g. `hex-doge-data` → `/data` |
+| `MT4_INSTANCE` | `1` | `2` |
+| env it reads | `MT4_LOGIN`, `MT4_SYMBOL`, `MT4_PRESET`, … | `MT4_LOGIN2`, `MT4_SYMBOL2`, `MT4_PRESET2`, … |
+| account | MetaQuotes demo | **its own** TMGM account |
+| volume | `hex-mt4-data` → `/data` | **its own** volume → `/data` |
 | domain | `trade.thami.dev` → 6080 | `trade2.thami.dev` → 6080 |
 | push | `HEX XAUUSD` → ntfy `hex-xauusd-…` | `HEX DOGEUSD` → ntfy `hex-doge-…` |
+
+Shared values — `VNC_PASSWORD`, `ENABLE_VNC`, `TZ`, `MT4_DISTRO_URL` — are the
+plain names, and both applications read them; a `VNC_PASSWORD2` wins if you ever
+want them to differ. The desktop password being identical is fine: separate
+containers, separate hostnames.
+
+**Nothing is borrowed across instances**, because that is the failure worth
+designing against. With `MT4_INSTANCE=2`:
+
+- an empty `MT4_LOGIN2`/`MT4_PASSWORD2`/`MT4_SERVER2`/`MT4_SYMBOL2`/`MT4_PRESET2`
+  stops the container with
+  `FATAL: MT4_INSTANCE=2 has no MT4_LOGIN2 …` — it does **not** fall back to
+  `MT4_LOGIN`, which is what a duplicated application would otherwise do: trade
+  the DOGE preset on the gold account with every input looking valid;
+- a volume whose `/data/.hex-instance` names a different account is refused
+  (`this volume belongs to account …, and this container is …`). Two terminals
+  writing one MT4 tree corrupt each other, and a second application that forgot
+  its own volume inherits `config/accounts.ini` — so it would log in as the first
+  account no matter what its env says;
+- logging into the *same* account as instance 1 still works (two strategies, one
+  account, different symbols and magic numbers) but logs a warning, because it is
+  also what a half-copied application looks like.
 
 Steps, in order:
 
@@ -456,13 +497,20 @@ Steps, in order:
    `trade.thami.dev`) pointing at the same server. Let's Encrypt will not issue a
    certificate for a name that does not resolve yet.
 2. **Application** → Docker → image `ghcr.io/thamitshepe/forex-hex-mt4:live`,
-   port `6080`, **a new volume** mounted at `/data`, domain → HTTPS.
-3. **Environment**: `dist/dokploy-doge.env` (in this repo, filled in), or copy it
-   from the first app and change `MT4_LOGIN`/`MT4_PASSWORD`/`MT4_SERVER`/
-   `MT4_SYMBOL`/`MT4_PERIOD`/`MT4_PRESET`/`VNC_PASSWORD`.
+   port `6080`, **a new volume** mounted at `/data`, domain → HTTPS. (Docker-Image
+   apps do not publish a host port, so two of them cannot collide; on the Compose
+   route add `HOST_VNC_PORT=6081`.)
+3. **Environment**: paste the same `dist/dokploy.env` you use for the gold app and
+   change `MT4_INSTANCE=1` to `MT4_INSTANCE=2`. Fill the `…2` values if you have
+   not already.
 4. **Deploy**, then read its log the same way as §7. First start downloads the
    distro into the *new* volume (~36 MB) and logs
    `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`.
+
+CI keeps deploying instance 1 (`DOKPLOY_APP`, default `hex-mt4`); it does not know
+about the others, which is why they are made once by hand (or with
+`deploy/scripts/dokploy-apply.sh DOKPLOY_APP=hex-doge …` and an env file holding
+`MT4_INSTANCE=2`) and then only need a redeploy when you change their env.
 
 **Why a subdomain and not `trade.thami.dev/vnc2.html`.** The desktop is
 noVNC + websockify, and both build their URLs from the root of the site: the page
@@ -618,7 +666,11 @@ shows the EA's prints, and a rebuild is a `git push`.
 | two robots on one account | the laptop copy is still running | stop one of them, always |
 | a second instance opens an XAUUSD chart, or logs `FATAL another copy of this EA holds MagicNumber` | the volume's profile carried a symbol the env did not ask for, and `Symbol=` opened a second chart next to it | `ensure_profile_chart` moves the profile's chart instead of adding one (`chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`). If it logs `chart: could not rewrite`, that volume's `.chr` is not the plain-text form it expects — set the symbol once in the desktop (right-click the chart → Symbol) and it is saved on the volume |
 | `spread 0.0012 > 0.0008` in `rejections.csv` on the crypto instance | the preset's spread cap is tighter than the broker's normal spread | raise `MaxSpreadDollars` in `Tools/make_presets.py` to just above what Market Watch shows, `python3 Tools/make_presets.py`, redeploy |
-| the second instance's chart is empty and the expert never trades | the broker names the pair differently (`DOGEUSD.a`, `DOGEUSD.raw`) | read the exact name off its Market Watch, set `MT4_SYMBOL` to it, redeploy — the chart is moved onto the new name on the next start |
+| the second instance's chart is empty and the expert never trades | the broker names the pair differently (`DOGEUSD.a`, `DOGEUSD.raw`) | read the exact name off its Market Watch, set `MT4_SYMBOL2` to it, redeploy — the chart is moved onto the new name on the next start |
+| `FATAL: MT4_INSTANCE=2 has no MT4_LOGIN2 …` | the application says it is instance 2 but its env has no `…2` copies — usually a copied application whose values were not replaced | fill `MT4_LOGIN2`/`MT4_PASSWORD2`/`MT4_SERVER2`/`MT4_SYMBOL2`/`MT4_PRESET2` in this app's Environment tab. This refusal is deliberate: the alternative is trading the DOGE preset on the gold account |
+| `FATAL: this volume belongs to account … and this container is …` | two applications were given the same volume (the second one has no volume of its own, or was created from the first without changing its mount) | give this application its own volume at `/data`. If you really mean to move *this* volume to the other account, delete `/data/.hex-instance` on it first |
+| instance 2 logs into the wrong account | the login is also stored in the volume's `config/accounts.ini`, so a shared volume logs in as whoever used it last | the same fix as above — one volume per instance. The `FATAL` above catches it before the terminal starts |
+| `MT4_INSTANCE must be a number` | `MT4_INSTANCE` holds something other than `1`, `2`, `3` … | it is an instance *number*, not a name |
 
 ---
 

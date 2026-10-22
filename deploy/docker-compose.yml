@@ -35,11 +35,19 @@ services:
     ports:
       # noVNC desktop, for the one-time look and for emergencies. It is only as
       # exposed as you make it - see DEPLOY.md for the SSH-tunnel option, which
-      # needs no published port at all.
-      - "6080:6080"
+      # needs no published port at all. A second instance on the same host must
+      # publish a different host port (HOST_VNC_PORT=6081), or drop this mapping
+      # entirely and reach the desktop through its domain.
+      - "${HOST_VNC_PORT:-6080}:6080"
     environment:
-      MT4_LOGIN: "${MT4_LOGIN:?set the demo account login}"
-      MT4_PASSWORD: "${MT4_PASSWORD:?set the demo account password}"
+      # Which instance this container is. 1 (the default) reads the plain names
+      # below; 2 reads their "2" copies, so one env file configures both apps and
+      # only this line differs between them. Nothing here is shared by accident:
+      # for instance 2 the entrypoint refuses to boot if MT4_LOGIN2 and friends
+      # are missing rather than falling back to instance 1's account.
+      MT4_INSTANCE: "${MT4_INSTANCE:-1}"
+      MT4_LOGIN: "${MT4_LOGIN:-}"
+      MT4_PASSWORD: "${MT4_PASSWORD:-}"
       MT4_SERVER: "${MT4_SERVER:-MetaQuotes-Demo}"
       MT4_SYMBOL: "${MT4_SYMBOL:-XAUUSD}"
       # Empty = keep the profile chart's own timeframe; set it to move that chart
@@ -47,8 +55,22 @@ services:
       MT4_PERIOD: "${MT4_PERIOD:-}"
       MT4_PRESET: "${MT4_PRESET:-100usd-demo}"
       MT4_PROFILE: "${MT4_PROFILE:-default}"
+      # Instance 2 and up. Passed through empty for instance 1; a second instance
+      # sets them and MT4_INSTANCE=2. The identity of the account is enforced
+      # inside the container (check_instance_env), which is why the two above are
+      # not `:?` guarded: with a suffix in play, the plain name is legitimately
+      # empty in the env file both apps share.
+      MT4_LOGIN2: "${MT4_LOGIN2:-}"
+      MT4_PASSWORD2: "${MT4_PASSWORD2:-}"
+      MT4_SERVER2: "${MT4_SERVER2:-}"
+      MT4_SYMBOL2: "${MT4_SYMBOL2:-}"
+      MT4_PERIOD2: "${MT4_PERIOD2:-}"
+      MT4_PRESET2: "${MT4_PRESET2:-}"
+      MT4_EXPERT2: "${MT4_EXPERT2:-}"
+      MT4_PROFILE2: "${MT4_PROFILE2:-}"
       # Remote desktop. ENABLE_VNC=0 means no desktop at all; a VNC_PASSWORD that
-      # is empty means the entrypoint refuses to publish one.
+      # is empty means the entrypoint refuses to publish one. One password for
+      # every instance is fine - they are separate containers.
       ENABLE_VNC: "${ENABLE_VNC:-1}"
       VNC_PASSWORD: "${VNC_PASSWORD:-}"
       # Hours in the preset are UTC. Changing this moves the trading window.

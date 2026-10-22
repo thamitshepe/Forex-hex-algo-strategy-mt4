@@ -187,9 +187,12 @@ api POST /api/compose.update "$(jq -nc \
     autoDeploy: false}')" >/dev/null
 log "compose file pushed from ${COMPOSE_FILE#"$REPO"/}"
 
-# The YAML reads ${MT4_LOGIN} and friends, so without this the interpolations fail
-# and its `:?` guards abort the deploy naming the missing variable - which is the
-# message a half-configured install should get.
+# The YAML reads ${MT4_LOGIN} and friends, so without this the interpolations are
+# empty and the container boots with no account - which is why the environment is
+# part of provisioning rather than a later click. For a second instance the same
+# call carries MT4_INSTANCE=2 and the "2" copies of those names, and DOKPLOY_APP
+# has to differ too: Dokploy runs `docker compose -p <appName>`, so the app name is
+# what keeps the two instances' named volumes apart.
 if [ -n "$DOKPLOY_ENV" ]; then
   api POST /api/compose.saveEnvironment "$(jq -nc \
     --arg composeId "$compose_id" --arg env "$DOKPLOY_ENV" \

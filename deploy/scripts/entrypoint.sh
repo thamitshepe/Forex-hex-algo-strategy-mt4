@@ -19,33 +19,103 @@
 # in portable mode that is $MT4DIR itself.
 set -euo pipefail
 
+log()  { printf '%s [hex] %s\n'  "$(date -u +%H:%M:%S)" "$*"; }
+warn() { printf '%s [hex] WARN: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
+die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Instances. One container is one instance: one account, one chart, one expert.
+# More than one instance on a host is more than one Dokploy application, and all
+# of them are configured from ONE env file, where instance 2 and up read a
+# suffixed copy of every value that makes it a different trader:
+#
+#   MT4_INSTANCE=1  ->  MT4_LOGIN,  MT4_SYMBOL,  MT4_PRESET,  ...
+#   MT4_INSTANCE=2  ->  MT4_LOGIN2, MT4_SYMBOL2, MT4_PRESET2, ...
+#
+# Shared values (the desktop password, the distro URL, the screen size) keep one
+# copy that every instance reads; a NAME<N> copy wins if you need to differ.
+# ---------------------------------------------------------------------------
+MT4_INSTANCE="${MT4_INSTANCE:-1}"
+case "$MT4_INSTANCE" in
+  ''|*[!0-9]*) die "MT4_INSTANCE must be a number (1, 2, 3 ...), got '$MT4_INSTANCE'" ;;
+  0) die "MT4_INSTANCE starts at 1" ;;
+esac
+
+# NAME<N>, else NAME (instance 1 only), else DEFAULT. The eval reaches a
+# variable *name* assembled from a literal and MT4_INSTANCE - never a value -
+# because bash 3.2 has no namerefs and ${!name} cannot carry a default.
+inst_var() { # NAME [DEFAULT]
+  local name="$1" def="${2-}" v=""
+  eval "v=\"\${${name}${MT4_INSTANCE}-}\""
+  if [ -z "$v" ] && [ "$MT4_INSTANCE" = "1" ]; then
+    eval "v=\"\${${name}-}\""
+  fi
+  [ -n "$v" ] || v="$def"
+  printf '%s' "$v"
+}
+
+# NAME<N> wins, otherwise the plain name, otherwise DEFAULT - for everything that
+# is the same on every instance of this image.
+shared_var() { # NAME [DEFAULT]
+  local name="$1" def="${2-}" v=""
+  eval "v=\"\${${name}${MT4_INSTANCE}-}\""
+  [ -n "$v" ] || eval "v=\"\${${name}-}\""
+  [ -n "$v" ] || v="$def"
+  printf '%s' "$v"
+}
+
+# Identity does not fall back. A duplicated Dokploy application keeps instance 1's
+# MT4_LOGIN; falling back to it would trade instance 2's preset against instance
+# 1's money with every input looking valid, so 2 and up must name their own.
+check_instance_env() {
+  local name v
+  [ "$MT4_INSTANCE" = "1" ] && return 0
+  for name in MT4_LOGIN MT4_PASSWORD MT4_SERVER MT4_SYMBOL MT4_PRESET; do
+    v="$(inst_var "$name")"
+    if [ -z "$v" ]; then
+      die "MT4_INSTANCE=$MT4_INSTANCE has no ${name}${MT4_INSTANCE}. ${name} alone belongs to instance 1 and is deliberately not reused - that fallback is how a copied application ends up trading the wrong account. Set ${name}${MT4_INSTANCE}=... for this instance."
+      return 1
+    fi
+  done
+  # Sharing one account between two instances is legal (different symbol, different
+  # magic) and occasionally intended - but it is also exactly what a duplicated
+  # application looks like when only some of the values were replaced, so it says
+  # so rather than assuming.
+  if [ -n "${MT4_LOGIN-}" ] && [ "$(inst_var MT4_LOGIN)" = "${MT4_LOGIN}" ]; then
+    warn "instance $MT4_INSTANCE logs into the same account as instance 1 (${MT4_LOGIN}). Deliberate only if the symbol and the magic number differ - if you copied the gold application, this is the value you forgot to change."
+  fi
+  return 0
+}
+
+check_instance_env
+
 MT4DIR="${MT4DIR:-/data/mt4}"
 MT4_SETUP_URL="${MT4_SETUP_URL:-https://download.mql5.com/cdn/web/metaquotes.software.corp/mt4/mt4setup.exe}"
-MT4_DISTRO_URL="${MT4_DISTRO_URL:-}"
-MT4_ALLOW_FRESH_INSTALL="${MT4_ALLOW_FRESH_INSTALL:-1}"
-MT4_LOGIN="${MT4_LOGIN:-}"
-MT4_PASSWORD="${MT4_PASSWORD:-}"
-MT4_SERVER="${MT4_SERVER:-}"
-MT4_SYMBOL="${MT4_SYMBOL:-XAUUSD}"
+MT4_DISTRO_URL="$(shared_var MT4_DISTRO_URL)"
+MT4_ALLOW_FRESH_INSTALL="$(shared_var MT4_ALLOW_FRESH_INSTALL 1)"
+MT4_LOGIN="$(inst_var MT4_LOGIN)"
+MT4_PASSWORD="$(inst_var MT4_PASSWORD)"
+MT4_SERVER="$(inst_var MT4_SERVER)"
+MT4_SYMBOL="$(inst_var MT4_SYMBOL XAUUSD)"
 # Optional: the chart's timeframe. Empty = whatever the profile's chart already
 # is. Set it to move an existing profile onto another timeframe (see
 # ensure_profile_chart) instead of editing the desktop by hand.
-MT4_PERIOD="${MT4_PERIOD:-}"
-MT4_PROFILE="${MT4_PROFILE:-default}"
-MT4_EXPERT="${MT4_EXPERT:-HEX-FVG-Breaker}"
-MT4_PRESET="${MT4_PRESET:-100usd-demo}"
-MT4_EA_PRESET_SYNC="${MT4_EA_PRESET_SYNC:-1}"
-MT4_EA_COMPILE="${MT4_EA_COMPILE:-1}"
+MT4_PERIOD="$(inst_var MT4_PERIOD)"
+MT4_PROFILE="$(inst_var MT4_PROFILE default)"
+MT4_EXPERT="$(inst_var MT4_EXPERT HEX-FVG-Breaker)"
+MT4_PRESET="$(inst_var MT4_PRESET 100usd-demo)"
+MT4_EA_PRESET_SYNC="$(shared_var MT4_EA_PRESET_SYNC 1)"
+MT4_EA_COMPILE="$(shared_var MT4_EA_COMPILE 1)"
 # Re-seed over a tree that already has a terminal.exe. Off by default: a volume
 # that works is not something to overwrite on every restart, and the tree holds
 # the live profile and the account login. Needed once after a distro changes (or
 # after a tree was seeded from an archive that carried macOS junk).
-MT4_FORCE_SEED="${MT4_FORCE_SEED:-0}"
-ENABLE_VNC="${ENABLE_VNC:-1}"
-VNC_PASSWORD="${VNC_PASSWORD:-}"
-VNC_PORT="${VNC_PORT:-5900}"
-NOVNC_PORT="${NOVNC_PORT:-6080}"
-SCREEN="${SCREEN:-1440x900x24}"
+MT4_FORCE_SEED="$(shared_var MT4_FORCE_SEED 0)"
+ENABLE_VNC="$(shared_var ENABLE_VNC 1)"
+VNC_PASSWORD="$(shared_var VNC_PASSWORD)"
+VNC_PORT="$(shared_var VNC_PORT 5900)"
+NOVNC_PORT="$(shared_var NOVNC_PORT 6080)"
+SCREEN="$(shared_var SCREEN 1440x900x24)"
 DISPLAY="${DISPLAY:-:99}"
 export DISPLAY
 
@@ -66,10 +136,6 @@ XVFB_PID=""
 X11VNC_PID=""
 WEBSOCKIFY_PID=""
 TERMINAL_PID=""
-
-log()  { printf '%s [hex] %s\n'  "$(date -u +%H:%M:%S)" "$*"; }
-warn() { printf '%s [hex] WARN: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
-die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
 
 # ------------------------------------------------------- the terminal tree ---
 
@@ -509,9 +575,45 @@ mirror_dir() {
   done
 }
 
+# A container must be given its own volume. Two terminals writing one MT4 tree
+# corrupt each other, and the likelier version of that is quieter: the second
+# application is created without its own volume, inherits the first one's
+# /data - which holds config/accounts.ini, so it logs in as the first account no
+# matter what its env says - and trades the second preset against the first
+# account's money. So the volume records which instance claimed it.
+claim_volume() {
+  local meta marker cur was_login was_sym
+  meta="$(dirname "$MT4DIR")"
+  marker="$meta/.hex-instance"
+  cur="instance=${MT4_INSTANCE} login=${MT4_LOGIN:-?} symbol=${MT4_SYMBOL} preset=${MT4_PRESET}"
+  was_login=""; was_sym=""
+  if [ -f "$marker" ]; then
+    was_login="$(sed -n 's/^.* login=\([^ ]*\).*$/\1/p' "$marker" 2>/dev/null | head -1)"
+    was_sym="$(sed -n 's/^.* symbol=\([^ ]*\).*$/\1/p' "$marker" 2>/dev/null | head -1)"
+  fi
+  # "?" is what an instance with no login yet writes; it proves nothing either way.
+  if [ -n "$MT4_LOGIN" ] && [ -n "$was_login" ] && [ "$was_login" != "?" ] && [ "$was_login" != "$MT4_LOGIN" ]; then
+    die "this volume belongs to account $was_login and this container is instance $MT4_INSTANCE on account ${MT4_LOGIN}. One volume per instance: give this application its own volume at $meta, or - if you really mean to move this volume to the other account - delete $marker first."
+    return 1
+  fi
+  if [ -n "$was_sym" ] && [ "$was_sym" != "$MT4_SYMBOL" ]; then
+    warn "volume: $meta was last used for $was_sym and is now asked for $MT4_SYMBOL - the profile's chart will be moved, the original is kept in $MT4DIR/.profile-orig"
+  fi
+  if [ ! -f "$marker" ]; then
+    log "volume: $meta claimed by instance $MT4_INSTANCE (${MT4_LOGIN:-no login yet}, $MT4_SYMBOL, $MT4_PRESET)"
+  fi
+  mkdir -p "$meta" 2>/dev/null || true
+  printf '%s\n' "$cur" > "$marker" 2>/dev/null || true
+}
+
 banner() {
   log "----------------------------------------------------------------"
-  log " HEX-FVG-Breaker on MT4 | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
+  log " HEX-FVG-Breaker on MT4 | instance $MT4_INSTANCE | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
+  if [ "$MT4_INSTANCE" = "1" ]; then
+    log " instance env : the unsuffixed names (MT4_LOGIN, MT4_SYMBOL, ...)"
+  else
+    log " instance env : the \"$MT4_INSTANCE\" copies (MT4_LOGIN$MT4_INSTANCE, MT4_SYMBOL$MT4_INSTANCE, ...)"
+  fi
   log " data folder  : $MT4DIR (portable, on the volume)"
   log " mt4 journal  : $MT4DIR/logs          - mirrored below as [mt4]"
   log " ea prints    : $MT4DIR/MQL4/Logs     - mirrored below as [ea]"
@@ -570,6 +672,7 @@ main() {
   banner
   report_isolation
   mkdir -p "$MT4DIR"
+  claim_volume
   resolve_distro
   # The display comes up before the compile, not after: metaeditor.exe is a GUI
   # binary and under Wine with no X server it exits without writing the .ex4 -

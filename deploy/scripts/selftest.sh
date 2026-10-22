@@ -201,6 +201,63 @@ else
   bad "healthcheck.sh is not executable"
 fi
 
+echo "instance env"
+# One env file, several applications. Instance 2 must read its own copies and
+# must never fall back to instance 1's account - that fallback is the failure this
+# whole scheme exists to prevent, so it is pinned here.
+load_fn "$ENTRYPOINT" inst_var >/dev/null
+load_fn "$ENTRYPOINT" shared_var >/dev/null
+load_fn "$ENTRYPOINT" check_instance_env >/dev/null
+load_fn "$ENTRYPOINT" claim_volume >/dev/null
+# shellcheck disable=SC2034  # read by the extracted functions
+MT4_INSTANCE=1
+MT4_LOGIN=111; MT4_SYMBOL=XAUUSD; MT4_PRESET=100usd-demo; MT4_PERIOD=""
+MT4_LOGIN2=222; MT4_SYMBOL2=DOGEUSD; MT4_PRESET2=doge-scalp-shadow; MT4_PERIOD2=5
+MT4_PASSWORD2=pw2; MT4_SERVER2=TMGM-Demo
+VNC_PASSWORD=shared-pw
+check_eq "instance 1 reads the plain name" "XAUUSD" "$(inst_var MT4_SYMBOL)"
+check_eq "instance 1 leaves the timeframe to the profile" "" "$(inst_var MT4_PERIOD)"
+check_eq "instance 1 login" "111" "$(inst_var MT4_LOGIN)"
+MT4_INSTANCE=2
+check_eq "instance 2 reads its own symbol" "DOGEUSD" "$(inst_var MT4_SYMBOL)"
+check_eq "instance 2 reads its own timeframe" "5" "$(inst_var MT4_PERIOD)"
+check_eq "instance 2 reads its own login" "222" "$(inst_var MT4_LOGIN)"
+MT4_EXPERT=SomeOtherInstance
+check_eq "instance 2 never falls back to instance 1's copy" "HEX-FVG-Breaker" \
+  "$(inst_var MT4_EXPERT HEX-FVG-Breaker)"
+unset MT4_EXPERT
+check_eq "shared password is one value for both instances" "shared-pw" "$(shared_var VNC_PASSWORD)"
+VNC_PASSWORD2=other
+check_eq "a suffixed shared value wins when it exists" "other" "$(shared_var VNC_PASSWORD)"
+unset VNC_PASSWORD2
+( MT4_INSTANCE=2; MT4_SYMBOL2=""; check_instance_env ) >/dev/null 2>&1
+check_eq "instance 2 without its own symbol refuses to boot" "1" "$?"
+( MT4_INSTANCE=2; MT4_PRESET2=""; check_instance_env ) >/dev/null 2>&1
+check_eq "instance 2 without its own preset refuses to boot" "1" "$?"
+( MT4_INSTANCE=2; check_instance_env ) >/dev/null 2>&1
+check_eq "instance 2 fully configured boots" "0" "$?"
+( MT4_INSTANCE=1; MT4_LOGIN=""; check_instance_env ) >/dev/null 2>&1
+check_eq "instance 1 may still start without a login (login dialog)" "0" "$?"
+
+# The volume remembers who claimed it: a second application pointed at the first
+# one's volume is how a DOGE preset would trade a gold account.
+vol="$TMP/vol"; mkdir -p "$vol/mt4"
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=111 MT4_SYMBOL=XAUUSD MT4_PRESET=100usd-demo
+  claim_volume ) >/dev/null 2>&1
+check_contains "volume records its instance and account" "instance=1 login=111 symbol=XAUUSD" \
+  "$(cat "$vol/.hex-instance" 2>/dev/null)"
+( MT4DIR="$vol/mt4" MT4_INSTANCE=2 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+  claim_volume ) >/dev/null 2>&1
+check_eq "another account on the same volume is refused" "1" "$?"
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=111 MT4_SYMBOL=XAUUSD MT4_PRESET=100usd-demo
+  claim_volume ) >/dev/null 2>&1
+check_eq "the same account on the same volume is fine" "0" "$?"
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=111 MT4_SYMBOL=EURUSD MT4_PRESET=100usd-demo
+  claim_volume ) >/dev/null 2>&1
+check_eq "a symbol change on the same volume is allowed (chart gets moved)" "0" "$?"
+check_contains "the marker follows the symbol change" "symbol=EURUSD" \
+  "$(cat "$vol/.hex-instance" 2>/dev/null)"
+
 echo "dokploy-apply"
 # The provisioner is what makes the server side clickless, so it is worth knowing
 # it still speaks the API the way Dokploy expects. mock-dokploy.py stands in for
