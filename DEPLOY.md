@@ -277,12 +277,13 @@ variable edited in Dokploy's UI and nowhere else is overwritten by the next push
 
 ## 6. Dokploy
 
-**By hand, in the UI — the short route.** Everything the container needs is one of
-eleven environment variables, and setting them here keeps every credential out of
-git. Create **Project** `forex-hex-mt4` → **Create Service** → **Compose**, then:
+**By hand, in the UI — the Docker-Image route.** Everything the container needs is
+one of eleven environment variables, and setting them here keeps every credential
+out of git. Create **Project** `forex-hex-mt4` → **Create Service** → **Application**,
+then:
 
-- **Compose file**: paste `deploy/docker-compose.yml` verbatim. The `cap_add` and
-  `shm_size` it needs are below, and only a Compose service carries them.
+- **Provider → Docker**: image `ghcr.io/thamitshepe/forex-hex-mt4:live`. The package
+  is public, so leave the registry credentials empty.
 - **Environment**: paste this, with your own demo account and a VNC password.
 
 ```dotenv
@@ -299,11 +300,37 @@ TZ=UTC
 # MT4_IMAGE=ghcr.io/<owner>/forex-hex-mt4:<sha>    # pin an older build to roll back
 ```
 
+- **Advanced → Mounts**: add a **Volume** mount, name `hex-mt4-data`, mount path
+  `/data`. Without it every redeploy re-downloads 36 MB and loses the profile — and
+  with it the seeded chart.
+- **Advanced → Restart Policy**: `Any`.
+- **Domains**: host `trade.thami.dev`, path `/`, **port `6080`**, HTTPS on,
+  certificate **Let's Encrypt**. Point the DNS A record at the server *before* the
+  deploy, or the certificate cannot be issued. Traefik terminates TLS and forwards to
+  port 6080 inside the container, so no host port is published and nothing collides.
+- **Security** (recommended): basic auth on that domain. It is a trading terminal on a
+  public hostname, and the VNC password would otherwise be the only lock.
+
 Then **Deploy**. The first start downloads the tarball (36 MB, once — it lands in the
 volume), compiles the EA with the container's own `metaeditor.exe`, logs the account
-in from `MT4_LOGIN`/`MT4_PASSWORD`, and prints `terminal.exe is up` when it is up.
-§7 is what to look at. `uname -m` on the VPS must say `x86_64`: the image is built
-for `linux/amd64` only.
+in from `MT4_LOGIN`/`MT4_PASSWORD`, and prints `terminal.exe is up`. §7 is what to
+look at. `uname -m` on the VPS must say `x86_64`: the image is built for
+`linux/amd64` only.
+
+**What this route cannot set, and why the compose file still exists.** Dokploy's
+Application type has no `cap_add` and no `shm_size`: `CapAdd` appears nowhere in
+Dokploy's source, and the compose route works only because it hands raw YAML to
+`docker compose`, which is what understands those keys. Neither is usually fatal —
+Wine wants `SYS_PTRACE` only to attach a debugger, and 64 MB of `/dev/shm` carries a
+1440x900 screen most of the time — but both fail as things that look like a broken
+EA, so the entrypoint reports them at boot:
+
+    shm          : 64 MB (enough for Xvfb + Wine)     |  or the WARN that says otherwise
+    CAP_SYS_PTRACE: present                           |  or the WARN that says absent
+
+If the desktop is blank, the log says `BadAccess (MIT-SHM)`, or the expert never
+attaches, switch this one service to the Compose app in `deploy/docker-compose.yml`:
+that is the only reason the file is still here.
 
 **Or let CI do it.** On the first push to `main` with `DOKPLOY_URL` and
 `DOKPLOY_API_TOKEN` set, `deploy/scripts/dokploy-apply.sh` makes the same project and

@@ -310,6 +310,31 @@ banner() {
   log "----------------------------------------------------------------"
 }
 
+# Two things this container wants but cannot always be given: a big /dev/shm and
+# CAP_SYS_PTRACE. Dokploy's Docker-Image app type can set neither - `CapAdd` does
+# not appear anywhere in Dokploy's source, and `shm_size` is a compose key - while
+# the Compose route gets both because it hands raw YAML to `docker compose`. Neither
+# is fatal on its own, but each fails as something that looks like a broken EA (a
+# blank desktop with BadAccess MIT-SHM; an expert that never attaches), so they are
+# reported at boot instead of assumed. This logs and carries on: the desktop and the
+# EA's own dashboard are the things that know what actually happened.
+report_isolation() {
+  local shm_kb cap_eff
+  shm_kb="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $2}')"
+  shm_kb="${shm_kb:-0}"
+  if [ "$shm_kb" -gt 0 ] && [ "$shm_kb" -lt 131072 ]; then
+    warn "/dev/shm is $((shm_kb / 1024)) MB. Xvfb and Wine share it to draw, so a blank desktop or 'BadAccess (MIT-SHM)' in this log is that. Compose can raise it (shm_size: 512m); a Docker-Image app cannot."
+  elif [ "$shm_kb" -gt 0 ]; then
+    log " shm          : $((shm_kb / 1024)) MB (enough for Xvfb + Wine)"
+  fi
+  cap_eff="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)"
+  if [ -n "$cap_eff" ] && (( (16#$cap_eff >> 19) & 1 )); then
+    log " CAP_SYS_PTRACE: present"
+  else
+    warn "CAP_SYS_PTRACE is not in this container. Wine only wants it to attach a debugger, so this is usually harmless - but if no smiley face ever appears next to the expert name, this is one of the two candidates (the other is AutoTrading, which the EA reports itself)."
+  fi
+}
+
 on_term() {
   trap - TERM INT
   log "SIGTERM - asking MT4 to close so it flushes its journal and the EA's CSVs"
@@ -329,6 +354,7 @@ on_term() {
 main() {
   trap on_term TERM INT
   banner
+  report_isolation
   mkdir -p "$MT4DIR"
   resolve_distro
   # The display comes up before the compile, not after: metaeditor.exe is a GUI
