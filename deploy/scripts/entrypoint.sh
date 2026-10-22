@@ -172,7 +172,7 @@ resolve_distro() {
     return 0
   fi
   if [ -n "$MT4_DISTRO_URL" ]; then
-    local arc=/tmp/mt4-distro.tar
+    local arc=/tmp/mt4-distro.tar sha
     log "seeding $MT4DIR from MT4_DISTRO_URL"
     curl -fsSL --retry 3 --retry-delay 5 -o "$arc" "$MT4_DISTRO_URL" \
       || die "distro download failed: $MT4_DISTRO_URL"
@@ -180,14 +180,36 @@ resolve_distro() {
     # actually running". A tarball rebuilt on a Mac and a release asset look
     # identical from the inside, and a stale one shows up as odd content rather
     # than as an error - this log line makes the comparison a one-liner.
+    sha="$(sha256sum "$arc" | cut -d' ' -f1)"
     log "distro url  : $MT4_DISTRO_URL"
-    log "distro sha  : $(sha256sum "$arc" | cut -d' ' -f1) ($(stat -c %s "$arc") bytes)"
+    log "distro sha  : $sha ($(stat -c %s "$arc") bytes)"
+
+    # MT4_FORCE_SEED is one-shot per archive, not "every boot". Replacing the tree
+    # also replaces MQL4/Files/Common/HEX-Logs - the EA's own trade history - so a
+    # flag left on by accident would erase the CSV record on every restart. The
+    # marker is written only after a forced seed; a different archive still gets
+    # in, and deleting /data/.seeded-from re-arms the same one.
+    if [ "$MT4_FORCE_SEED" = "1" ] && have_terminal && [ -f /data/.seeded-from ] \
+       && [ "$(cat /data/.seeded-from)" = "$sha" ]; then
+      warn "MT4_FORCE_SEED=1, but /data/mt4 was already re-seeded from this exact archive ($sha)."
+      warn "Not replacing it again - that would delete the profile and the EA's CSV trade log."
+      warn "Remove MT4_FORCE_SEED from the environment, or delete /data/.seeded-from to force it again."
+      rm -f "$arc"
+      return 0
+    fi
+
     rm -rf "$new"
     mkdir -p "$new"
     untar_into "$arc" "$new"
     rm -f "$arc"
     log "extracted   : $(find "$new" -type f | wc -l | tr -d ' ') files"
     swap_in_new_tree "$new"
+    if [ "$MT4_FORCE_SEED" = "1" ]; then
+      printf '%s\n' "$sha" > /data/.seeded-from
+      warn "seeded from $sha. MT4_FORCE_SEED stays set but will not re-seed this archive again; set it to 0 when convenient."
+    else
+      rm -f /data/.seeded-from
+    fi
     return 0
   fi
   [ "$MT4_ALLOW_FRESH_INSTALL" = "1" ] \
