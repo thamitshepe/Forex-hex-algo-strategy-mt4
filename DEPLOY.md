@@ -476,8 +476,9 @@ have one deploy bring up both, that is the compose route in `deploy/docker-compo
 (§6.1 below), which pulls the same image; the two routes are alternatives, not
 additions — do not give both of them `trade.thami.dev`.
 
-**What makes them different traders** is three things, and only one of them is a
-decision you make twice:
+**What makes them different traders.** Everything below is the same image and the
+same env layout; the differences are two decisions (instance number, volume name) and
+one structural fact (each app only ever holds its own credentials):
 
 | | `hex-mt4` | `hex-mt4-doge` |
 |---|---|---|
