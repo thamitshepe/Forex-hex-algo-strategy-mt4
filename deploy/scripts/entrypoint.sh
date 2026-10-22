@@ -884,8 +884,14 @@ banner() {
 # blank desktop with BadAccess MIT-SHM; an expert that never attaches), so they are
 # reported at boot instead of assumed. This logs and carries on: the desktop and the
 # EA's own dashboard are the things that know what actually happened.
+cap_has_bit() { # hexset bit -> 0 when the bit is set (a test, not a value)
+  local set="$1" bit="$2"
+  [ -n "$set" ] || return 1
+  (( (16#$set >> bit) & 1 ))
+}
+
 report_isolation() {
-  local shm_kb cap_eff
+  local shm_kb cap_bnd cap_eff
   shm_kb="$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $2}')"
   shm_kb="${shm_kb:-0}"
   if [ "$shm_kb" -gt 0 ] && [ "$shm_kb" -lt 131072 ]; then
@@ -893,10 +899,21 @@ report_isolation() {
   elif [ "$shm_kb" -gt 0 ]; then
     log " shm          : $((shm_kb / 1024)) MB (enough for Xvfb + Wine)"
   fi
+  # Two different questions, and only the first one is the container's setting:
+  # CapBnd is what the container was *given* (cap_add), CapEff is what this
+  # process may use right now. The entrypoint runs as `trader` after gosu dropped
+  # root, and a setuid from root clears the effective set - so CapEff is empty for
+  # everyone here even when cap_add worked. Asking CapEff produced a warning on
+  # every healthy container; ask CapBnd, and mention CapEff only as the reason.
+  cap_bnd="$(awk '/^CapBnd:/ {print $2}' /proc/self/status 2>/dev/null)"
   cap_eff="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)"
-  if [ -n "$cap_eff" ] && (( (16#$cap_eff >> 19) & 1 )); then
-    log " CAP_SYS_PTRACE: present"
-  else
+  if cap_has_bit "$cap_bnd" 19; then
+    if cap_has_bit "$cap_eff" 19; then
+      log " CAP_SYS_PTRACE: present"
+    else
+      log " CAP_SYS_PTRACE: granted to the container, not to the trader process (gosu dropped root, which clears the effective set). Wine traces its own children, and that needs no capability."
+    fi
+  elif [ -n "$cap_bnd" ]; then
     warn "CAP_SYS_PTRACE is not in this container. Wine only wants it to attach a debugger, so this is usually harmless - but if no smiley face ever appears next to the expert name, this is one of the two candidates (the other is AutoTrading, which the EA reports itself)."
   fi
 }

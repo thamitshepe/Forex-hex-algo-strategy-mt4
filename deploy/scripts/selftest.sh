@@ -71,6 +71,26 @@ else
   bad "file written"
 fi
 
+echo "capability reporting"
+# SYS_PTRACE is bit 19. Docker's default CapEff (a80425fb) does not have it; with
+# `cap_add: SYS_PTRACE` it is a80825fb. The banner used to test CapEff, which is
+# empty for the trader process because gosu dropped root - so every healthy
+# container warned about a missing capability it actually had.
+load_fn "$ENTRYPOINT" cap_has_bit >/dev/null
+if cap_has_bit a80425fb 19; then
+  bad "Docker's default set has no SYS_PTRACE"
+else
+  ok "Docker's default set has no SYS_PTRACE"
+fi
+if cap_has_bit a80825fb 19; then
+  ok "cap_add SYS_PTRACE is recognised (the container's own set)"
+else
+  bad "cap_add SYS_PTRACE is recognised (the container's own set)"
+fi
+if cap_has_bit "" 19; then bad "an unreadable set is not 'present'"; else ok "an unreadable set is not 'present'"; fi
+check_contains "the banner asks the container's set, not the process's" 'CapBnd' \
+  "$(sed -n '/^report_isolation() {/,/^}/p' "$ENTRYPOINT")"
+
 echo "banner"
 # The banner is the first thing in the log, so anything unbound here kills the
 # container before the terminal starts - and only for an instance that happens to
