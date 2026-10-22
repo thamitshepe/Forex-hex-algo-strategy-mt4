@@ -1,9 +1,9 @@
 # HEX-FVG-Breaker on a server: two accounts, two strategies, one image, one file.
 #
-# This is the ONE-DEPLOY alternative to the default Dokploy route (two Docker-Image
-# applications from this same image, DEPLOY.md §6). Both pull
-# ghcr.io/thamitshepe/forex-hex-mt4:live; nothing here is built. Choose one route per
-# hostname - this file is a Compose application that runs both services:
+# This is the DEFAULT Dokploy route (DEPLOY.md §2): one Compose application that
+# runs both accounts as two services of one image. The alternative is two
+# Docker-Image applications (DEPLOY.md §6), which is what this replaces. Both pull
+# ghcr.io/thamitshepe/forex-hex-mt4:live; nothing here is built. Choose one route.
 #
 #   service    instance   account                     symbol      hostname
 #   ---------  ---------  --------------------------  ----------  -------------------
@@ -11,10 +11,11 @@
 #   mt4-doge   2          MT4_LOGIN2 (its own)        DOGEUSD M5  trade2.thami.dev
 #
 # One deploy brings up both. One Environment tab feeds both. One domain per
-# service is the only per-service thing in Dokploy (Domains tab), and the instance
-# number is a property of the *service*, not of the env - which is the point: two
-# applications hand-configured from one env file is how you end up looking at the
-# gold account on both hostnames.
+# service is the only per-service thing in Dokploy (Domains tab) - and a domain
+# only routes after a deploy, because its Traefik label is written when the
+# container is created. The instance number is a property of the *service*, not of
+# the env - which is the point: two applications hand-configured from one env file
+# is how you end up looking at the gold account on both hostnames.
 #
 # The rule that makes it safe is in the two environment blocks below: instance 1
 # is handed MT4_LOGIN and instance 2 is handed MT4_LOGIN2 *and never the plain
@@ -59,6 +60,16 @@ x-mt4-common: &mt4-common
   # Xvfb and Wine share memory to draw windows. Too small a /dev/shm shows up as
   # "BadAccess (MIT-SHM)" and a dead desktop.
   shm_size: 512m
+  # Traefik (Dokploy's proxy) can only reach a container that is on the same
+  # network, and Dokploy's proxy lives on `dokploy-network`. Without this the
+  # domain resolves to Dokploy and then fails - "app not found" when the label was
+  # never generated, 502 when it was but the network is missing.
+  networks:
+    - dokploy-network
+  # The port both services serve noVNC + websockify on, which is the number to
+  # type into a domain's "container port". Not published anywhere by itself.
+  expose:
+    - "6080"
 
 services:
   mt4:
@@ -136,4 +147,13 @@ services:
 volumes:
   hex-mt4-data:
   hex-mt4-doge-data:
+
+# Dokploy's Traefik proxy is attached to this network; a compose service that is
+# not on it is unreachable by hostname. `docker network ls | grep dokploy` on the
+# server shows it - Dokploy creates it on install. For a local `docker compose up`
+# outside Dokploy, create it first: docker network create dokploy-network
+networks:
+  dokploy-network:
+    external: true
+
 

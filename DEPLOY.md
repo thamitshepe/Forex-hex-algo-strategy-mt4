@@ -72,15 +72,20 @@ MQL4 does not compile. Then, in Dokploy:
 1. **Create Project** `forex-hex-mt4` → **Create Service** → **Compose**.
 2. Paste `deploy/docker-compose.yml` into the compose editor (provider: raw).
    It defines both services — `mt4` (XAUUSD) and `mt4-doge` (DOGEUSD) — from
-   `ghcr.io/thamitshepe/forex-hex-mt4:live`.
+   `ghcr.io/thamitshepe/forex-hex-mt4:live`, both attached to `dokploy-network`
+   because that is the only network Traefik can reach them on.
 3. Paste **all of** `dist/dokploy.env` into the **Environment** tab: one place, both
    instances, nothing per service. Fill `MT4_LOGIN`/`MT4_PASSWORD` and the `…2`
    copies, with the `MT4_DISTRO_URL` from §4.
 4. **Deploy**, then watch the log until `terminal.exe is up` (§7) — the log has a
    service selector, so `mt4` and `mt4-doge` are read separately.
 5. **Domains** tab, one per service: `trade.thami.dev` → service `mt4` → port `6080`
-   → HTTPS; `trade2.thami.dev` → service `mt4-doge` → port `6080` → HTTPS. Added
-   once, they survive every deploy after that.
+   → HTTPS; `trade2.thami.dev` → service `mt4-doge` → port `6080` → HTTPS.
+6. **Deploy again.** A domain becomes a Traefik label on the *container*, and labels
+   are written when the container is created — so a domain added to a running app
+   routes nowhere (`app not found`) until the next deploy. Add both domains first,
+   then deploy once; from then on the domains survive every later deploy.
+
 
 Everything site-specific lives in that one Environment tab: that is the one place to
 change a password, a symbol or a preset, and no credential is stored in git. The
@@ -588,9 +593,13 @@ Steps, in order:
    service **`mt4-doge`** → port **6080** → HTTPS + Let's Encrypt. One domain per
    service, added once; it survives every deploy after that. Check that
    `trade.thami.dev` points at service `mt4` while you are there.
-5. **Delete the old second application** if you created one: it still claims
+5. **Deploy once more** after adding a domain: Dokploy writes the Traefik label when
+   it creates the container, so a domain added to an already running app answers
+   `app not found` until the next deploy.
+6. **Delete the old second application** if you created one: it still claims
    `trade2.thami.dev` otherwise, and two things answering one hostname is how you end
    up looking at the wrong container.
+
 
 **Coming from two applications.** The service `mt4-doge` replaces the second
 application, whose volume is disposable (it was a copy of the gold account's terminal;
@@ -800,6 +809,9 @@ shows the EA's prints, and a rebuild is a `git push`.
 |---|---|---|
 | both hostnames show the same account and the same chart | the second container is instance 1 too: a Docker-Image app copied from the first (no `MT4_INSTANCE=2`, plain `MT4_LOGIN`), a compose service pointed at the other service's **volume**, or an old application still serving that hostname on a stale `:sha` | the first three log lines answer it: `instance N` must be `1` on `trade.thami.dev` and `2` on `trade2.thami.dev`, and `image build` must be the commit you deployed. `WARN: shared volume: … in use right now by another container` means the volume, and nothing else |
 | the second hostname serves nothing, or its certificate is for the wrong app | the DNS record is missing, or the domain was added without a service name (compose apps route per service) | Domains → host, path `/`, **service `mt4-doge`**, port `6080`, HTTPS + Let's Encrypt; its `A` record must point at this server. One hostname, one service — delete any older application still claiming it |
+| `app not found` at both hostnames, containers running | the domain was added *after* the last deploy, so no Traefik label points at the container (labels are written at container creation) | **Deploy** once more after adding the domains. Verify: `docker inspect <container> --format '{{index .Config.Labels "traefik.http.routers.<app>.rule"}}'` must print your `Host(...)` rule, and `docker logs dokploy-traefik 2>&1 \| tail` must not say "no such service" |
+| `502 Bad Gateway` instead of `app not found` | the label exists but Traefik cannot reach the container: the service is not on `dokploy-network` | the compose file already puts both services there (`networks: [dokploy-network]`, declared `external: true`); if you edited it, `docker network ls \| grep dokploy` shows the name |
+| `line 860: MT4_PERIODm: unbound variable`, restart loop, only on `mt4-doge` | a banner line wrote `$MT4_PERIODm`, which bash reads as the variable `MT4_PERIODm`; with `MT4_PERIOD` set (instance 2 has `MT4_PERIOD2=5`) the word is expanded and the variable does not exist. Instance 1 has an empty period, so it never showed | fixed in the image (and the selftest now renders the banner for both instances under `set -u`). Redeploy to pick up the new `:live` |
 | `FATAL: the installer produced no terminal under .../drive_c` | MetaQuotes' installer does not run under Wine — it is a 64-bit web installer that exits silently | expected with `MT4_DISTRO_URL` empty; supply a distro (§4A). The installer's own output is printed just above the error |
 | `tar: ./MQL4: Cannot mkdir: Permission denied` on first start | the volume belongs to another uid, so seeding as `trader` cannot write into it | `docker-entrypoint.sh` chowns `/data` as root before dropping privileges; if it persists the mount is a bind mount, which keeps its *host* ownership — `chown -R 1000:1000` that host directory or use a named volume |
 | restart loop, `BadAccess (MIT-SHM)` while installing | Xvfb and Wine share memory to draw | `shm_size: 512m` (already set); `ipc: host` if it persists |

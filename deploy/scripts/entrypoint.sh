@@ -857,7 +857,7 @@ lease_release() { # a clean stop is not a container that is still using the volu
 
 banner() {
   log "----------------------------------------------------------------"
-  log " HEX-FVG-Breaker on MT4 | instance $MT4_INSTANCE | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
+  log " HEX-FVG-Breaker on MT4 | instance $MT4_INSTANCE | ${MT4_SYMBOL}${MT4_PERIOD:+ ${MT4_PERIOD}m} | $MT4_EXPERT | preset $MT4_PRESET"
   log " image build  : ${HEX_BUILD:-unknown - a local build, not a CI image}"
   log " account      : ${MT4_LOGIN:-<unset>} @ ${MT4_SERVER:-<unset>}"
   if [ "$MT4_INSTANCE" = "1" ]; then

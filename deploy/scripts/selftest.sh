@@ -71,6 +71,38 @@ else
   bad "file written"
 fi
 
+echo "banner"
+# The banner is the first thing in the log, so anything unbound here kills the
+# container before the terminal starts - and only for an instance that happens to
+# have the optional variable set. That asymmetry is the point: instance 1 can be
+# healthy while instance 2 restart-loops, which is what "$MT4_PERIODm" did (bash
+# reads that as the variable MT4_PERIODm, so it only broke when a period was
+# given). Rendered for both instances with `set -u` on, like the entrypoint.
+banner_text() { # instance symbol period -> what the banner prints
+  (
+    set -u
+    MT4_INSTANCE="$1" MT4_SYMBOL="$2" MT4_PERIOD="$3" MT4_EXPERT=HEX-FVG-Breaker
+    MT4_PRESET=100usd-demo; MT4_LOGIN=176472093; MT4_SERVER=MetaQuotes-Demo
+    MT4DIR=/data/mt4
+    log() { printf '%s\n' "$*"; }
+    eval "$(sed -n '/^banner() {/,/^}/p' "$ENTRYPOINT")"
+    banner
+  ) 2>&1
+}
+b1="$(banner_text 1 XAUUSD '')"
+check_contains "instance 1 renders" "instance 1 | XAUUSD |" "$b1"
+check_eq "instance 1 has no unbound variable" "0" \
+  "$(printf '%s\n' "$b1" | grep -c 'unbound variable')"
+b2="$(banner_text 2 DOGEUSD 5)"
+check_contains "instance 2 renders with its timeframe" "instance 2 | DOGEUSD 5m |" "$b2"
+check_eq "instance 2 has no unbound variable (the restart loop)" "0" \
+  "$(printf '%s\n' "$b2" | grep -c 'unbound variable')"
+check_contains "an empty period adds no suffix" "| XAUUSD |" "$b1"
+check_contains "instance 2 names the env vars it reads" "MT4_LOGIN2, MT4_SYMBOL2" "$b2"
+check_contains "the account line is intact" "account      : 176472093 @ MetaQuotes-Demo" "$b2"
+check_eq "the account appears once per banner" "1" \
+  "$(printf '%s\n' "$b2" | grep -c 'account      :')"
+
 echo "startup.ini symbol from profile"
 # The distro's default profile already carries the XAUUSD M15 chart. Naming the
 # symbol in startup.ini as well makes MT4 open a second chart, and a second chart
@@ -454,6 +486,17 @@ check_eq "mt4-doge publishes no host port (it has a hostname)" "0" \
 check_contains "the gold volume keeps its old name, so no data moves" 'hex-mt4-data:/data' "$gold"
 check_eq "both volumes are declared" "2" "$(grep -cE '^  hex-mt4(-doge)?-data:$' "$COMPOSE")"
 check_eq "one image, shared by both" "1" "$(grep -c '^  image:' "$COMPOSE")"
+# Traefik only reaches containers on its own network, and Dokploy's is
+# dokploy-network. Without this the domain gets as far as the proxy and stops:
+# 404 "app not found" if the label is missing too, 502 if only this is.
+common="$(awk '/^x-mt4-common:/{f=1} /^services:$/{f=0} f' "$COMPOSE")"
+check_contains "the shared block puts services on Dokploy's network" "    - dokploy-network" \
+  "$common"
+check_contains "as an external network Dokploy created" "dokploy-network:" \
+  "$(printf '%s\n' "$(awk '/^networks:$/{f=1} f' "$COMPOSE")")"
+check_contains "and marks it external" "external: true" \
+  "$(printf '%s\n' "$(awk '/^networks:$/{f=1} f' "$COMPOSE")")"
+check_contains "the shared block names the port a domain proxies to" '- "6080"' "$common"
 if docker compose version >/dev/null 2>&1; then
   out="$(docker compose -f "$COMPOSE" config 2>/dev/null)"
   rc=$?
