@@ -525,6 +525,7 @@ shows the EA's prints, and a rebuild is a `git push`.
 | symptom | cause | fix |
 |---|---|---|
 | `FATAL: the installer produced no terminal under .../drive_c` | MetaQuotes' installer does not run under Wine — it is a 64-bit web installer that exits silently | expected with `MT4_DISTRO_URL` empty; supply a distro (§4A). The installer's own output is printed just above the error |
+| `tar: ./MQL4: Cannot mkdir: Permission denied` on first start | the volume belongs to another uid, so seeding as `trader` cannot write into it | `docker-entrypoint.sh` chowns `/data` as root before dropping privileges; if it persists the mount is a bind mount, which keeps its *host* ownership — `chown -R 1000:1000` that host directory or use a named volume |
 | restart loop, `BadAccess (MIT-SHM)` while installing | Xvfb and Wine share memory to draw | `shm_size: 512m` (already set); `ipc: host` if it persists |
 | terminal runs, no `[ea]` lines, no push | AutoTrading off, or the container lacks `cap_add: SYS_PTRACE` | check the cap first, then §3 |
 | push never arrives, dashboard `err 4060` | ntfy URL missing from the WebRequest list | §3, second switch |
