@@ -5,6 +5,10 @@ logs/
 *.imp
 *.htm
 
+# The prepared terminal from deploy/scripts/prepare-distro.sh. It is ~36 MB of
+# MetaQuotes binaries and it is what MT4_DISTRO_URL points at - never committed.
+dist/
+
 # Python
 __pycache__/
 *.pyc

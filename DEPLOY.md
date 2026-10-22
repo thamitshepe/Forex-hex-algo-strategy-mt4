@@ -65,17 +65,18 @@ compiled and checked in CI — see `deploy/scripts/entrypoint.sh`.
 
 ## 2. The 30-second version
 
-Once, on the server (§6 is the same thing click by click):
+Once, in the repo — Settings → Secrets and variables → Actions, the values listed
+in §5. The ones that matter: `DOKPLOY_URL`, `DOKPLOY_API_TOKEN`, `MT4_LOGIN`,
+`MT4_PASSWORD`, and `MT4_DISTRO_URL` for the terminal itself. Then push to `main`,
+and the push:
 
-```bash
-MT4_LOGIN=<demo login>
-MT4_PASSWORD=<demo password>
-MT4_SERVER=MetaQuotes-Demo      # or your broker's server
-VNC_PASSWORD=<something>        # required, or there is no desktop at all
-MT4_SYMBOL=XAUUSD
-MT4_PRESET=100usd-demo
-TZ=UTC
-```
+1. builds `deploy/Dockerfile` and pushes `ghcr.io/<owner>/forex-hex-mt4:live` plus
+   the commit SHA — and fails if the MQL4 does not compile;
+2. creates the Dokploy project, the Compose app and its environment, or finds the
+   ones it made last time;
+3. sends the compose file and the environment, then asks Dokploy to deploy.
+
+No server commands in any of that, and no clicks. §6 is what each step is.
 
 Then open `http://<server>:6080/vnc.html`, log in with `VNC_PASSWORD`, and check
 the two things a headless start cannot check for you (§3). After that, the
@@ -152,17 +153,29 @@ seeded XAUUSD M15 chart with the EA on it, and the account you are already logge
 into. They live in `config/` and `profiles/`, which is why the archive is the
 deliverable rather than a checklist.
 
-Then get it onto the server. With a bind mount in the compose file — change
-`- hex-mt4-data:/data` to `- /opt/hex-mt4:/data` — the whole thing is `scp`:
+Then put it somewhere the container can fetch. That is the whole handover: the
+entrypoint reads `MT4_DISTRO_URL` and `curl` understands `https://` exactly as
+well as `file://`, so if the tarball has a URL there is no step on the server at
+all.
 
 ```bash
-scp dist/mt4-portable.tar.gz user@server:/opt/hex-mt4/
-# compose env: MT4_DISTRO_URL=file:///data/mt4-portable.tar.gz
+gh release create mt4-distro dist/mt4-portable.tar.gz    # or any https:// host
+# repo variable (§5):
+# MT4_DISTRO_URL=https://github.com/<you>/<repo>/releases/download/mt4-distro/mt4-portable.tar.gz
 ```
 
-`file://` works because the entrypoint uses `curl`, so the tarball only has to be
-inside the mounted directory. No hosting, no URL to publish. (With a named volume
-instead of a bind mount, use `docker cp mt4-portable.tar.gz <container>:/data/`.)
+Set that variable once and every deploy after it seeds the volume on first start —
+nothing to copy, no shell on the server. A public host makes the tarball public,
+and it is MetaQuotes' code; if that matters, keep the bucket private and give the
+container a URL that carries its own signature. (A private GitHub release asset
+needs a token in the URL, which is more awkward than an object-storage link.)
+
+Two alternatives, for when the tarball has no URL to give it. With a **bind
+mount** — change `- hex-mt4-data:/data` to `- /opt/hex-mt4:/data` — it is one
+`scp` and `MT4_DISTRO_URL=file:///data/mt4-portable.tar.gz`. With the named volume
+the compose file already declares, it is `docker cp mt4-portable.tar.gz
+<container>:/data/`. Both work, both are once per install, and neither is needed
+on the URL route.
 
 Restart the container and it seeds, compiles and launches — §7 shows what that
 looks like in the log.
@@ -217,90 +230,128 @@ Four things worth knowing, all of them checked rather than assumed:
   manifest is an OCI index holding one `linux/amd64` image plus buildkit's
   provenance attestation.
 
-### What is left to set on GitHub
+### What you have to give it
 
-Repository variables are not secrets — they are a URL, a UUID and a tarball URL —
-so they belong in Settings → Variables, not Settings → Secrets:
+Everything below is a *value*. Nothing below is an instruction to click something
+in Dokploy: `deploy/scripts/dokploy-apply.sh` creates the project, the app, the
+environment and the deployment (§6). These are the values it carries.
 
 | kind | name | what it is |
 |---|---|---|
-| variable | `MT4_DISTRO_URL` | the prepared terminal tarball from §4A. At runtime it is how the terminal arrives; passed to the build it is also what makes `ea-check` download it, compile the EA with the real `metaeditor.exe`, and bake the `.ex4` into the image — the version of "the build fails if the EA does not compile" that covers *every* commit rather than only the ones where someone remembers to compile locally |
-| variable | `DOKPLOY_URL` | the Dokploy instance, e.g. `https://dokploy.example.com`, no trailing slash |
-| variable | `DOKPLOY_COMPOSE_ID` | the Compose app's id. `GET <DOKPLOY_URL>/api/project.all` with the `x-api-key` header lists it |
-| secret | `DOKPLOY_API_TOKEN` | a Dokploy API token (Settings → API Keys). With the three above, the `deploy` job calls `POST /api/compose.deploy` |
-| secret | `DOKPLOY_WEBHOOK` | the alternative trigger: the webhook URL from the app's Deployments tab. Used only when the API triple is incomplete — and read as a git-provider push, so §6 applies |
+| variable | `MT4_DISTRO_URL` | the prepared terminal tarball from §4A as an `https://` URL. At runtime it is how the terminal arrives — no `scp`, no `docker cp`. Passed to the build it also makes `ea-check` download it, compile the EA with the real `metaeditor.exe` and bake the `.ex4` into the image, which is the version of "the build fails if the EA does not compile" that covers *every* commit |
+| variable | `DOKPLOY_URL` | the instance, e.g. `https://dokploy.example.com`, no trailing slash |
+| secret | `DOKPLOY_API_TOKEN` | a Dokploy API token (Settings → API Keys). **Required for the deploy half** — with `DOKPLOY_URL` it is the only Dokploy input there is |
+| secret | `MT4_LOGIN` | the demo account login |
+| secret | `MT4_PASSWORD` | its password |
+| secret | `VNC_PASSWORD` | the remote desktop's password. Unset ⇒ no desktop at all (§3) |
+| variable | `MT4_SERVER` | default `MetaQuotes-Demo` |
+| variable | `MT4_SYMBOL` / `MT4_PRESET` | default `XAUUSD` / `100usd-demo` |
+| variable | `MT4_PROFILE` | default `default` |
+| variable | `ENABLE_VNC` | default `1` |
+| variable | `TZ` | leave unset (UTC): the preset's trading hours are UTC |
+| variable | `DOKPLOY_PROJECT` / `DOKPLOY_APP` | optional. Rename the project or the Compose app away from `forex-hex-mt4` / `hex-mt4`. `DOKPLOY_APP` is the Compose *project* name, so changing it later is a fresh volume, not a rename |
 
-Leave all five unset and the workflow still does the useful half: it publishes
-`live` and the SHA, and the `deploy` job prints a notice instead of failing.
+Leave `DOKPLOY_URL` and `DOKPLOY_API_TOKEN` unset and the workflow still does the
+useful half: it publishes `live` and the SHA, and the deploy job prints a notice
+instead of failing. That is deliberate — a fork should build without a token.
+
+The values only work in one direction. What is in these secrets is what
+`compose.saveEnvironment` writes, on every deploy, replacing what is there. A
+variable edited in Dokploy's UI and nowhere else is overwritten by the next push.
 
 ---
 
 ## 6. Dokploy
 
-The Compose app, in the order you click it. Prerequisites: an **amd64** VPS with
-Dokploy installed (§8 costs this out), and a **Docker Compose** service — not a
-**Stack**, which is Docker Swarm and drops some Compose features (`build` among
-them; `cap_add` and `shm_size` do not behave the same there either).
+You do not create anything here. On the first push to `main` with `DOKPLOY_URL` and
+`DOKPLOY_API_TOKEN` set, `deploy/scripts/dokploy-apply.sh` makes the whole thing
+and deploys it; on every push after that it finds what it made, updates it and
+deploys again. The prerequisites are only an **amd64** VPS with Dokploy installed
+(§8 costs this out) and those two settings.
 
-1. **Create it.** Project → Create Service → Compose. The name you give it
-   becomes the Compose *project* name, so pick something short and recognisable:
-   `hex-mt4`.
-2. **General.** Provider `Git` → GitHub →
-   `thamitshepe/Forex-hex-algo-strategy-mt4`, Branch `main`, Compose Path
-   `deploy/docker-compose.yml`. Turn **Auto Deploy** on — that is what makes a
-   push deploy by itself (see "Triggering a redeploy" below). With no Git
-   provider connected, set the provider to raw/paste instead and paste the file;
-   Auto Deploy is then unavailable and you deploy by pressing Deploy, or through
-   the API.
-3. **Environment.** Paste the block below with real values. Everything the
-   compose file interpolates lives here — there is no `env_file:` to add.
+**What the first run does**, in order:
 
-   ```bash
-   MT4_LOGIN=<demo login>
-   MT4_PASSWORD=<demo password>
-   MT4_SERVER=MetaQuotes-Demo
-   MT4_SYMBOL=XAUUSD
-   MT4_PRESET=100usd-demo
-   MT4_PROFILE=default
-   ENABLE_VNC=1
-   VNC_PASSWORD=<something>
-   TZ=UTC
-   MT4_DISTRO_URL=file:///data/mt4-portable.tar.gz
-   HEX_HEARTBEAT_MAX_AGE_MIN=180
-   ```
+1. `GET /api/project.all` — is there a project called `forex-hex-mt4`?
+2. `POST /api/project.create` if not. Dokploy puts a `production` environment in
+   it, which is where the service goes.
+3. `GET /api/project.one` — that project's environments, and the services already
+   in them.
+4. `POST /api/compose.create` — the app, named `hex-mt4`, in that environment.
+5. `POST /api/compose.update` — `sourceType: raw` plus `composeFile` = the bytes of
+   `deploy/docker-compose.yml` from the commit being deployed, so what runs on the
+   server is the file in the repo and not a copy pasted once that then drifts.
+   `autoDeploy` stays off: the script is the deploy trigger.
+6. `POST /api/compose.saveEnvironment` — the values from §5, as the `.env` the
+   compose file interpolates.
+7. `POST /api/compose.deploy` — pull `ghcr.io/…:live` and recreate.
 
-4. **Advanced → turn on "Pull latest images on deploy."** Without it a redeploy
-   can keep running the previous build of the moving `:live` tag.
-5. **Deploy**, and watch the Logs tab.
-6. **Get the terminal into the volume** (§4A). This is the one step the container
-   cannot do for itself, because MetaQuotes' installer does not run under Wine.
-   With the named volume the compose file declares:
+Nothing is built on the server; the app pulls the image.
 
-   ```bash
-   scp dist/mt4-portable.tar.gz user@server:/tmp/
-   ssh user@server 'c=$(docker ps \
-                        --filter ancestor=ghcr.io/thamitshepe/forex-hex-mt4:live \
-                        --format "{{.Names}}" | head -1);
-                    docker cp /tmp/mt4-portable.tar.gz "$c":/data/'
-   ```
+**Why a Compose app and not an Application.** Dokploy's Application type takes a
+Docker image directly, which looks like the natural fit for a GHCR image, and it
+cannot express either of the two settings this container cannot do without:
+`cap_add: [SYS_PTRACE]` — Wine needs ptrace to attach to the processes it spawns,
+and without it the EA never loads, which looks exactly like a broken EA — and
+`shm_size: 512m` — Xvfb and Wine share memory to draw, and too little shows up as
+`BadAccess (MIT-SHM)` and a dead desktop. Neither field exists on Dokploy's
+application schema or in its UI. Compose hands the YAML to `docker compose`
+untouched, so a Compose app is the only service type that can carry them.
 
-   `MT4_DISTRO_URL` is already set to `file:///data/mt4-portable.tar.gz` above, so
-   a redeploy or restart then logs `seeding /data/mt4 from MT4_DISTRO_URL`, and
-   `compiled HEX-FVG-Breaker.ex4 from source`. A **bind mount** is the simpler
-   alternative: change `- hex-mt4-data:/data` to `- ../files/mt4:/data`, `scp`
-   the tarball into the app's `files/mt4/` directory, and the same `file://` URL
-   works. Use `../files` rather than a repo-relative path — Dokploy re-clones the
-   repository on every deploy and warns that those mounts come back empty — and
-   note that named volumes are the ones Volume Backups can see.
-7. **The one look (§3).** `ssh -L 6080:localhost:6080 user@server`, then
-   `http://localhost:6080/vnc.html`. Set AutoTrading and the ntfy WebRequest entry
-   once; both persist in the volume from then on.
+**Not a Stack, either.** Stack is Docker Swarm, which handles `cap_add` and
+`shm_size` differently and drops `build`.
 
-The file already carries the two settings that are easy to leave out and hard to
-debug: `cap_add: [SYS_PTRACE]` (Wine needs ptrace to attach to the processes it
-spawns; without it the EA never loads, which looks exactly like a broken EA) and
-`shm_size: 512m` (Xvfb and Wine share memory to draw; too small shows up as
-`BadAccess (MIT-SHM)` and a dead desktop).
+**The environment.** Dokploy writes what step 6 sends to a `.env` beside the
+compose file, and Compose reads that file for `${VAR}` substitution by itself —
+which is why `deploy/docker-compose.yml` spells `${MT4_LOGIN}` inside
+`environment:` instead of using an `env_file:`. The `:?` guards still work, so an
+app started without `MT4_LOGIN` fails loudly instead of coming up with an empty
+login.
+
+Volume: `hex-mt4-data`, at `/data` in the container and really
+`hex-mt4_hex-mt4-data` on the host, because Compose prefixes named volumes with the
+project name. Everything that matters — the terminal, the profile with the chart,
+the compiled EA, the HEX-Logs CSVs — is under it, so a redeploy is not a restart of
+the demo. This is also the one place `DOKPLOY_APP` matters: it *is* that prefix, so
+renaming the app later points the container at an empty volume.
+
+**Registry pull: not needed.** The package is public (§5), so Dokploy pulls
+`ghcr.io/thamitshepe/forex-hex-mt4:live` with no credential at all. Only if you make
+the package private do you add one here (registry `ghcr.io`, username = the GitHub
+account, password = a PAT with `read:packages`) — and that one is a click, because
+Dokploy exposes no API field for registry credentials.
+
+**Re-pulling the moving tag.** `deploy/docker-compose.yml` carries
+`pull_policy: always` on the service. Without it a redeploy of `:live` can reuse the
+image already on the host — Docker matches the tag, not the new digest — and "the
+server picked up the new EA" quietly becomes "the server is still trading last
+week's build". Dokploy's own version of this is the **"Pull latest images on
+deploy"** switch in the app's Advanced tab, which appends `--pull always` to the
+same `up -d`. It is not usable from CI: `compose.pullImages` exists on the table
+with a default of `false` and is absent from `compose.update`, so setting it would
+be the one click left in an otherwise clickless deploy. The YAML says the same
+thing, Dokploy passes no contradicting `--pull` flag, and `docker compose config`
+shows the setting surviving into the resolved file.
+
+**Port 6080 is the remote desktop.** It is the only way to see the button in §3, and
+it is also a live trading terminal. Safest: do not publish it — delete the `ports:`
+block — and tunnel:
+
+```bash
+ssh -L 6080:localhost:6080 user@server
+# then browse http://localhost:6080/vnc.html
+```
+
+If you do publish it, put it behind Dokploy's proxy with TLS and leave
+`VNC_PASSWORD` set: the entrypoint refuses to start a desktop without one.
+
+**If you would rather click.** Every step above is also something in the UI: Create
+Service → Compose, provider raw/paste, paste `deploy/docker-compose.yml`, paste the
+§5 values into Environment, Deploy. It is the same app. The difference is that the
+script is reproducible and the clicks are not — and that the next CI redeploy
+overwrites the environment and the compose file with what is in the repo, so a
+UI-made app and a script-made app cannot stay different for long.
+
+**The variables, one line each.**
 
 | variable | what it is |
 |---|---|
@@ -309,62 +360,9 @@ spawns; without it the EA never loads, which looks exactly like a broken EA) and
 | `MT4_PROFILE` | which profile in the volume to open (default `default`) |
 | `ENABLE_VNC` / `VNC_PASSWORD` | the remote desktop. Empty password ⇒ no desktop, deliberately |
 | `TZ` | leave `UTC`: the preset's trading hours are UTC |
-| `MT4_DISTRO_URL` | the prepared terminal. Required in practice: `file:///data/mt4-portable.tar.gz` |
-| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before healthcheck says so |
-
-Volume: `hex-mt4-data` at `/data`. Everything that matters — the terminal, the
-profile with the chart, the compiled EA, the HEX-Logs CSVs — is under it, so a
-redeploy is not a restart of the demo.
-
-**Registry pull: not needed.** The package is public (§5), so Dokploy pulls
-`ghcr.io/thamitshepe/forex-hex-mt4:live` with no credential at all. Only if you
-make the package private do you add one here (registry `ghcr.io`, username = the
-GitHub account, password = a PAT with `read:packages`).
-
-**Where the environment goes.** Dokploy's environment editor writes what you type
-to a `.env` file next to the compose file, and Compose reads that file for
-`${VAR}` substitution by itself. That is why `deploy/docker-compose.yml` spells
-`${MT4_LOGIN}` inside `environment:` instead of using an `env_file:` — no extra
-wiring, and the `:?` guards still work, so a Compose app started without
-`MT4_LOGIN` fails loudly rather than coming up with an empty login.
-
-**Triggering a redeploy.** Three ways, ordered by how little they ask of you:
-
-1. **Dokploy's GitHub App.** Point the Compose app at
-   `thamitshepe/Forex-hex-algo-strategy-mt4`, branch `main`, compose path
-   `deploy/docker-compose.yml`, and switch Auto Deploy on. Dokploy's GitHub
-   integration then deploys on push with no webhook and no CI change. The branch
-   configured here has to be the branch you push to — Dokploy answers
-   `301 Branch Not Match` otherwise.
-2. **The API, from CI.** Set `DOKPLOY_URL`, `DOKPLOY_COMPOSE_ID` and
-   `DOKPLOY_API_TOKEN` (§5) and the workflow calls `POST /api/compose.deploy`
-   once the image is pushed. This is Dokploy's documented CI path, and the only
-   one indifferent to source type, branch and Watch Paths.
-3. **The webhook URL.** `DOKPLOY_WEBHOOK` = the URL on the app's Deployments tab.
-   Dokploy reads that URL as a git-provider push: its handler compares `body.ref`
-   with the app's branch, and reads `commits[].{added,modified,removed}` to match
-   Watch Paths. The workflow sends the branch and an empty `commits[]`, which
-   passes only while **Watch Paths is unset** — so prefer 1 or 2 if you ever set
-   one.
-
-**Turn on "Pull latest images on deploy."** It is in the Compose app's Advanced
-tab, it adds `--pull always` to the `up -d` Dokploy runs, and it has no effect if
-you have set a custom command. Without it a redeploy of a *moving* tag like
-`:live` can reuse the image already on the host — Docker matches the tag, not the
-new digest. That is the difference between "the server picked up the new EA" and
-"the server is still trading last week's build".
-
-**Port 6080 is the remote desktop.** It is the only way to see the button in §3,
-and it is also a live trading terminal. Safest option: do not publish it at all,
-remove the `ports:` block, and tunnel:
-
-```bash
-ssh -L 6080:localhost:6080 user@your-server
-# then browse http://localhost:6080/vnc.html
-```
-
-If you do publish it, put it behind Dokploy's proxy with TLS and leave
-`VNC_PASSWORD` set — the entrypoint refuses to start a desktop without one.
+| `MT4_DISTRO_URL` | the prepared terminal (§4A), as `https://…`, or `file:///data/mt4-portable.tar.gz` on the copy-by-hand route |
+| `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
+| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before the healthcheck says so. CI does not set it; the compose file's `180` applies |
 
 ---
 

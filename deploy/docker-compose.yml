@@ -1,7 +1,9 @@
 # HEX-FVG-Breaker on a server.
 #
-# Dokploy: create a Compose app, paste this in, set the environment variables, and
-# start it. The image comes from GHCR, nothing is built on the server.
+# CI deploys this file: deploy/scripts/dokploy-apply.sh creates the Dokploy app,
+# sends this YAML to it as a raw compose file, sets the environment and deploys -
+# so the server runs exactly the file in the commit. Nothing is built on the
+# server; the image is pulled from GHCR.
 #
 # Two things have to be true before the robot actually trades:
 #   1. the container can log in (MT4_LOGIN / MT4_PASSWORD / MT4_SERVER)
@@ -9,7 +11,15 @@
 #      on - see DEPLOY.md, "the one look you have to take"
 services:
   mt4:
-    image: ghcr.io/thamitshepe/forex-hex-mt4:live
+    image: ${MT4_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt4:live}
+    # Every deploy has to re-pull: :live is a moving tag and `up -d` against an
+    # image that is already present does nothing, so the container would come back
+    # on the old build and look like a successful deploy of the new one. Dokploy
+    # has a "Pull latest images on deploy" switch that adds `--pull always` to the
+    # same command, but it has no API field (compose.pullImages exists on the table
+    # and not in compose.update), so setting it there would be the one click left
+    # in an otherwise clickless deploy. This is the same flag, in the file.
+    pull_policy: always
     restart: unless-stopped
     # MT4 flushes its journal and the EA's CSVs on the way out, so it gets a real
     # window to close instead of being killed on the spot.

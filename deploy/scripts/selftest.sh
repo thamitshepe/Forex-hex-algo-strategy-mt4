@@ -18,7 +18,11 @@ HEALTHCHECK="$HERE/healthcheck.sh"
 TMP="$(mktemp -d)"
 PASS=0
 FAIL=0
-cleanup() { rm -rf "$TMP"; }
+MOCK_PID=""
+cleanup() {
+  [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 ok()   { printf '  ok   %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -115,6 +119,69 @@ if [ -x "$HEALTHCHECK" ]; then
   kill "$liveness_pid" 2>/dev/null
 else
   bad "healthcheck.sh is not executable"
+fi
+
+echo "dokploy-apply"
+# The provisioner is what makes the server side clickless, so it is worth knowing
+# it still speaks the API the way Dokploy expects. mock-dokploy.py stands in for
+# the instance. It is run twice: the second run has to find what the first made
+# rather than create a second app, and that is what makes it safe on every push.
+DOKPLOY="$HERE/dokploy-apply.sh"
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -x "$DOKPLOY" ]; then
+  PORT=$((18000 + RANDOM % 2000))
+  LOG="$TMP/requests.jsonl"
+  MOCK_LOG="$LOG" python3 "$HERE/mock-dokploy.py" "$PORT" >"$TMP/mock.log" 2>&1 &
+  MOCK_PID=$!
+  for _ in $(seq 1 40); do
+    curl -sf -H 'x-api-key: k' "http://127.0.0.1:$PORT/api/project.all" >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+
+  # Eleven values, including a password with a $, a quote and a backslash in it.
+  cat > "$TMP/dokploy.env" <<'EOF'
+MT4_LOGIN=5023456789
+MT4_PASSWORD=pa$$w"or\d
+MT4_SERVER=MetaQuotes-Demo
+MT4_SYMBOL=XAUUSD
+MT4_PRESET=100usd-demo
+MT4_PROFILE=default
+ENABLE_VNC=1
+VNC_PASSWORD=vncpass
+TZ=UTC
+MT4_DISTRO_URL=
+MT4_IMAGE=ghcr.io/owner/forex-hex-mt4:live
+EOF
+
+  for run in 1 2; do
+    DOKPLOY_URL="http://127.0.0.1:$PORT" DOKPLOY_API_TOKEN=k \
+      DOKPLOY_ENV_FILE="$TMP/dokploy.env" "$DOKPLOY" >"$TMP/run$run.out" 2>&1 || \
+      bad "run $run exited non-zero: $(tail -1 "$TMP/run$run.out")"
+  done
+
+  count() { jq -r --arg p "$1" 'select(.path == $p) | .path' "$LOG" 2>/dev/null | wc -l | tr -d ' '; }
+  check_eq "project created once, then found"   "1" "$(count /api/project.create)"
+  check_eq "app created once, then found"       "1" "$(count /api/compose.create)"
+  check_eq "compose file pushed on both runs"   "2" "$(count /api/compose.update)"
+  check_eq "environment saved on both runs"     "2" "$(count /api/compose.saveEnvironment)"
+  check_eq "deployed on both runs"              "2" "$(count /api/compose.deploy)"
+  # A real instance answers 401 to a call without the key.
+  check_eq "x-api-key on every call" "0" \
+    "$(jq -r 'select(.api_key != "k") | .path' "$LOG" 2>/dev/null | grep -c . || true)"
+
+  # -s (slurp) so there is one input to index into; without it jq evaluates the
+  # filter once per line and a multi-line value comes back glued together.
+  update="$(jq -s -c 'map(select(.path == "/api/compose.update"))[0].body' "$LOG")"
+  check_eq "sourceType is raw" "raw" "$(printf '%s' "$update" | jq -r '.sourceType')"
+  check_eq "composeFile carries pull_policy" "1" \
+    "$(printf '%s' "$update" | jq -r '.composeFile | contains("pull_policy: always") | if . then 1 else 0 end')"
+  check_eq "autoDeploy off (CI is the trigger)" "false" \
+    "$(printf '%s' "$update" | jq -r '.autoDeploy // "false"')"
+
+  saved="$(jq -s -r 'map(select(.path == "/api/compose.saveEnvironment"))[0].body.env' "$LOG")"
+  check_contains "awkward password survives JSON" 'pa$$w"or\d' "$saved"
+  check_eq "all eleven values sent" "11" "$(printf '%s\n' "$saved" | grep -c '=')"
+else
+  bad "dokploy-apply.sh not testable here (needs jq, python3, and the script)"
 fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"

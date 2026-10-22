@@ -68,66 +68,71 @@ jobs:
           cache-from: type=gha,scope=mt4-${{ needs.meta.outputs.env_tag }}
           cache-to: type=gha,mode=max,scope=mt4-${{ needs.meta.outputs.env_tag }}
 
-  # Optional immediate deploy. Two ways to ask Dokploy to pull the new :live, both
-  # a no-op notice when unset - a published image is still a usable result, and
-  # Dokploy can deploy on demand from its own UI.
+  # Deploy. The server side is a script, not a click: deploy/scripts/dokploy-apply.sh
+  # finds or creates the Dokploy project, finds or creates the Compose app, pushes
+  # deploy/docker-compose.yml into it as a raw compose file, writes the environment
+  # and deploys. It is idempotent, so running it on every push is safe, and
+  # deploy/scripts/selftest.sh exercises it against a stand-in for the API.
   #
-  #   API      vars.DOKPLOY_URL + vars.DOKPLOY_COMPOSE_ID + secrets.DOKPLOY_API_TOKEN
-  #            -> POST /api/compose.deploy with the x-api-key header. This is
-  #            Dokploy's documented CI path (docs.dokploy.com, "Auto Deploy"),
-  #            and the only one that does not care what the app's source type,
-  #            branch or Watch Paths are set to.
-  #   webhook  secrets.DOKPLOY_WEBHOOK, the URL in the app's Deployments tab.
-  #            Dokploy reads that URL as a git-provider push, and its handler
-  #            (apps/dokploy/pages/api/deploy/compose/[refreshToken].ts) compares
-  #            body.ref against the app's branch and looks for
-  #            commits[].{added,modified,removed} for Watch Paths - so the body
-  #            below has to look like a real push or the deploy is refused with
-  #            301 "Branch Not Match". Watch Paths must stay unset for this path
-  #            to work, because CI here has no changed-file list to send.
-  #
-  # Neither is needed if the app is sourced from GitHub through Dokploy's own
-  # GitHub App: that integration deploys on push with no configuration at all.
-  deploy:
+  # Unset DOKPLOY_URL / DOKPLOY_API_TOKEN is a notice rather than a failure: a
+  # published image is still a usable result, and a fork should not need a token
+  # before it can build.
+  dokploy:
     needs: [meta, image]
     if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Dokploy
+      - uses: actions/checkout@v4
+
+      # The values deploy/docker-compose.yml interpolates. Blank values fall
+      # through to that file's defaults (`${VAR:-default}`); MT4_LOGIN and
+      # MT4_PASSWORD are the two with `:?` guards, so a deploy missing them fails
+      # loudly instead of starting a container that idles without trading.
+      # MT4_IMAGE is the exact tag this run published, so the compose file never
+      # has to hardcode an owner and a rollback can pin a SHA.
+      - name: Write the environment
         env:
-          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
-          COMPOSE_ID: ${{ vars.DOKPLOY_COMPOSE_ID }}
-          API_TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
-          WEBHOOK: ${{ secrets.DOKPLOY_WEBHOOK }}
-          SHA: ${{ github.sha }}
-          REF: ${{ github.ref }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ needs.meta.outputs.env_tag }}
+          MT4_LOGIN: ${{ secrets.MT4_LOGIN }}
+          MT4_PASSWORD: ${{ secrets.MT4_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          MT4_SERVER: ${{ vars.MT4_SERVER }}
+          MT4_SYMBOL: ${{ vars.MT4_SYMBOL }}
+          MT4_PRESET: ${{ vars.MT4_PRESET }}
+          MT4_PROFILE: ${{ vars.MT4_PROFILE }}
+          ENABLE_VNC: ${{ vars.ENABLE_VNC }}
+          TZ_NAME: ${{ vars.TZ }}
+          MT4_DISTRO_URL: ${{ vars.MT4_DISTRO_URL }}
+          MT4_IMAGE: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
         run: |
           set -euo pipefail
-          if [ -n "${DOKPLOY_URL:-}" ] && [ -n "${COMPOSE_ID:-}" ] && [ -n "${API_TOKEN:-}" ]; then
-            echo "Dokploy API: deploying compose ${COMPOSE_ID}"
-            body="$(printf '{"composeId":"%s","title":"%s","description":"%s"}' \
-                      "$COMPOSE_ID" "GHCR forex-hex-mt4 ${TAG}" "${REPO}@${SHA}")"
-            curl -fsS -X POST "${DOKPLOY_URL%/}/api/compose.deploy" \
-              -H 'accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -H "x-api-key: ${API_TOKEN}" \
-              -d "$body"
-            echo "Dokploy triggered for ${IMAGE_NAME}:${TAG}"
+          umask 077                     # it holds two secrets
+          {
+            echo "MT4_LOGIN=${MT4_LOGIN}"
+            echo "MT4_PASSWORD=${MT4_PASSWORD}"
+            echo "MT4_SERVER=${MT4_SERVER}"
+            echo "MT4_SYMBOL=${MT4_SYMBOL}"
+            echo "MT4_PRESET=${MT4_PRESET}"
+            echo "MT4_PROFILE=${MT4_PROFILE}"
+            echo "ENABLE_VNC=${ENABLE_VNC}"
+            echo "VNC_PASSWORD=${VNC_PASSWORD}"
+            echo "TZ=${TZ_NAME}"
+            echo "MT4_DISTRO_URL=${MT4_DISTRO_URL}"
+            echo "MT4_IMAGE=${MT4_IMAGE}"
+          } > "$RUNNER_TEMP/dokploy.env"
+
+      - name: Provision and deploy
+        env:
+          DOKPLOY_URL: ${{ vars.DOKPLOY_URL }}
+          DOKPLOY_API_TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
+          DOKPLOY_PROJECT: ${{ vars.DOKPLOY_PROJECT }}
+          DOKPLOY_APP: ${{ vars.DOKPLOY_APP }}
+          DOKPLOY_ENV_FILE: ${{ runner.temp }}/dokploy.env
+        run: |
+          set -euo pipefail
+          if [ -z "${DOKPLOY_URL}" ] || [ -z "${DOKPLOY_API_TOKEN}" ]; then
+            echo "::notice title=Dokploy::DOKPLOY_URL or DOKPLOY_API_TOKEN is unset - image published, nothing deployed."
+            echo "Image published: ${IMAGE_NAME}:${{ needs.meta.outputs.env_tag }}"
             exit 0
           fi
-          if [ -n "${WEBHOOK:-}" ]; then
-            echo "Dokploy webhook: deploying from the push payload"
-            body="$(printf '{"ref":"%s","repository":{"full_name":"%s"},"commits":[],"head_commit":{"id":"%s","message":"%s"}}' \
-                      "$REF" "$REPO" "$SHA" "GHCR forex-hex-mt4 ${TAG}")"
-            curl -fsS -X POST "$WEBHOOK" \
-              -H 'accept: application/json' \
-              -H 'Content-Type: application/json' \
-              -H 'x-github-event: push' \
-              -d "$body"
-            echo "Dokploy triggered for ${IMAGE_NAME}:${TAG}"
-            exit 0
-          fi
-          echo "No DOKPLOY_API_TOKEN+DOKPLOY_COMPOSE_ID and no DOKPLOY_WEBHOOK - skipping the deploy trigger."
-          echo "Image published: ${IMAGE_NAME}:${TAG}"
+          deploy/scripts/dokploy-apply.sh
+
