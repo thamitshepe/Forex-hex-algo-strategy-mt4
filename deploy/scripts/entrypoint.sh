@@ -186,6 +186,53 @@ swap_in_new_tree() {
   [ -d "$MT4DIR" ] && mv "$MT4DIR" "$MT4DIR.old"
   mv "$new" "$MT4DIR"
   rm -rf "$MT4DIR.old"
+  # The new tree carries the state of whatever terminal it was copied from, so
+  # instance 2+ has to neutralise it again (see neutralise_seed).
+  rm -f "$(dirname "$MT4DIR")/.hex-neutralised"
+}
+
+# The distro is a copy of a *working* terminal, so it carries what made that copy
+# work: the saved login (config/accounts.ini), the last server it talked to, the
+# MQL5 community session, the per-chart expert inputs, and the EA's CSV log. For
+# instance 1 that is its own account and its own history. For instance 2 it is
+# somebody else's: the terminal would come up as the gold account, with the gold
+# instrument's inputs and a trade log it never wrote - which is exactly what
+# "it still shows the old account" looks like. Those files are binary/encrypted,
+# so they are removed rather than edited; MT4 writes them back on its first login.
+#
+# Once per volume, not once per boot: after this instance has logged in, its own
+# accounts.ini is the thing that makes it start without a login prompt, and
+# deleting that every restart would demand a manual login forever. The marker is
+# dropped by swap_in_new_tree, so a re-seed neutralises the fresh tree as well.
+#
+# Nothing that could later answer a question is destroyed: the binary state files
+# go (the next login re-creates them) and the previous account's CSV log and
+# journals are *moved* into .before-instance<N>/, because "did that first boot
+# trade anything?" is answered from exactly those files.
+neutralise_seed() {
+  local meta marker park base f n=0
+  [ "$MT4_INSTANCE" = "1" ] && return 0
+  meta="$(dirname "$MT4DIR")"
+  marker="$meta/.hex-neutralised"
+  [ -f "$marker" ] && return 0
+  park="$MT4DIR/.before-instance$MT4_INSTANCE"
+  for f in config/accounts.ini config/server.ini config/community.ini config/experts.ini; do
+    if [ -e "$MT4DIR/$f" ]; then
+      rm -f "$MT4DIR/$f" 2>/dev/null && n=$((n + 1))
+    fi
+  done
+  mkdir -p "$park" 2>/dev/null || true
+  for f in MQL4/Files/Common/HEX-Logs MQL4/Logs logs; do
+    if [ -d "$MT4DIR/$f" ]; then
+      base="$(basename "$f")"
+      rm -rf "$park/$base" 2>/dev/null || true
+      mv "$MT4DIR/$f" "$park/$base" 2>/dev/null && n=$((n + 1))
+    fi
+  done
+  rm -rf "$MT4DIR"/history/* 2>/dev/null || true
+  printf 'instance=%s\n' "$MT4_INSTANCE" > "$marker" 2>/dev/null || true
+  log "seed: $n file(s) of the previous account's state moved out of the way - saved login, last server, MQL5 session and expert inputs are gone, its CSV log and journals are in $park"
+  log "seed: this terminal has no account yet - the login comes from startup.ini. If the desktop shows a login dialog on the first start, log in once: the broker's server is unknown to this copy of the terminal, and MT4 saves it on this volume from then on"
 }
 
 # Extraction is filtered rather than trusted. An archive built on a Mac can carry
@@ -674,6 +721,7 @@ main() {
   mkdir -p "$MT4DIR"
   claim_volume
   resolve_distro
+  neutralise_seed
   # The display comes up before the compile, not after: metaeditor.exe is a GUI
   # binary and under Wine with no X server it exits without writing the .ex4 -
   # the same reason deploy/Dockerfile's ea-check stage runs it through xvfb-run.

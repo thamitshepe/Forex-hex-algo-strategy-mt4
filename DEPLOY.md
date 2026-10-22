@@ -491,6 +491,40 @@ designing against. With `MT4_INSTANCE=2`:
   account, different symbols and magic numbers) but logs a warning, because it is
   also what a half-copied application looks like.
 
+**The terminal it starts from is not neutral either.** The distro is a *copy of a
+working terminal*, so it arrives carrying everything that made that copy work: the
+saved login (`config/accounts.ini`), the last server it talked to, the MQL5
+community session, the per-chart expert inputs, and the EA's CSV log. For instance
+1 that is its own account. For instance 2 it is somebody else's — the terminal
+comes up as the gold account, and the dashboard starts from a trade log it never
+wrote. So on its first boot instance 2 moves that state aside, before MT4 starts:
+
+```
+seed: 4 file(s) of the previous account's state moved out of the way - saved login,
+      last server, MQL5 session and expert inputs are gone, its CSV log and journals
+      are in /data/mt4/.before-instance2
+seed: this terminal has no account yet - the login comes from startup.ini. If the
+      desktop shows a login dialog on the first start, log in once: the broker's
+      server is unknown to this copy of the terminal, and MT4 saves it on this
+      volume from then on
+```
+
+Those files are binary and encrypted, so they are removed rather than edited — the
+next login re-creates them. The previous account's CSV log and journals are *moved*
+into `/data/mt4/.before-instance<N>/`, not deleted, because "did that first boot
+trade anything?" is answered from exactly those files. It happens once per volume
+(`/data/.hex-neutralised`, dropped again by a re-seed), because after that the saved
+login is *this* instance's and is what makes it start without a prompt.
+
+**The one manual step.** A trading terminal only knows the servers it has seen, and
+this copy has seen MetaQuotes demo and whatever your Mac logged into. If TMGM is not
+one of them, the first start cannot resolve `MT4_SERVER2` and shows the login dialog
+with an empty account list. Log in once on that instance's desktop (File → Login,
+or File → Open an Account and search the broker) — MT4 then writes the server and
+the account into *its own* volume, and every later boot logs in from `startup.ini`
+without a prompt. That is also where you read the exact server name for
+`MT4_SERVER2`.
+
 Steps, in order:
 
 1. **DNS first.** Add an `A` record for the new hostname (the one you used for
@@ -667,6 +701,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 | a second instance opens an XAUUSD chart, or logs `FATAL another copy of this EA holds MagicNumber` | the volume's profile carried a symbol the env did not ask for, and `Symbol=` opened a second chart next to it | `ensure_profile_chart` moves the profile's chart instead of adding one (`chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`). If it logs `chart: could not rewrite`, that volume's `.chr` is not the plain-text form it expects — set the symbol once in the desktop (right-click the chart → Symbol) and it is saved on the volume |
 | `spread 0.0012 > 0.0008` in `rejections.csv` on the crypto instance | the preset's spread cap is tighter than the broker's normal spread | raise `MaxSpreadDollars` in `Tools/make_presets.py` to just above what Market Watch shows, `python3 Tools/make_presets.py`, redeploy |
 | the second instance's chart is empty and the expert never trades | the broker names the pair differently (`DOGEUSD.a`, `DOGEUSD.raw`) | read the exact name off its Market Watch, set `MT4_SYMBOL2` to it, redeploy — the chart is moved onto the new name on the next start |
+| instance 2 comes up logged into the gold account | the distro is a copy of the gold terminal, so it carries `config/accounts.ini` and the last server | instance 2 moves that state aside on its first boot (`seed: N file(s) … moved out of the way`, keep is in `/data/mt4/.before-instance2`). If it still happens, check that this app has `MT4_INSTANCE=2` — the step is skipped for instance 1 on purpose |
+| the DOGE desktop sits on a login dialog with no accounts listed | that copy of the terminal has never seen TMGM's server, so `MT4_SERVER2` resolves to nothing | log in once on that desktop (File → Login / Open an Account) and read the exact server name off the dialog; MT4 saves it on this volume and later boots log in from `startup.ini` |
 | `FATAL: MT4_INSTANCE=2 has no MT4_LOGIN2 …` | the application says it is instance 2 but its env has no `…2` copies — usually a copied application whose values were not replaced | fill `MT4_LOGIN2`/`MT4_PASSWORD2`/`MT4_SERVER2`/`MT4_SYMBOL2`/`MT4_PRESET2` in this app's Environment tab. This refusal is deliberate: the alternative is trading the DOGE preset on the gold account |
 | `FATAL: this volume belongs to account … and this container is …` | two applications were given the same volume (the second one has no volume of its own, or was created from the first without changing its mount) | give this application its own volume at `/data`. If you really mean to move *this* volume to the other account, delete `/data/.hex-instance` on it first |
 | instance 2 logs into the wrong account | the login is also stored in the volume's `config/accounts.ini`, so a shared volume logs in as whoever used it last | the same fix as above — one volume per instance. The `FATAL` above catches it before the terminal starts |

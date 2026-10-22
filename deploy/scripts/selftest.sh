@@ -258,6 +258,55 @@ check_eq "a symbol change on the same volume is allowed (chart gets moved)" "0" 
 check_contains "the marker follows the symbol change" "symbol=EURUSD" \
   "$(cat "$vol/.hex-instance" 2>/dev/null)"
 
+echo "instance seed: the other account's state"
+# The distro is a copy of a working terminal, so it carries the saved login, the
+# last server and the EA's CSV log. Instance 1 may have them; instance 2 must not,
+# or it starts as the gold account with a trade log it never wrote.
+load_fn "$ENTRYPOINT" neutralise_seed >/dev/null
+load_fn "$ENTRYPOINT" swap_in_new_tree >/dev/null
+seedvol="$TMP/seedvol"
+mkdir -p "$seedvol/mt4/config" "$seedvol/mt4/MQL4/Files/Common/HEX-Logs" \
+  "$seedvol/mt4/MQL4/Logs" "$seedvol/mt4/logs" "$seedvol/mt4/MQL4/Presets"
+for f in config/accounts.ini config/server.ini config/community.ini config/experts.ini; do
+  printf 'binary\n' > "$seedvol/mt4/$f"
+done
+printf 'date,equity\n' > "$seedvol/mt4/MQL4/Files/Common/HEX-Logs/daily.csv"
+printf 'journal\n' > "$seedvol/mt4/MQL4/Logs/20260101.log"
+printf 'journal\n' > "$seedvol/mt4/logs/20260101.log"
+printf 'keep\n' > "$seedvol/mt4/MQL4/Presets/100usd-demo.set"
+( MT4DIR="$seedvol/mt4" MT4_INSTANCE=1; neutralise_seed ) >/dev/null 2>&1
+check_eq "instance 1 keeps the terminal's own account" "yes" \
+  "$([ -f "$seedvol/mt4/config/accounts.ini" ] && echo yes)"
+( MT4DIR="$seedvol/mt4" MT4_INSTANCE=2; neutralise_seed ) >/dev/null 2>&1
+check_eq "instance 2 drops the saved login" "gone" \
+  "$([ -f "$seedvol/mt4/config/accounts.ini" ] || echo gone)"
+check_eq "instance 2 drops the last server" "gone" \
+  "$([ -f "$seedvol/mt4/config/server.ini" ] || echo gone)"
+check_eq "instance 2 drops the other instrument's expert inputs" "gone" \
+  "$([ -f "$seedvol/mt4/config/experts.ini" ] || echo gone)"
+check_eq "instance 2 drops the other account's CSV log" "gone" \
+  "$([ -f "$seedvol/mt4/MQL4/Files/Common/HEX-Logs/daily.csv" ] || echo gone)"
+check_eq "that CSV log is parked, not destroyed" "date,equity" \
+  "$(head -1 "$seedvol/mt4/.before-instance2/HEX-Logs/daily.csv" 2>/dev/null)"
+check_eq "instance 2 drops the journals" "gone" \
+  "$([ -f "$seedvol/mt4/logs/20260101.log" ] || echo gone)"
+check_eq "that journal is parked too" "journal" \
+  "$(cat "$seedvol/mt4/.before-instance2/logs/20260101.log" 2>/dev/null)"
+check_eq "the presets are untouched" "keep" "$(cat "$seedvol/mt4/MQL4/Presets/100usd-demo.set")"
+check_contains "the volume records that it was neutralised" "instance=2" \
+  "$(cat "$seedvol/.hex-neutralised" 2>/dev/null)"
+# Once per volume: after this, accounts.ini is *this* instance's login and is what
+# makes it start without a prompt, so a second boot must leave it alone.
+printf 'this-instance\n' > "$seedvol/mt4/config/accounts.ini"
+( MT4DIR="$seedvol/mt4" MT4_INSTANCE=2; neutralise_seed ) >/dev/null 2>&1
+check_eq "a later boot keeps this instance's own login" "this-instance" \
+  "$(cat "$seedvol/mt4/config/accounts.ini")"
+# A re-seed brings the other account's files back, so it must re-arm the step.
+mkdir -p "$TMP/newtree" && printf 'MZ\n' > "$TMP/newtree/terminal.exe"
+( MT4DIR="$seedvol/mt4" swap_in_new_tree "$TMP/newtree" ) >/dev/null 2>&1
+check_eq "a re-seed re-arms neutralisation" "gone" \
+  "$([ -f "$seedvol/.hex-neutralised" ] || echo gone)"
+
 echo "dokploy-apply"
 # The provisioner is what makes the server side clickless, so it is worth knowing
 # it still speaks the API the way Dokploy expects. mock-dokploy.py stands in for
