@@ -729,6 +729,23 @@ if [ -f "$BROKER" ]; then
   check_contains "dry run opens one chart on the instance's symbol" \
     "MT4_SYMBOL=DOGEUSD" "$out"
   check_contains "dry run keeps history out of the archive" "--exclude=history" "$out"
+  # The installer does not have to exist locally: a broker portal hands out a link,
+  # and asking someone to save it first is a step that only produces typos.
+  out="$("$BROKER" --dry-run tmgm https://portal.example/tmgm4setup.exe 2>&1)"
+  check_contains "a portal link is accepted instead of a file" \
+    "installer  : https://portal.example/tmgm4setup.exe (not fetched)" "$out"
+  # example.invalid is reserved by RFC 2606, so this fails on DNS without needing
+  # the network - and it has to fail, not half-start a container.
+  out="$("$BROKER" tmgm https://example.invalid/x.exe 2>&1)"; rc=$?
+  check_eq "a dead link is refused" "2" "$rc"
+  check_contains "and the fix is a sentence" "download it in the browser" "$out"
+  out="$("$BROKER" tmgm "$TMP/not-there.exe" 2>&1)"
+  check_contains "a missing file says where installers come from" "client portal" "$out"
+  # The wrong broker's installer installs perfectly and fails at login, a deploy
+  # later. --server is how that gets caught on this machine instead.
+  out="$("$BROKER" --server 2>&1)"; rc=$?
+  check_eq "--server without a name is refused" "2" "$rc"
+  check_contains "and the help says why it exists" "--server NAME" "$("$BROKER" --help 2>&1)"
 else
   bad "prepare-broker-distro.sh is missing from deploy/scripts"
 fi

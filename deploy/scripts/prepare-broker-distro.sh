@@ -22,18 +22,23 @@
 # What you get: dist/mt4-portable-<slug>.tar.gz plus the three variables to set.
 set -euo pipefail
 
-SLUG=""; SETUP=""; DRY=0; KEEP=0; WAIT_SECS="${PREP_WAIT:-0}"
+SLUG=""; SETUP=""; DRY=0; KEEP=0; WAIT_SECS="${PREP_WAIT:-0}"; WANT_SERVER=""
 
 usage() {
   cat <<'EOF'
 usage: prepare-broker-distro.sh [--dry-run] [--login] [--wait SECONDS] [--clean] <slug> <installer.exe>
 
   <slug>            short name for the broker, used in the output file name (tmgm)
-  <installer.exe>   the broker's MetaTrader 4 setup file, as downloaded from them
+  <installer.exe>   the broker's MetaTrader 4 setup file, as downloaded from them,
+                    or its https:// address (the script fetches it)
   --login           hold the container open until you say so, so you can log in
                     through the desktop first (File -> Login). The saved account
                     then travels inside the archive
   --wait SECONDS    the same, without a keyboard: wait this long instead
+  --server NAME     the server the account logs in on (the name in File -> Login).
+                    The script lists the servers the installer brought and warns if
+                    that one is not among them - the wrong broker's installer looks
+                    exactly like a working one until the login fails
   --dry-run         print the docker commands and touch nothing
   --clean           remove the throwaway volume at the end, so the next run starts
                     from a clean install instead of reusing this one
@@ -49,6 +54,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --login)   WAIT_SECS=-1 ;;
     --wait)    WAIT_SECS="${2:-}"; [ -n "$WAIT_SECS" ] || die "--wait needs a number"; shift ;;
+    --server)  WANT_SERVER="${2:-}"; [ -n "$WANT_SERVER" ] || die "--server needs a name"; shift ;;
     --clean)   KEEP=1 ;;
     -h|--help) usage; exit 0 ;;
     --*)       die "unknown option: $1" ;;
@@ -59,14 +65,42 @@ done
 
 [ -n "$SLUG" ] && [ -n "$SETUP" ] || { usage >&2; exit 2; }
 case "$SLUG" in *[!a-z0-9-]*) die "slug must be lowercase letters, digits and dashes (got '$SLUG')" ;; esac
-[ -f "$SETUP" ] || die "no such installer: $SETUP"
+
+# The argument is either a file you already have or the https:// address the broker's
+# portal gave you - nothing has to be saved to disk first.
+DOWNLOADED=0
+SETUP_ABS=""
+if [ ! -f "$SETUP" ]; then
+  case "$SETUP" in
+    http://*|https://*)
+      if [ "$DRY" = "1" ]; then
+        SETUP_ABS="$SETUP"
+      else
+        SETUP_LOCAL="${TMPDIR:-/tmp}/hex-prep-$$-$(basename "$SETUP")"
+        printf 'downloading %s\n' "$SETUP"
+        curl -fsSL --retry 3 --retry-delay 3 -o "$SETUP_LOCAL" "$SETUP" \
+          || die "download failed: $SETUP (a portal link often needs a session cookie; download it in the browser and pass the file instead)"
+        SETUP="$SETUP_LOCAL"; SETUP_ABS="$SETUP_LOCAL"; DOWNLOADED=1
+      fi
+      ;;
+    *)
+      die "no such installer: $SETUP
+  Pass the broker's setup.exe (usually in ~/Downloads), or its https:// address.
+  Where to get it: log in to the broker's client portal, Trading Platforms (or
+  Downloads) -> MetaTrader 4 -> Windows. That file is the only artefact that
+  carries the broker's server list; DEPLOY.md section 4C explains why.
+  Nothing is installed on this machine to find it: prepare-distro.sh archives a
+  terminal that exists, this script installs the one the broker ships."
+      ;;
+  esac
+fi
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="${HEX_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt4:live}"
 OUT="${REPO}/dist/mt4-portable-${SLUG}.tar.gz"
 NAME="hex-prep-${SLUG}"
 VOL="hex-prep-${SLUG}-data"
-SETUP_ABS="$(cd "$(dirname "$SETUP")" && pwd)/$(basename "$SETUP")"
+SETUP_ABS="${SETUP_ABS:-$(cd "$(dirname "$SETUP")" && pwd)/$(basename "$SETUP")}"
 VNC_PORT="${VNC_PORT:-16080}"
 VNC_PASSWORD="${VNC_PASSWORD:-hexprep}"
 
@@ -75,8 +109,13 @@ run() { if [ "$DRY" = "1" ]; then printf '  + %s\n' "$*"; else "$@"; fi; }
 # Same, for the commands whose own output is noise (a volume name, a container id).
 runq() { if [ "$DRY" = "1" ]; then printf '  + %s\n' "$*"; else "$@" >/dev/null 2>&1; fi; }
 
+if [ -f "$SETUP_ABS" ]; then
+  setup_size="$(wc -c < "$SETUP_ABS" | tr -d ' ') bytes"
+else
+  setup_size="not fetched"
+fi
 say "image      : $IMAGE"
-say "installer  : $SETUP_ABS ($(wc -c < "$SETUP_ABS" | tr -d ' ') bytes)"
+say "installer  : $SETUP_ABS ($setup_size)"
 say "archive    : $OUT"
 say "volume     : $VOL (throwaway)"
 say "desktop    : http://localhost:${VNC_PORT}/vnc.html  password ${VNC_PASSWORD}"
@@ -145,11 +184,33 @@ if [ "$found" != "1" ]; then
   say "broker's terminal on a Windows machine instead, log in once, and archive that"
   say "folder with tar (DEPLOY.md section 4C, route 3)."
   docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ "$DOWNLOADED" = "1" ]; then rm -f "$SETUP"; fi
   exit 1
 fi
 
 say "terminal.exe is in the volume - the broker's server list is in it too"
 docker logs "$NAME" 2>&1 | grep -E 'installed terminal found|server route|login|startup\.ini' | tail -8 | sed 's/^/  /'
+
+# MT4 writes one config/<server>.srv per server it has heard of, so the file names
+# *are* the server list. Printed because the failure this whole script exists to
+# avoid - a terminal that knows the wrong broker - looks like a working install and
+# only shows itself at login, in the other container, a deploy later.
+say
+say "servers this terminal now knows:"
+servers="$(docker run --rm -v "${VOL}:/data:ro" --entrypoint sh "$IMAGE" \
+  -c 'ls -1 /data/mt4/config 2>/dev/null' 2>/dev/null | sed -n 's/\.srv$//p' | sort -u)"
+if [ -n "$servers" ]; then
+  printf '%s\n' "$servers" | sed 's/^/  /'
+else
+  say "  (none: this installer shipped no *.srv at all)"
+fi
+if [ -n "$WANT_SERVER" ] && ! printf '%s\n' "$servers" | grep -Fxq -- "$WANT_SERVER"; then
+  say
+  say "WARNING: $WANT_SERVER is not in that list. This is a different broker's"
+  say "         terminal, and the archive would fail exactly like the tree it"
+  say "         replaces: 'connect failed [No connection]' with no address behind"
+  say "         the name. Use the installer from the broker that issued the login."
+fi
 
 if [ "$WAIT_SECS" = "-1" ]; then
   say
@@ -224,3 +285,6 @@ Next, for the second instance (DEPLOY.md section 4C):
 Port ${VNC_PORT} is published on this machine only; give VNC_PASSWORD a real value
 if you run this somewhere other than your own laptop.
 EOF
+# The fetched installer was only needed to fill the volume; the volume keeps the
+# install. A path you passed in is left alone - it may be the only copy.
+if [ "$DOWNLOADED" = "1" ]; then rm -f "$SETUP"; fi

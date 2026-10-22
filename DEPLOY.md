@@ -274,14 +274,20 @@ its broker's servers, cheapest first:
    ```bash
    deploy/scripts/prepare-broker-distro.sh tmgm ~/Downloads/tmgm4setup.exe
    # writes dist/mt4-portable-tmgm.tar.gz, prints size, members and sha256
+   # a portal link works in place of the file, and --server names the login's server:
+   deploy/scripts/prepare-broker-distro.sh tmgm https://…/tmgm4setup.exe --login \
+     --server TradeMaxGlobal-Demo-2
    ```
    It runs the broker's `setup.exe` inside the deployment image itself (Wine, Xvfb,
    openbox and noVNC are already in there, §5) against a throwaway volume, waits for
    `terminal.exe` to appear, and archives the result with `tar` inside a Linux
    container — so the archive cannot pick up the macOS AppleDouble junk that
-   `prepare-distro.sh` has to check for. Add `--login` and it holds the container
-   open with the desktop published, so you can `File → Login` once and have the saved
-   account travel inside the archive as well as the server list.
+   `prepare-distro.sh` has to check for. It prints the servers the installer brought
+   (one `config/<server>.srv` each), and `--server` makes it warn when the one your
+   account logs in on is not among them: the *wrong* broker's installer installs
+   perfectly and only fails at login, a deploy later. Add `--login` and it holds the
+   container open with the desktop published, so you can `File → Login` once and have
+   the saved account travel inside the archive as well as the server list.
    Then, on the `mt4-doge` service:
    ```
    MT4_DISTRO_URL2=https://…/mt4-portable-tmgm.tar.gz
