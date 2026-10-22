@@ -69,16 +69,27 @@ compiled and checked in CI — see `deploy/scripts/entrypoint.sh`.
 publishes `ghcr.io/<owner>/forex-hex-mt4:live` plus the commit SHA, and fails if the
 MQL4 does not compile. Then, in Dokploy:
 
-1. **Create Project** `forex-hex-mt4` → **Create Service** → **Compose**.
-2. Paste `deploy/docker-compose.yml` into the compose editor.
-3. Paste the environment block from §6 into the **Environment** tab, with your demo
-   account and the `MT4_DISTRO_URL` from §4.
-4. **Deploy**, then watch the log until `terminal.exe is up` (§7).
+1. **Create Project** `forex-hex-mt4` → **Create Service** → **Application**,
+   provider **Docker**, image `ghcr.io/thamitshepe/forex-hex-mt4:live`.
+2. **Environment**: `SHARED + APP 1` from `dist/dokploy.env`, with your demo account
+   and the `MT4_DISTRO_URL` from §4.
+3. **Mounts**: volume `hex-mt4-data` → `/data`.
+4. **Domains**: `trade.thami.dev` → port `6080`, HTTPS.
+5. **Deploy**, then watch the log until `terminal.exe is up` (§7).
+
+The second account is the same five steps again on a second application, with
+`SHARED + APP 2`, `MT4_INSTANCE=2`, the volume `hex-mt4-doge` and the hostname
+`trade2.thami.dev` — §“A second instance”, including the two things that go wrong
+(a stale tag, or the same volume name in both apps).
 
 Everything site-specific lives in Dokploy's environment: that is the one place to
 change a password, a symbol or a preset, and no credential is stored in git. The
 container pulls the terminal tarball itself on its first start, so there is no file
 to copy onto the server and no shell needed.
+
+If you would rather have one deploy start both instances, `deploy/docker-compose.yml`
+does that as a Compose application pulling the same image (§6.1) — an alternative to
+the two applications, not an addition to them.
 
 If you would rather not click at all, §6 also has the CI route — set `DOKPLOY_URL`
 and `DOKPLOY_API_TOKEN` as repository variables/secrets and the workflow creates and
@@ -304,13 +315,12 @@ TZ=UTC
   `/data`. Without it every redeploy re-downloads 36 MB and loses the profile — and
   with it the seeded chart.
 
-**This route is one instance.** A Docker-Image application runs one container from
-one image, so it can hold `trade.thami.dev` *or* `trade2.thami.dev`, not both. Two
-accounts on two hostnames is the compose route below (`deploy/docker-compose.yml`
-defines the `mt4` and `mt4-doge` services), and the two routes' volumes are
-different volumes even when the name looks the same: a Docker-Image app's
-`hex-mt4-data` is not the compose app's `<project>_hex-mt4-data`, so moving means
-copying the files (§6, "Coming from two applications").
+**This route is one instance per application.** A Docker-Image application runs one
+container from one image, so it can hold `trade.thami.dev` *or* `trade2.thami.dev`,
+not both. Two accounts on two hostnames is a second application from the same image
+with its own volume, its own domain and the `MT4_INSTANCE=2` half of the env file —
+§“A second instance” below, whose steps are the ones above repeated with the `2`
+values. **Give the second application a different volume name.**
 - **Advanced → Restart Policy**: `Any`.
 - **Domains**: host `trade.thami.dev`, path `/`, **port `6080`**, HTTPS on,
   certificate **Let's Encrypt**. Point the DNS A record at the server *before* the
@@ -434,7 +444,7 @@ UI-made app and a script-made app cannot stay different for long.
 
 | variable | what it is |
 |---|---|
-| `MT4_INSTANCE` | which instance a container is. Not something you set in the env: `deploy/docker-compose.yml` hard-codes `1` for the `mt4` service and `2` for `mt4-doge`, so one env file cannot make both the same trader. `1` reads the plain names in this table; `2` reads their `2` copies — `MT4_LOGIN2`, `MT4_SYMBOL2`, `MT4_PRESET2`, … Nothing falls back across instances: a missing `MT4_LOGIN2` stops the container instead of logging into instance 1's account |
+| `MT4_INSTANCE` | which instance a container is: `1` (the default) or `2` in the second application's Environment tab. `1` reads the plain names in this table; `2` reads their `2` copies — `MT4_LOGIN2`, `MT4_SYMBOL2`, `MT4_PRESET2`, … Nothing falls back across instances: a missing `MT4_LOGIN2` stops the container instead of logging into instance 1's account, and a volume claimed by another instance is refused. The compose route sets it per service instead |
 | `MT4_LOGIN` / `MT4_PASSWORD` / `MT4_SERVER` | the demo account the terminal logs into |
 | `MT4_SYMBOL` / `MT4_PRESET` | what to trade: `XAUUSD` + `100usd-demo.set` |
 | `MT4_PERIOD` | optional: move the volume's chart onto this timeframe (`5`, `15`, `60`). Empty = leave the chart alone. An instance whose symbol the profile does not carry gets the chart *moved* onto it — never a second chart, because a second chart loads a second expert |
@@ -448,52 +458,81 @@ UI-made app and a script-made app cannot stay different for long.
 
 ### A second instance (different account, different strategy)
 
-Scaling here means **one service per instance inside one Dokploy application**,
-never one container running two terminals and never two hand-configured
-applications. `deploy/docker-compose.yml` already defines both:
+Scaling here means **one application per instance**, both from the same image, each
+with its own volume and its own hostname:
 
-```yaml
-services:
-  mt4:        # instance 1  MT4_LOGIN   XAUUSD M15  trade.thami.dev
-  mt4-doge:   # instance 2  MT4_LOGIN2  DOGEUSD M5  trade2.thami.dev
+```
+application    image                                    volume          hostname
+-----------    -------------------------------------    ------------    -------------------
+hex-mt4        ghcr.io/thamitshepe/forex-hex-mt4:live   hex-mt4-data    trade.thami.dev
+hex-mt4-doge   ghcr.io/thamitshepe/forex-hex-mt4:live   hex-mt4-doge    trade2.thami.dev
 ```
 
-One deploy brings up both. One Environment tab feeds both. One image, one volume
-per service, one hostname per service. There is no second application to create,
-nothing to copy, and no second place for the two to drift apart.
+Nothing is built or copied for the second one: it is **Create Application**, image
+`ghcr.io/thamitshepe/forex-hex-mt4:live`, its own volume, its own domain, its own
+half of the env file. A Docker-Image application runs exactly one container, so this
+is the only shape this route has — two applications, two deploys. If you would rather
+have one deploy bring up both, that is the compose route in `deploy/docker-compose.yml`
+(§6.1 below), which pulls the same image; the two routes are alternatives, not
+additions — do not give both of them `trade.thami.dev`.
 
-**What actually makes them different traders** is three things, and only one of
-them is in the env file:
+**What makes them different traders** is three things, and only one of them is a
+decision you make twice:
 
-| | instance 1 (`mt4`) | instance 2 (`mt4-doge`) |
+| | `hex-mt4` | `hex-mt4-doge` |
 |---|---|---|
-| `MT4_INSTANCE` | `1` — hard-coded in the service block | `2` — hard-coded in the service block |
-| credentials it *receives* | `MT4_LOGIN`, `MT4_PASSWORD`, `MT4_SERVER` | `MT4_LOGIN2`, `MT4_PASSWORD2`, `MT4_SERVER2` — and **not** the plain names |
+| `MT4_INSTANCE` | `1` (or unset — that is the default) | **`2`**, in its own Environment tab |
+| credentials it *holds* | `MT4_LOGIN`, `MT4_PASSWORD`, `MT4_SERVER` | `MT4_LOGIN2`, `MT4_PASSWORD2`, `MT4_SERVER2` — **never the plain names** |
 | env it reads | `MT4_LOGIN`, `MT4_SYMBOL`, `MT4_PRESET`, … | `MT4_LOGIN2`, `MT4_SYMBOL2`, `MT4_PRESET2`, … |
 | account | MetaQuotes demo | **its own** TMGM account |
-| volume | `hex-mt4-data` → `/data` | `hex-mt4-doge-data` → `/data` |
-| domain | `trade.thami.dev` → service `mt4`, port 6080 | `trade2.thami.dev` → service `mt4-doge`, port 6080 |
+| volume name | `hex-mt4-data` → `/data` | `hex-mt4-doge` → `/data` |
+| domain | `trade.thami.dev` → port 6080 | `trade2.thami.dev` → port 6080 |
 | push | `HEX XAUUSD` → ntfy `hex-xauusd-…` | `HEX DOGEUSD` → ntfy `hex-doge-…` |
 
-The instance number is a property of the **service block**, not of the env, so a
-pasted env file cannot turn both into instance 1 — which is the mistake that shows
-up as "both hostnames have the same account". The DOGE container is not even given
-the gold credentials: it does not have `MT4_LOGIN` in its environment, so it cannot
-log into that account however it is configured.
+Two things have to be right, and both are the ones that produce "it still shows the
+old account, on both hostnames":
 
-**One env file, both services.** `dist/dokploy.env` is the whole of it: the gold
-values under the plain names, the DOGE values under the `2` copies. Both services
-read the same block; each takes what its own instance number tells it to.
+1. **The second application's env says `MT4_INSTANCE=2` and carries only the `2`
+   names.** Its half of `dist/dokploy.env` has no `MT4_LOGIN` in it at all, so there
+   is nothing to fall back to — an application that was given the wrong half is a
+   *gold* application, and its log's first line says `instance 1`.
+2. **The two volume names are different.** A volume name is server-wide in Dokploy,
+   not per application: typing `hex-mt4-data` into the second application's mounts
+   gives it the first one's `/data`, and then both terminals read the same
+   `config/accounts.ini` and both are whichever account wrote it last. The image
+   notices and says so at boot:
+
+   ```
+   WARN: shared volume: /data is in use right now by another container
+         (12 seconds since its last heartbeat). Both applications are pointed at the
+         same volume name … Give each application its own volume name
+         (hex-mt4-data for the first, hex-mt4-doge for the second) and redeploy both.
+   ```
+
+   That warning is the one line that distinguishes this failure from a slow login.
+   `/data/.hex-lease` is rewritten every 20 s by each container, and the boot does
+   not trust a fresh lease on its own — a container that crashed a second ago leaves
+   one too. It waits a beat and only warns if the other container writes over its
+   own, which a dead one cannot do. If you already run `hex-mt4` with a volume called
+   something else, keep that name — the point is only that the two names differ.
+
+**One env file, two halves.** `dist/dokploy.env` is the whole of it, in three blocks:
+`SHARED` (both applications, identical), `APP 1` (gold), `APP 2` (DOGE). Paste
+`SHARED + APP 1` into `hex-mt4` and `SHARED + APP 2` into `hex-mt4-doge`. That is the
+one-file promise kept where this route can keep it: one file to fill, nothing to
+hand-edit per app beyond deleting the half it does not want.
 
 ```sh
+MT4_INSTANCE=1
 MT4_LOGIN=…   MT4_PASSWORD=…   MT4_SERVER=MetaQuotes-Demo   MT4_SYMBOL=XAUUSD   MT4_PRESET=100usd-demo
+MT4_INSTANCE=2
 MT4_LOGIN2=…  MT4_PASSWORD2=…  MT4_SERVER2=TMGM-Demo        MT4_SYMBOL2=DOGEUSD MT4_PRESET2=doge-scalp-shadow  MT4_PERIOD2=5
 ```
 
 Shared values — `VNC_PASSWORD`, `ENABLE_VNC`, `TZ`, `MT4_DISTRO_URL` — are the
-plain names, and both services read them; a `VNC_PASSWORD2` wins if you ever want
+plain names, and both applications read them; a `VNC_PASSWORD2` wins if you ever want
 them to differ. The desktop password being identical is fine: separate containers,
-separate hostnames.
+separate hostnames, separate certificates.
 
 **Nothing is borrowed across instances**, because that is the failure worth
 designing against. With `MT4_INSTANCE=2`:
@@ -561,32 +600,36 @@ Steps, in order:
 1. **DNS first.** Add an `A` record for the new hostname (the one you used for
    `trade.thami.dev`) pointing at the same server. Let's Encrypt will not issue a
    certificate for a name that does not resolve yet.
-2. **Environment**: in the *existing* compose application's Environment tab, fill
-   the `…2` values in `dist/dokploy.env` and paste the whole file. That is the only
-   place either instance is configured — there is no `MT4_INSTANCE` to change,
-   because the compose file sets it per service.
-3. **Domain**: in the same application's **Domains** tab add `trade2.thami.dev` →
-   service **`mt4-doge`** → port **6080** → HTTPS. One domain per service, added
-   once; it survives every deploy after that.
-4. **Deploy.** One redeploy starts/updates both services. The new volume seeds the
-   terminal (~36 MB) and logs `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`;
-   `mt4` comes back exactly as it was, on its own volume.
+2. **Create the application**: project `forex-hex-mt4` → **Create Service** →
+   **Application**. Provider **Docker**, image
+   `ghcr.io/thamitshepe/forex-hex-mt4:live` — the same image as the gold app, so a
+   new build applies to both the next time each is deployed.
+3. **Mounts**: a **Volume** named `hex-mt4-doge` at `/data`. Different name from the
+   gold app's, and not the same name you may already have typed there — see the
+   shared-volume warning above.
+4. **Environment**: `SHARED + APP 2` from `dist/dokploy.env`, with `MT4_LOGIN2`,
+   `MT4_PASSWORD2` filled and `MT4_SERVER2` left empty until you have read it off the
+   terminal. `MT4_INSTANCE=2` is in that block; without it this is a second gold app.
+5. **Domain**: host `trade2.thami.dev`, path `/`, port **6080**, HTTPS + Let's Encrypt.
+6. **Deploy**, then open `https://trade2.thami.dev/vnc.html`. The new volume seeds
+   the terminal (~36 MB) and logs `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`;
+   the gold application is not touched at all, because it is a different container on
+   a different volume.
 
-**Coming from two applications.** If you already created a second application for
-the DOGE instance, delete it once the compose application carries its domain: the
-service `mt4-doge` replaces it, and its volume is disposable (it was the gold
-account's copy of the terminal; nothing of yours is in it). If the *gold* instance
-is on a Docker-Image application, the compose application gets a fresh volume —
-`hex-mt4-data` under a different project name is a different volume — so its
-terminal, profile chart and CSV history have to be copied across, or it re-seeds
-and asks for one login. Both names are in `docker volume ls`; with the app stopped:
+**Coming from one application.** Nothing has to be migrated: the gold app keeps its
+container and its volume, and the second app is additive. The only thing to check is
+point 2 above — if the second app ended up with the *first* app's volume name, that
+is why it shows the gold account, and the fix is a different name in its mounts plus
+one redeploy (its `/data` is a copy of the gold account's terminal; nothing of yours
+is lost, and the next start re-seeds and asks for one login).
 
-```sh
-docker run --rm -v <old-volume>:/from -v <project>_hex-mt4-data:/to alpine \
-  sh -c 'cp -a /from/. /to/ && chown -R 1000:1000 /to'
-```
+**§6.1 The compose alternative.** `deploy/docker-compose.yml` defines the same two
+instances as services of one application (`mt4`, `mt4-doge`), so one deploy and one
+Environment tab cover both — at the price of the Compose application type, and of a
+redeploy of one restarting the other. It pulls the same `ghcr.io/…/forex-hex-mt4:live`
+image; nothing is built. Use one route or the other for a given hostname, never both.
 
-**Which instance am I looking at?** The first three lines of each service's log
+**Which instance am I looking at?** The first three lines of each application's log
 answer it, so that "both hostnames show the same account" is checkable instead of
 guessed:
 
@@ -602,8 +645,12 @@ pinned `:sha` never moves) and nothing below that line will have changed either.
 a service pointed at a volume that was already claimed by the other instance stops
 with `FATAL: this volume was claimed by instance 2 …` before Wine starts.
 
-CI keeps deploying the one application (`DOKPLOY_APP`, default `hex-mt4`), which is
-now both instances at once.
+**CI and the second application.** CI publishes the image on every push; it does not
+create or reconfigure a Docker-Image application (`deploy/scripts/dokploy-apply.sh`
+writes a compose application, so it belongs to the §6.1 route). On the two-application
+route, a new build reaches each app the next time that app is deployed — with `:live`
+and "Pull latest images" (the YAML's `pull_policy: always` in the compose route), or
+by pinning a SHA. Nothing else about the second app changes when the image does.
 
 **Why a subdomain and not `trade.thami.dev/vnc2.html`.** The desktop is
 noVNC + websockify, and both build their URLs from the root of the site: the page
@@ -761,8 +808,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 
 | symptom | cause | fix |
 |---|---|---|
-| both hostnames show the same account and the same chart | three shapes look like this: two *applications* instead of two services in one, a service that was handed the first one's volume, or a container running as instance 1 while you meant it as the second | read `instance N` in each log — it must be `1` on `trade.thami.dev` and `2` on `trade2.thami.dev`. The compose file hard-codes that per service, so a container that reports `1` on the second hostname is not the `mt4-doge` service at all (usually a leftover Docker-Image application still answering that domain: delete it and re-point the domain at `mt4-doge`) |
-| the second hostname serves nothing, or its certificate is for the wrong app | the domain was added to the wrong service, or to the old application | Domains → the domain's service must be `mt4-doge`, port `6080`, HTTPS. Two services in one compose app means the service name is part of the route |
+| both hostnames show the same account and the same chart | three shapes look like this: the second application's env was copied from the first (no `MT4_INSTANCE=2`, plain `MT4_LOGIN`), it was given the first application's **volume name**, or it is not this image at all (a stale `:sha` on the old application) | the first three log lines answer it: `instance N` must be `1` on `trade.thami.dev` and `2` on `trade2.thami.dev`, and `image build` must be the commit you deployed. A `WARN: shared volume: … in use right now by another container` means the volume name, and nothing else |
+| the second hostname serves nothing, or its certificate is for the wrong app | the DNS record is missing, or the domain was added to the first application | Domains → the domain belongs to the DOGE application, port `6080`, HTTPS + Let's Encrypt, and its `A` record points at this server. One domain, one application — two applications must never both claim `trade2` |
 | `FATAL: the installer produced no terminal under .../drive_c` | MetaQuotes' installer does not run under Wine — it is a 64-bit web installer that exits silently | expected with `MT4_DISTRO_URL` empty; supply a distro (§4A). The installer's own output is printed just above the error |
 | `tar: ./MQL4: Cannot mkdir: Permission denied` on first start | the volume belongs to another uid, so seeding as `trader` cannot write into it | `docker-entrypoint.sh` chowns `/data` as root before dropping privileges; if it persists the mount is a bind mount, which keeps its *host* ownership — `chown -R 1000:1000` that host directory or use a named volume |
 | restart loop, `BadAccess (MIT-SHM)` while installing | Xvfb and Wine share memory to draw | `shm_size: 512m` (already set); `ipc: host` if it persists |

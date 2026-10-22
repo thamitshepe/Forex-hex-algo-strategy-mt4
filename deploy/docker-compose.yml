@@ -1,7 +1,9 @@
 # HEX-FVG-Breaker on a server: two accounts, two strategies, one image, one file.
 #
-# This is one Dokploy application of the Compose kind. It runs two services from
-# the same GHCR image, each with its own volume and its own hostname:
+# This is the ONE-DEPLOY alternative to the default Dokploy route (two Docker-Image
+# applications from this same image, DEPLOY.md §6). Both pull
+# ghcr.io/thamitshepe/forex-hex-mt4:live; nothing here is built. Choose one route per
+# hostname - this file is a Compose application that runs both services:
 #
 #   service    instance   account                     symbol      hostname
 #   ---------  ---------  --------------------------  ----------  -------------------

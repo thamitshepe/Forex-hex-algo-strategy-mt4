@@ -755,6 +755,106 @@ claim_volume() {
   printf '%s\n' "$cur" > "$marker" 2>/dev/null || true
 }
 
+# A volume name is server-wide in Dokploy, not application-wide: typing the same
+# name into a second application's "Add volume" means the SAME directory, not a
+# second one. Two terminals then share one MT4 tree, and the quieter half of that
+# is the report this exists for - both applications read the same
+# config/accounts.ini, so both log in as whichever account wrote it last, and the
+# second hostname shows the first account no matter what its own env says.
+# claim_volume cannot catch that (it is literally the same instance, same volume,
+# same login), so the volume carries a lease: who is using it, and when they last
+# said so, refreshed every 20s. A heartbeat from another container means exactly
+# one thing, so it is said out loud, instead of being left to look like an account
+# that will not change.
+#
+# A predecessor that crashed a second ago leaves a fresh lease too, and a restart
+# is not a shared volume. The difference is liveness, and it is observable: the
+# other container has to overwrite our lease while we watch. A dead one cannot, so
+# the warning is only printed when our own beat comes back as somebody else's.
+HEX_LEASE_BEAT="${HEX_LEASE_BEAT:-20}"
+HEX_LEASE_PROBE="${HEX_LEASE_PROBE:-30}"
+
+lease_holder() { # <lease> <host> <now> -> "<host> <age seconds>" when it is live
+  local lease="$1" host="$2" now="$3" was_host beat age
+  local window=$(( ${HEX_LEASE_BEAT:-20} * 3 ))
+  [ -f "$lease" ] || return 0
+  was_host="$(sed -n 's/^host=\([^ ]*\).*$/\1/p' "$lease" 2>/dev/null | head -1)"
+  beat="$(sed -n 's/^.* beat=\([0-9][0-9]*\).*$/\1/p' "$lease" 2>/dev/null | head -1)"
+  case "$beat" in ''|*[!0-9]*) beat=0 ;; esac
+  [ -n "$was_host" ] || return 0
+  [ "$was_host" = "$host" ] && return 0
+  # beat=0 is a clean shutdown, not a live container.
+  [ "$beat" -gt 0 ] || return 0
+  age=$((now - beat))
+  [ "$age" -lt "$window" ] || return 0
+  printf '%s %s' "$was_host" "$age"
+}
+
+lease_write() { # <lease> <host> <now>
+  printf 'host=%s instance=%s login=%s beat=%s\n' \
+    "$2" "$MT4_INSTANCE" "${MT4_LOGIN:-?}" "$3" > "$1" 2>/dev/null || true
+}
+
+lease_shared_warning() { # <meta> <holder>
+  warn "shared volume: $1 is in use right now by another container ($2 seconds since its last heartbeat). Both applications are pointed at the same volume name - and in Dokploy a volume name is server-wide, so the same name IS the same directory. Two terminals on one MT4 tree both read config/accounts.ini, so both log in as whichever account wrote it last: that is why a second hostname can show the first application's account. Give each application its own volume name (hex-mt4-data for the first, hex-mt4-doge for the second) and redeploy both."
+}
+
+lease_volume() {
+  local meta lease host now holder
+  meta="$(dirname "$MT4DIR")"
+  lease="$meta/.hex-lease"
+  host="${HEX_HOST_ID:-$(hostname 2>/dev/null || echo unknown)}"
+  now="$(date +%s)"
+  mkdir -p "$meta" 2>/dev/null || true
+  holder="$(lease_holder "$lease" "$host" "$now")"
+  lease_write "$lease" "$host" "$now"
+  [ -n "$holder" ] || return 0
+  # Someone else's heartbeat was here. Wait one beat: if it overwrites ours, it is
+  # running now; if ours survives, that lease was left by a container that is gone.
+  sleep "${HEX_LEASE_PROBE:-30}"
+  now="$(date +%s)"
+  holder="$(lease_holder "$lease" "$host" "$now")"
+  [ -n "$holder" ] || return 0
+  lease_shared_warning "$meta" "$holder"
+}
+
+# Keeps the lease fresh, and looks again: a second container that comes up ten
+# minutes later shares the volume silently as far as this boot was concerned.
+lease_beat() {
+  local meta lease host now holder last=""
+  meta="$(dirname "$MT4DIR")"
+  lease="$meta/.hex-lease"
+  host="${HEX_HOST_ID:-$(hostname 2>/dev/null || echo unknown)}"
+  while :; do
+    sleep "${HEX_LEASE_BEAT:-20}"
+    now="$(date +%s)"
+    holder="$(lease_holder "$lease" "$host" "$now")"
+    if [ -n "$holder" ]; then
+      if [ "${holder%% *}" = "$last" ]; then
+        # The same container overwrote our beat twice: it is alive. Once per ten
+        # beats is enough to be seen in `docker logs` without burying the
+        # terminal's journal under it.
+        lease_shared_warning "$meta" "$holder"
+        last=""
+        sleep $(( ${HEX_LEASE_BEAT:-20} * 19 ))
+        continue
+      fi
+      last="${holder%% *}"
+    else
+      last=""
+    fi
+    lease_write "$lease" "$host" "$now"
+  done
+}
+
+lease_release() { # a clean stop is not a container that is still using the volume
+  local meta lease host
+  meta="$(dirname "$MT4DIR")"
+  lease="$meta/.hex-lease"
+  host="${HEX_HOST_ID:-$(hostname 2>/dev/null || echo unknown)}"
+  lease_write "$lease" "$host" 0
+}
+
 banner() {
   log "----------------------------------------------------------------"
   log " HEX-FVG-Breaker on MT4 | instance $MT4_INSTANCE | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
@@ -805,6 +905,7 @@ report_isolation() {
 on_term() {
   trap - TERM INT
   log "SIGTERM - asking MT4 to close so it flushes its journal and the EA's CSVs"
+  lease_release || true
   wineserver -k >/dev/null 2>&1 || true
   for _ in $(seq 1 25); do
     pgrep -f 'terminal\.exe' >/dev/null || break
@@ -824,6 +925,8 @@ main() {
   report_isolation
   mkdir -p "$MT4DIR"
   claim_volume
+  lease_volume
+  lease_beat &
   resolve_distro
   neutralise_seed
   # The display comes up before the compile, not after: metaeditor.exe is a GUI
@@ -848,6 +951,7 @@ main() {
   # crash belongs in `docker logs`, and the restart policy belongs to the operator.
   local rc=0
   wait "$TERMINAL_PID" || rc=$?
+  lease_release || true
   log "terminal.exe exited with code $rc"
   exit "$rc"
 }

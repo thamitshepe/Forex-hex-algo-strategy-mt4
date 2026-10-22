@@ -258,6 +258,7 @@ load_fn "$ENTRYPOINT" inst_var >/dev/null
 load_fn "$ENTRYPOINT" shared_var >/dev/null
 load_fn "$ENTRYPOINT" check_instance_env >/dev/null
 load_fn "$ENTRYPOINT" claim_volume >/dev/null
+load_fn "$ENTRYPOINT" warn >/dev/null
 # shellcheck disable=SC2034  # read by the extracted functions
 MT4_INSTANCE=1
 MT4_LOGIN=111; MT4_SYMBOL=XAUUSD; MT4_PRESET=100usd-demo; MT4_PERIOD=""
@@ -328,6 +329,56 @@ check_contains "and the refusal says which MT4_INSTANCE to set" "MT4_INSTANCE=2"
 ( MT4DIR="$vol2/mt4" MT4_INSTANCE=2 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
   claim_volume ) >/dev/null 2>&1
 check_eq "its own instance number is allowed" "0" "$?"
+
+# Two Dokploy applications can be pointed at the SAME volume: a volume name is
+# server-wide, so the string that is right for one application is also accepted by
+# the second and means the same directory. Then every check above agrees - one
+# instance, one login, one marker - while two terminals write one MT4 tree and both
+# read the same config/accounts.ini. That is "both hostnames show the same account",
+# and the lease is the thing that says it out loud.
+#
+# Liveness is the whole point: a crashed predecessor also leaves a fresh lease, so
+# the warning is printed only when the other container overwrites our own beat while
+# we watch. A real second container is simulated by one that keeps writing.
+load_fn "$ENTRYPOINT" lease_holder >/dev/null
+load_fn "$ENTRYPOINT" lease_write >/dev/null
+load_fn "$ENTRYPOINT" lease_shared_warning >/dev/null
+load_fn "$ENTRYPOINT" lease_volume >/dev/null
+leasevol="$TMP/leasevol"; mkdir -p "$leasevol/mt4"
+lease_now="$(date +%s)"
+printf 'host=other-container instance=1 login=111 beat=%s\n' "$lease_now" > "$leasevol/.hex-lease"
+( for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    printf 'host=other-container instance=1 login=111 beat=%s\n' "$(date +%s)" \
+      > "$leasevol/.hex-lease"
+    sleep 0.1
+  done ) &
+writer=$!
+out="$( ( HEX_HOST_ID=mine HEX_LEASE_PROBE=2 MT4DIR="$leasevol/mt4" MT4_INSTANCE=1 \
+      MT4_LOGIN=111 lease_volume ) 2>&1 )"
+wait "$writer" 2>/dev/null || true
+check_contains "a container that keeps beating on our volume is a shared volume" \
+  "in use right now by another container" "$out"
+check_contains "and it names the volume to give this application instead" \
+  "hex-mt4-doge" "$out"
+# A predecessor that died a moment ago leaves the same fresh lease, and is not one.
+printf 'host=dead-container instance=1 login=111 beat=%s\n' "$lease_now" > "$leasevol/.hex-lease"
+out="$( ( HEX_HOST_ID=mine HEX_LEASE_PROBE=1 MT4DIR="$leasevol/mt4" MT4_INSTANCE=1 \
+      MT4_LOGIN=111 lease_volume ) 2>&1 )"
+check_eq "a crashed predecessor with a fresh lease is not a shared volume" "" "$out"
+check_contains "and this container takes the volume over" "host=mine" \
+  "$(cat "$leasevol/.hex-lease" 2>/dev/null)"
+printf 'host=other-container instance=1 login=111 beat=%s\n' "$((lease_now - 3600))" > "$leasevol/.hex-lease"
+out="$( ( HEX_HOST_ID=mine HEX_LEASE_PROBE=0 MT4DIR="$leasevol/mt4" MT4_INSTANCE=1 \
+      MT4_LOGIN=111 lease_volume ) 2>&1 )"
+check_eq "an hour-old heartbeat is a dead container, not a shared volume" "" "$out"
+printf 'host=other-container instance=1 login=111 beat=0\n' > "$leasevol/.hex-lease"
+out="$( ( HEX_HOST_ID=mine HEX_LEASE_PROBE=0 MT4DIR="$leasevol/mt4" MT4_INSTANCE=1 \
+      MT4_LOGIN=111 lease_volume ) 2>&1 )"
+check_eq "a container that stopped cleanly releases the volume" "" "$out"
+printf 'host=mine instance=1 login=111 beat=%s\n' "$lease_now" > "$leasevol/.hex-lease"
+out="$( ( HEX_HOST_ID=mine HEX_LEASE_PROBE=0 MT4DIR="$leasevol/mt4" MT4_INSTANCE=1 \
+      MT4_LOGIN=111 lease_volume ) 2>&1 )"
+check_eq "our own heartbeat (a redeploy) is not a shared volume" "" "$out"
 
 echo "instance seed: the other account's state"
 # The distro is a copy of a working terminal, so it carries the saved login, the
