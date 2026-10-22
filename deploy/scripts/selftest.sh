@@ -53,6 +53,9 @@ echo "startup.ini"
 MT4DIR="$TMP/mt4"; MT4_PROFILE=default; MT4_LOGIN=176428789
 MT4_PASSWORD=secret; MT4_SERVER=MetaQuotes-Demo; MT4_SYMBOL=XAUUSD
 MT4_EXPERT=HEX-FVG-Breaker; MT4_PRESET=100usd-demo
+# A volume that has logged in before: config/accounts.ini exists, which is what
+# makes startup.ini's login a re-login rather than a hope.
+mkdir -p "$MT4DIR/config"; : > "$MT4DIR/config/accounts.ini"
 load_fn "$ENTRYPOINT" profile_charts >/dev/null
 load_fn "$ENTRYPOINT" write_startup_ini >/dev/null
 write_startup_ini >/dev/null 2>&1
@@ -61,6 +64,7 @@ if [ -f "$ini" ]; then
   ok "file written"
   check_contains "profile"    "Profile=default"                     "$(cat "$ini")"
   check_contains "login"      "Login=176428789"                     "$(cat "$ini")"
+  check_contains "password"   "Password=secret"                     "$(cat "$ini")"
   check_contains "server"     "Server=MetaQuotes-Demo"              "$(cat "$ini")"
   check_contains "symbol"     "Symbol=XAUUSD"                       "$(cat "$ini")"
   check_contains "expert"     "Expert=HEX-FVG-Breaker"              "$(cat "$ini")"
@@ -70,6 +74,31 @@ if [ -f "$ini" ]; then
 else
   bad "file written"
 fi
+
+echo "startup.ini on a volume with no account in it"
+# Instance 2's first boot deletes config/accounts.ini - the gold account's record -
+# and MT4's startup.ini login cannot create a record, it only re-uses one. With
+# Login= present and nothing to log in as, the terminal tries, fails and sits at
+# "Waiting for update"/"No connection" without ever showing its dialog. Leaving the
+# three lines out is the state a fresh install is in, and the one that gets a
+# dialog. The expert must still be attached, or the manual login lands on a chart
+# with no robot.
+MT4DIR="$TMP/mt4n"
+write_startup_ini >/dev/null 2>&1
+inin="$MT4DIR/startup.ini"
+check_eq "no account record -> no Login=" "0" "$(grep -c '^Login=' "$inin")"
+check_eq "no account record -> the password is not written either" "0" \
+  "$(grep -c '^Password=' "$inin")"
+check_eq "no account record -> no Server=" "0" "$(grep -c '^Server=' "$inin")"
+check_contains "and the file says why" "left out on purpose" "$(cat "$inin")"
+check_contains "the expert is still attached" "Expert=HEX-FVG-Breaker" "$(cat "$inin")"
+check_contains "trading is still allowed" "ExpertsTrades=true" "$(cat "$inin")"
+# The record appears after the manual login; from then on it is a re-login again.
+mkdir -p "$MT4DIR/config"; : > "$MT4DIR/config/accounts.ini"
+write_startup_ini >/dev/null 2>&1
+check_contains "once it has an account, the login is written again" "Login=176428789" \
+  "$(cat "$inin")"
+
 
 echo "capability reporting"
 # SYS_PTRACE is bit 19. Docker's default CapEff (a80425fb) does not have it; with

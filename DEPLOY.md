@@ -118,7 +118,27 @@ allow-list is in place, and it ends with `AutoTrading ON`. Only a `BLOCKED` line
 `err 4060` in the dashboard, sends you to the desktop — the rest of this section is
 what to do when it does.
 
-**1. AutoTrading (the button in the toolbar).** Its state is not on disk. Not in
+**0. The login, on a volume that has never logged in.** MT4's `startup.ini`
+`Login=`/`Password=`/`Server=` are a *re-login*: the terminal re-uses the account
+record in `config/accounts.ini`, it cannot create one. A volume seeded from a
+distro carries that record, so instance 1 starts logged in. A volume with no
+record — every `mt4-doge` volume on its first start, because the seeded record is
+the *gold* account and is deliberately deleted (§6) — has nothing to re-login as,
+and a terminal in that state looks broken rather than empty: the chart from the
+profile is there, the title says `DOGEUSD,M5`, and underneath it says `Waiting for
+update`, `No connection` in the bottom-right corner, an empty Market Watch, and no
+dialog. The entrypoint now detects it and leaves the three lines out instead, which
+is the state a freshly installed MT4 is in and the one that brings up its login
+window. Log in once in noVNC (`File → Login`), the account is written to the volume,
+and every later start re-logs in from `startup.ini` — visible in the log as
+`login : <login> @ <server> - re-used from config/accounts.ini`.
+
+If the login window does not list your broker's server, this copy of the terminal
+has never heard of it, and MT4 cannot dial a server it has no address for: copy
+`config/servers.ini` from a terminal that is logged into that account into
+`/data/mt4/config/`, or add the broker once through `File → Open an Account` and
+then log in. Both are one-time, and both are on the volume afterwards.
+
 `terminal.ini`, not in `experts.ini`, not anywhere that survived a diff of the
 whole data folder across a start/click/quit cycle. So the entrypoint asks for it
 the only way MT4 allows — `ExpertsTrades=true` in `startup.ini` — and does not
@@ -589,16 +609,27 @@ Steps, in order:
 3. **Deploy**: both services start. `mt4` comes back exactly as it was, on its own
    volume; `mt4-doge` seeds a fresh terminal (~36 MB on its own volume) and logs
    `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`.
-4. **Domain**: in the same application's **Domains** tab add `trade2.thami.dev` →
+4. **Log `mt4-doge` in once.** Its volume deliberately has no `config/accounts.ini`
+   (the seeded one is the gold account), and MT4 cannot create an account from
+   `startup.ini` — so on this first start it opens its **login window** instead of
+   logging in. Open `https://trade2.thami.dev/vnc.html`, `File → Login`, log in with
+   `MT4_LOGIN2`/`MT4_PASSWORD2` on `MT4_SERVER2`. One time: the account lands on the
+   volume, and every later start re-logs in from `startup.ini` (the log then says
+   `login : 990158154 @ TradeMaxGlobal-Demo-2 - re-used from config/accounts.ini`).
+   The chart and the expert are already attached, so nothing else needs a click
+   except AutoTrading (§3). If the login window does not offer that server, see §3 —
+   this terminal has never heard of the broker.
+5. **Domain**: in the same application's **Domains** tab add `trade2.thami.dev` →
    service **`mt4-doge`** → port **6080** → HTTPS + Let's Encrypt. One domain per
    service, added once; it survives every deploy after that. Check that
    `trade.thami.dev` points at service `mt4` while you are there.
-5. **Deploy once more** after adding a domain: Dokploy writes the Traefik label when
+6. **Deploy once more** after adding a domain: Dokploy writes the Traefik label when
    it creates the container, so a domain added to an already running app answers
    `app not found` until the next deploy.
-6. **Delete the old second application** if you created one: it still claims
+7. **Delete the old second application** if you created one: it still claims
    `trade2.thami.dev` otherwise, and two things answering one hostname is how you end
    up looking at the wrong container.
+
 
 
 **Coming from two applications.** The service `mt4-doge` replaces the second
@@ -809,6 +840,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 |---|---|---|
 | both hostnames show the same account and the same chart | the second container is instance 1 too: a Docker-Image app copied from the first (no `MT4_INSTANCE=2`, plain `MT4_LOGIN`), a compose service pointed at the other service's **volume**, or an old application still serving that hostname on a stale `:sha` | the first three log lines answer it: `instance N` must be `1` on `trade.thami.dev` and `2` on `trade2.thami.dev`, and `image build` must be the commit you deployed. `WARN: shared volume: … in use right now by another container` means the volume, and nothing else |
 | the second hostname serves nothing, or its certificate is for the wrong app | the DNS record is missing, or the domain was added without a service name (compose apps route per service) | Domains → host, path `/`, **service `mt4-doge`**, port `6080`, HTTPS + Let's Encrypt; its `A` record must point at this server. One hostname, one service — delete any older application still claiming it |
+| the desktop shows the chart (`DOGEUSD,M5` in the title) but `Waiting for update`, `No connection` in the corner and an empty Market Watch | not logged in — and not a chart problem: the chart comes from the profile, the terminal is offline. This is the first start of a volume with no `config/accounts.ini`, and `startup.ini`'s login can only re-use an account, never create one | `File → Login` once in the desktop with `MT4_LOGIN2`/`MT4_PASSWORD2`. The log line `login: this volume has no config/accounts.ini …` says the same thing; after the login it becomes `login : … - re-used from config/accounts.ini`. §3 |
+| the login window does not list the broker (`TradeMaxGlobal-Demo-2`) | this copy of the terminal has never seen that server, and MT4 cannot dial a server it has no address for — it is not a typo it can recover from | copy `config/servers.ini` from a terminal that is logged into that account into `/data/mt4/config/` (`docker cp servers.ini <mt4-doge>:/data/mt4/config/`), or add the broker once via `File → Open an Account`, then log in. One time; it is on the volume afterwards |
 | `app not found` at both hostnames, containers running | the domain was added *after* the last deploy, so no Traefik label points at the container (labels are written at container creation) | **Deploy** once more after adding the domains. Verify: `docker inspect <container> --format '{{index .Config.Labels "traefik.http.routers.<app>.rule"}}'` must print your `Host(...)` rule, and `docker logs dokploy-traefik 2>&1 \| tail` must not say "no such service" |
 | `502 Bad Gateway` instead of `app not found` | the label exists but Traefik cannot reach the container: the service is not on `dokploy-network` | the compose file already puts both services there (`networks: [dokploy-network]`, declared `external: true`); if you edited it, `docker network ls \| grep dokploy` shows the name |
 | `line 860: MT4_PERIODm: unbound variable`, restart loop, only on `mt4-doge` | a banner line wrote `$MT4_PERIODm`, which bash reads as the variable `MT4_PERIODm`; with `MT4_PERIOD` set (instance 2 has `MT4_PERIOD2=5`) the word is expanded and the variable does not exist. Instance 1 has an empty period, so it never showed | fixed in the image (and the selftest now renders the banner for both instances under `set -u`). Redeploy to pick up the new `:live` |

@@ -497,7 +497,8 @@ write_startup_ini() {
   # The chart itself (symbol, timeframe, inputs) comes from the profile in the
   # data folder. A distro prepared from a machine that already runs the robot
   # therefore starts with the exact chart that was verified on that machine.
-  local charts symbol_line
+  local charts symbol_line login_block accounts
+  accounts="$MT4DIR/config/accounts.ini"
   charts="$(profile_charts)"
   if [ -n "$charts" ]; then
     log "profile $MT4_PROFILE carries: $(printf '%s' "$charts" | tr '\t\n' '  ' | sed 's/  *$//')"
@@ -507,14 +508,32 @@ write_startup_ini() {
     symbol_line="; Symbol= deliberately left out - the profile above already carries a $MT4_SYMBOL chart, and adding it opens a second one"
     log "chart source: the $MT4_PROFILE profile (Symbol= omitted, so MT4 does not open a second chart)"
   fi
+  # Login= in startup.ini is a *re-login*: the terminal re-uses the account
+  # record in config/accounts.ini, it does not create one from these three lines.
+  # Instance 2 has no record - neutralise_seed deletes the gold one on its first
+  # boot, on purpose, so that the second hostname cannot come up as the first
+  # account. With Login=/Password=/Server= still in the file MT4 tries, finds
+  # nothing to log in as, and sits on the chart at "Waiting for update"/"No
+  # connection" without ever showing a dialog: a terminal that looks broken.
+  # Leaving the three lines out is what a freshly installed MT4 looks like, and
+  # that is the case MT4 answers with its login window. One manual login writes
+  # accounts.ini onto the volume, and every later start re-logs in from here.
+  if [ -f "$accounts" ]; then
+    login_block="Login=${MT4_LOGIN}
+Password=${MT4_PASSWORD}
+Server=${MT4_SERVER}"
+  else
+    login_block="; Login= / Password= / Server= are left out on purpose: this volume has no
+; config/accounts.ini, so there is no account to re-login as and MT4 answers with
+; its login window instead of silently doing nothing. Log in once on the desktop
+; (File -> Login); the account is saved here and later starts use these lines."
+  fi
   umask 077
   mkdir -p "$MT4DIR" 2>/dev/null || true
   cat > "$f" <<EOF
 ; written by deploy/scripts/entrypoint.sh on every start - change the env, not this file
 Profile=${MT4_PROFILE}
-Login=${MT4_LOGIN}
-Password=${MT4_PASSWORD}
-Server=${MT4_SERVER}
+${login_block}
 EnableNews=false
 ProxyEnable=false
 FTPEnable=false
@@ -526,6 +545,11 @@ ${symbol_line}
 Expert=${MT4_EXPERT}
 ExpertParameters=${MT4_PRESET}.set
 EOF
+  if [ -f "$accounts" ]; then
+    log "login        : $MT4_LOGIN @ ${MT4_SERVER:-<server from this volume>} - re-used from config/accounts.ini"
+  else
+    warn "login: this volume has no config/accounts.ini, so there is no account for MT4 to log in as - the terminal opens its login window instead (visible on the VNC desktop). Log in once there${MT4_SERVER:+ (server: $MT4_SERVER)}${MT4_LOGIN:+ (login: $MT4_LOGIN)}; it is saved on this volume and every later start logs in from startup.ini. If the server is not in the window's list, this copy of the terminal has never heard of that broker: copy config/servers.ini from a terminal that knows it, or add it once through File -> Open an Account."
+  fi
   if [ "$symbol_line" = "Symbol=${MT4_SYMBOL}" ]; then
     log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol=$MT4_SYMBOL expert=$MT4_EXPERT preset=$MT4_PRESET"
   else
