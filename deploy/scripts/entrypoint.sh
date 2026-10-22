@@ -684,6 +684,7 @@ mirror_rejections() {
         tail -n "+$((s + 1))" "$f" 2>/dev/null \
           | awk -F, -v prevf="$state/last" '
               BEGIN { while ((getline l < prevf) > 0) prev = l; close(prevf) }
+              { sub(/\r$/, "") }
               $3 == "reason" || NF < 3 { next }
               { key = $3 "|" $13
                 if (key == prev) next
