@@ -233,7 +233,9 @@ silently under Wine, installs nothing and never opens a window. It is left in
 place because a future Wine, or a broker's branded installer, may behave
 differently — and a container that tries and explains itself beats one that
 refuses. If you point `MT4_SETUP_URL` at a broker's own installer and it *does*
-work, everything downstream (compile, `startup.ini`, volume) is identical.
+work, everything downstream (compile, `startup.ini`, volume) is identical — and
+`deploy/scripts/prepare-broker-distro.sh` (§4C) is that same run plus the archive it
+produces, so you only pay for the install once.
 
 **C. A second broker needs its own terminal.** A terminal copy only knows the
 servers of the broker it was installed from: `config/servers.ini` is an encrypted
@@ -267,14 +269,40 @@ its broker's servers, cheapest first:
      `7z x <broker>setup.exe` unpacks the `.srv` without running anything.
    Then restart, and open the Server dropdown to see whether the name appeared.
    Nothing in either file is account-specific — they are a server list.
-3. **Prepare a distro from that broker's own terminal** with
-   `deploy/scripts/prepare-distro.sh` and give *this* service its own URL:
-   `MT4_DISTRO_URL2=<its tarball>` plus `MT4_FORCE_SEED2=1` once, so the tree is
-   replaced. This is the only route that also brings the broker's charts, its
-   WebRequest list and a saved login, and it is the one to take if the second
-   account is meant to be a permanent fixture rather than an experiment. It is also
-   the only one that works when the broker is not in MetaQuotes' directory and no
-   terminal with that account has ever run on a machine you control.
+3. **Prepare a distro from that broker's own installer**, then give *this* service its
+   own copy of it. One command, on the Mac, nothing installed first:
+   ```bash
+   deploy/scripts/prepare-broker-distro.sh tmgm ~/Downloads/tmgm4setup.exe
+   # writes dist/mt4-portable-tmgm.tar.gz, prints size, members and sha256
+   ```
+   It runs the broker's `setup.exe` inside the deployment image itself (Wine, Xvfb,
+   openbox and noVNC are already in there, §5) against a throwaway volume, waits for
+   `terminal.exe` to appear, and archives the result with `tar` inside a Linux
+   container — so the archive cannot pick up the macOS AppleDouble junk that
+   `prepare-distro.sh` has to check for. Add `--login` and it holds the container
+   open with the desktop published, so you can `File → Login` once and have the saved
+   account travel inside the archive as well as the server list.
+   Then, on the `mt4-doge` service:
+   ```
+   MT4_DISTRO_URL2=https://…/mt4-portable-tmgm.tar.gz
+   MT4_FORCE_SEED2=1            # one deploy: replaces this volume's tree
+   MT4_KEEP_SEED_LOGIN2=1       # only if you logged in before archiving
+   ```
+   `MT4_KEEP_SEED_LOGIN2` is what stops the seeding step from doing its normal job:
+   `neutralise_seed` deletes `config/accounts.ini` so instance 2 cannot come up as
+   instance 1's account, and it cannot read whose account is in there (the file is
+   encrypted), so keeping a login has to be an assertion you make about the archive.
+   Drop `MT4_FORCE_SEED2` after that deploy; keep the other two.
+   If the broker's installer turns out to be a 64-bit web stub too, do the same thing
+   by hand: run that broker's terminal anywhere (a Windows machine, a Mac with its
+   installer), log in once, close it, and archive the folder the way
+   `prepare-distro.sh` does (`--exclude=history --exclude=logs …`, no macOS
+   metadata), then continue from `MT4_DISTRO_URL2` above.
+
+   This is the only route that brings the broker's server list *and* its charts *and*
+   a saved login in one move, and the only one that works when the broker is not in
+   MetaQuotes' directory and no terminal with that account has ever run on a machine
+   you control.
 
 The journal tells the three cases apart: `connect failed [No connection]` = no
 address / unreachable, `invalid account` = wrong login or expired demo, and
@@ -527,6 +555,8 @@ UI-made app and a script-made app cannot stay different for long.
 | `MT4_DISTRO_URL` | the prepared terminal (§4A), as `https://…`, or `file:///data/mt4-portable.tar.gz` on the copy-by-hand route |
 | `MT4_FORCE_SEED` | `1` replaces the tree in `/data/mt4` with a fresh distro *even though* a `terminal.exe` is already there — the profile, the saved login and the EA's CSV trade log under `MQL4/Files/Common/HEX-Logs` are replaced with it. One-shot per archive: after a forced seed the entrypoint records the archive's sha256 in `/data/.seeded-from` and refuses to replace the tree again from that same archive, so leaving the flag on cannot keep erasing trade history. A *different* archive still goes in; delete `/data/.seeded-from` to force the same one again |
 | `MT4_DISTRO_URL2` | the same for instance 2, when the second account is at a **different broker** and needs a terminal prepared from that broker's own install (§4C). Only instance 2 reads it, and the compose file passes it to that service alone |
+| `MT4_KEEP_SEED_LOGIN` | `1` keeps the seeded tree's `config/accounts.ini`, `server.ini` and `community.ini`, which instance 2's seeding otherwise deletes so it cannot come up as instance 1's account. Set it only when the distro was prepared from *this* broker's terminal with *this* account — it is your assertion, because those files are encrypted and the entrypoint cannot check whose login it is |
+| `MT4_SETUP_URL` | the installer to run when a volume has no terminal and no distro is given. Defaults to MetaQuotes' `mt4setup.exe`, which does not work under Wine; a broker's own `setup.exe` might, and `deploy/scripts/prepare-broker-distro.sh` is the way to find out (§4C). `MT4_SETUP_URL2` for instance 2 |
 | `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
 | `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before the healthcheck says so. CI does not set it; the compose file's `180` applies |
 
@@ -953,7 +983,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 | a second instance opens an XAUUSD chart, or logs `FATAL another copy of this EA holds MagicNumber` | the volume's profile carried a symbol the env did not ask for, and `Symbol=` opened a second chart next to it | `ensure_profile_chart` moves the profile's chart instead of adding one (`chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`). If it logs `chart: could not rewrite`, that volume's `.chr` is not the plain-text form it expects — set the symbol once in the desktop (right-click the chart → Symbol) and it is saved on the volume |
 | `spread 0.0012 > 0.0008` in `rejections.csv` on the crypto instance | the preset's spread cap is tighter than the broker's normal spread | raise `MaxSpreadDollars` in `Tools/make_presets.py` to just above what Market Watch shows, `python3 Tools/make_presets.py`, redeploy |
 | the second instance's chart is empty and the expert never trades | the broker names the pair differently (`DOGEUSD.a`, `DOGEUSD.raw`) | read the exact name off its Market Watch, set `MT4_SYMBOL2` to it, redeploy — the chart is moved onto the new name on the next start |
-| instance 2 comes up logged into the gold account | the distro is a copy of the gold terminal, so it carries `config/accounts.ini` and the last server | instance 2 moves that state aside on its first boot (`seed: N file(s) … moved out of the way`, keep is in `/data/mt4/.before-instance2`). If it still happens, check that this app has `MT4_INSTANCE=2` — the step is skipped for instance 1 on purpose |
+| instance 2 comes up logged into the gold account | the distro is a copy of the gold terminal, so it carries `config/accounts.ini` and the last server | instance 2 moves that state aside on its first boot (`seed: N file(s) … moved out of the way`, keep is in `/data/mt4/.before-instance2`). If it still happens, check that this app has `MT4_INSTANCE=2` — the step is skipped for instance 1 on purpose. The reverse is deliberate too: a distro prepared from *that broker's own* terminal should keep its login, and that is `MT4_KEEP_SEED_LOGIN2=1` (§4C) |
+| `prepare-broker-distro.sh` says the installer produced no terminal | the broker shipped a 64-bit web stub, the same kind MetaQuotes ships; nothing installs and no window opens | its own output is in the container log the script prints. Install that broker's terminal on a Windows machine (or a Mac with its installer), log in once, close it, and archive the folder by hand — `prepare-distro.sh` does the same work for the MetaQuotes install, so copy its `tar` line verbatim — then continue from `MT4_DISTRO_URL2` in §4C |
 | the DOGE desktop sits on a login dialog with no accounts listed | that copy of the terminal has never seen TMGM's server, so `MT4_SERVER2` resolves to nothing | log in once on that desktop (File → Login / Open an Account) and read the exact server name off the dialog; MT4 saves it on this volume and later boots log in from `startup.ini` |
 | `FATAL: MT4_INSTANCE=2 has no MT4_LOGIN2 …` | the application says it is instance 2 but its env has no `…2` copies — usually a copied application whose values were not replaced | fill `MT4_LOGIN2`/`MT4_PASSWORD2`/`MT4_SERVER2`/`MT4_SYMBOL2`/`MT4_PRESET2` in this app's Environment tab. This refusal is deliberate: the alternative is trading the DOGE preset on the gold account |
 | `FATAL: this volume belongs to account … and this container is …` | two applications were given the same volume (the second one has no volume of its own, or was created from the first without changing its mount) | give this application its own volume at `/data`. If you really mean to move *this* volume to the other account, delete `/data/.hex-instance` on it first |

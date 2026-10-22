@@ -616,6 +616,34 @@ mkdir -p "$TMP/newtree" && printf 'MZ\n' > "$TMP/newtree/terminal.exe"
 check_eq "a re-seed re-arms neutralisation" "gone" \
   "$([ -f "$seedvol/.hex-neutralised" ] || echo gone)"
 
+# A distro built from the *second* broker's own terminal carries that broker's
+# account, and keeping it is the point of paying for that install. The file is
+# encrypted, so this can only ever be the operator's assertion - which is exactly
+# why it is an env var and why it is tested here: with it set, the deletion that
+# protects instance 1 must not run.
+keepvol="$TMP/keepvol"
+mkdir -p "$keepvol/mt4/config" "$keepvol/mt4/MQL4/Files/Common/HEX-Logs" "$keepvol/mt4/logs"
+for f in config/accounts.ini config/server.ini config/community.ini; do
+  printf 'tmgm\n' > "$keepvol/mt4/$f"
+done
+printf 'date,equity\n' > "$keepvol/mt4/MQL4/Files/Common/HEX-Logs/daily.csv"
+printf 'journal\n' > "$keepvol/mt4/logs/20260101.log"
+out="$( ( MT4DIR="$keepvol/mt4" MT4_INSTANCE=2 MT4_KEEP_SEED_LOGIN=1
+         log() { printf 'LOG %s\n' "$*"; }
+         neutralise_seed ) 2>&1 )"
+check_eq "KEEP_SEED_LOGIN keeps the seeded account" "tmgm" \
+  "$(cat "$keepvol/mt4/config/accounts.ini" 2>/dev/null)"
+check_eq "KEEP_SEED_LOGIN keeps the broker's last server" "tmgm" \
+  "$(cat "$keepvol/mt4/config/server.ini" 2>/dev/null)"
+check_contains "and says it was the operator's call" "MT4_KEEP_SEED_LOGIN=1" "$out"
+check_contains "and promises no desktop step" "no desktop step needed" "$out"
+# The CSV log is still the other volume's: keeping a login is not keeping a trade
+# history, and HEX-Logs is where this instance's own equity curve is written.
+check_eq "KEEP_SEED_LOGIN still parks the previous CSV log" "gone" \
+  "$([ -f "$keepvol/mt4/MQL4/Files/Common/HEX-Logs/daily.csv" ] || echo gone)"
+check_eq "KEEP_SEED_LOGIN still parks the journals" "gone" \
+  "$([ -f "$keepvol/mt4/logs/20260101.log" ] || echo gone)"
+
 echo "compose: one application, two services, one image"
 # The deployment shape itself is the fix for "both hostnames show the same
 # account": two services from one image, each with its own instance number and its
@@ -662,9 +690,50 @@ if docker compose version >/dev/null 2>&1; then
   # The second broker's own terminal, reachable per service (§4C). Without this the
   # variable would exist in the docs and in the entrypoint and reach no container.
   check_contains "and can seed instance 2 from its own distro" 'MT4_DISTRO_URL2' "$out"
+  # A distro built from the second broker's own terminal carries that broker's
+  # account; keeping it is what makes the install worth doing, and it must reach
+  # instance 2 only.
+  check_contains "and can keep the seeded broker login" 'MT4_KEEP_SEED_LOGIN2' "$out"
+  check_contains "and can name that broker's own installer" 'MT4_SETUP_URL2' "$out"
 else
   printf '  skip docker compose (not installed)\n'
 fi
+echo "prepare-broker-distro: a second broker's terminal, without Wine on this machine"
+# The one command that turns a broker's setup.exe into a distro. It shells out to
+# docker, so only the parts that decide *what* it would run are testable here: the
+# argument handling, and the docker command line it prints - which is where the
+# routes actually live (file:// installer in the image, a named volume, the same
+# excludes as prepare-distro.sh).
+BROKER="$HERE/prepare-broker-distro.sh"
+if [ -f "$BROKER" ]; then
+  check_eq "the script is executable" "yes" "$([ -x "$BROKER" ] && echo yes)"
+  printf 'MZ\n' > "$TMP/setup.exe"
+  out="$("$BROKER" --help 2>&1)"
+  check_contains "it explains itself without arguments" "usage: prepare-broker-distro.sh" "$out"
+  out="$("$BROKER" tmgm 2>&1)"; rc=$?
+  check_eq "and refuses a missing installer argument" "2" "$rc"
+  out="$("$BROKER" tmgm "$TMP/not-there.exe" 2>&1)"
+  check_contains "a missing file is a sentence, not a traceback" "no such installer" "$out"
+  out="$("$BROKER" TMGM "$TMP/setup.exe" 2>&1)"
+  check_contains "the slug has to be a slug" "lowercase letters, digits and dashes" "$out"
+  out="$("$BROKER" --dry-run tmgm "$TMP/setup.exe" 2>&1)"; rc=$?
+  check_eq "dry run succeeds" "0" "$rc"
+  check_contains "dry run runs the installer from the image, not from the network" \
+    "MT4_SETUP_URL=file:///in/setup.exe" "$out"
+  check_contains "dry run archives the result under the broker's name" \
+    "mt4-portable-tmgm.tar.gz" "$out"
+  check_contains "dry run uses a named volume, not a bind mount" \
+    "hex-prep-tmgm-data:/data" "$out"
+  check_contains "dry run publishes the desktop so a login is possible" \
+    "-p 16080:6080" "$out"
+  check_contains "dry run opens one chart on the instance's symbol" \
+    "MT4_SYMBOL=DOGEUSD" "$out"
+  check_contains "dry run keeps history out of the archive" "--exclude=history" "$out"
+else
+  bad "prepare-broker-distro.sh is missing from deploy/scripts"
+fi
+
+
 
 echo "dokploy-apply"
 # The provisioner is what makes the server side clickless, so it is worth knowing

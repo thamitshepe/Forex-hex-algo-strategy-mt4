@@ -98,7 +98,7 @@ check_instance_env() {
 check_instance_env
 
 MT4DIR="${MT4DIR:-/data/mt4}"
-MT4_SETUP_URL="${MT4_SETUP_URL:-https://download.mql5.com/cdn/web/metaquotes.software.corp/mt4/mt4setup.exe}"
+MT4_SETUP_URL="$(shared_var MT4_SETUP_URL https://download.mql5.com/cdn/web/metaquotes.software.corp/mt4/mt4setup.exe)"
 MT4_DISTRO_URL="$(shared_var MT4_DISTRO_URL)"
 MT4_ALLOW_FRESH_INSTALL="$(shared_var MT4_ALLOW_FRESH_INSTALL 1)"
 MT4_LOGIN="$(inst_var MT4_LOGIN)"
@@ -119,6 +119,13 @@ MT4_EA_COMPILE="$(shared_var MT4_EA_COMPILE 1)"
 # the live profile and the account login. Needed once after a distro changes (or
 # after a tree was seeded from an archive that carried macOS junk).
 MT4_FORCE_SEED="$(shared_var MT4_FORCE_SEED 0)"
+# A distro prepared from *this broker's own* terminal carries that account's login
+# next to its server list, and for a second broker the two are the point of the
+# exercise. neutralise_seed deletes the gold login so instance 2 cannot come up as
+# instance 1's account; this is the operator saying "that tree was made for this
+# instance, keep its account". It has to be an assertion from outside, because
+# config/accounts.ini is encrypted and nothing here can read which login it holds.
+MT4_KEEP_SEED_LOGIN="$(shared_var MT4_KEEP_SEED_LOGIN 0)"
 ENABLE_VNC="$(shared_var ENABLE_VNC 1)"
 VNC_PASSWORD="$(shared_var VNC_PASSWORD)"
 VNC_PORT="$(shared_var VNC_PORT 5900)"
@@ -161,23 +168,24 @@ find_installed_terminal() {
 
 install_fresh_terminal() {
   local setup=/tmp/mt4setup.exe src
-  log "no terminal in $MT4DIR - downloading the MetaQuotes installer"
+  log "no terminal in $MT4DIR - running the installer at $MT4_SETUP_URL"
   curl -fsSL --retry 3 --retry-delay 5 -o "$setup" "$MT4_SETUP_URL" \
     || die "download failed: $MT4_SETUP_URL"
-  log "running mt4setup.exe /auto - this is the path that is expected to fail"
-  # Honest expectation: this does not work. Probed on Wine 8 in the image build
-  # and in a container: mt4setup.exe is a 64-bit web installer that exits
-  # silently, installs nothing and never opens a window, in both prefix types.
-  # It is kept because a future Wine or a broker's own installer may behave, and
-  # because failing here with the installer's own output is more useful than not
-  # trying at all. The supported path is a prepared distro (DEPLOY.md §4B).
+  log "running the installer with /auto"
+  # Honest expectation: MetaQuotes' own download does not work. Probed on Wine 8 in
+  # the image build and in a container: mt4setup.exe is a 64-bit web installer that
+  # exits silently, installs nothing and never opens a window, in both prefix types.
+  # A broker's own setup.exe is a different program (32-bit InstallShield) and can
+  # work, and that is the one case where this path does something useful: the
+  # terminal it leaves behind knows the broker, which nothing else can give it.
+  # Checked with: deploy/scripts/prepare-broker-distro.sh.
   wine "$setup" /auto >/tmp/mt4setup.out 2>&1 \
     || warn "the installer exited non-zero"
   wineserver -w >/dev/null 2>&1 || true
   src="$(find_installed_terminal)"
   if [ -z "$src" ]; then
     sed 's/^/[setup] /' /tmp/mt4setup.out 2>/dev/null | tail -20 || true
-    die "the installer produced no terminal under $WINEPREFIX/drive_c. MetaTrader has to be supplied: run deploy/scripts/prepare-distro.sh and point MT4_DISTRO_URL at the tarball (file:///data/mt4-portable.tar.gz). See DEPLOY.md section 4."
+    die "the installer produced no terminal under $WINEPREFIX/drive_c. MetaTrader has to be supplied: prepare a distro (deploy/scripts/prepare-distro.sh, or prepare-broker-distro.sh for a second broker) and point MT4_DISTRO_URL at the tarball (file:///data/mt4-portable.tar.gz). See DEPLOY.md section 4C."
   fi
   log "installed terminal found at $src"
   mkdir -p "$MT4DIR"
@@ -232,11 +240,18 @@ neutralise_seed() {
   # other way, and in exchange for nothing: the other instrument's expert *inputs*
   # are not here, they are in the profile chart's <expert> block, which
   # ensure_profile_chart already drops.
-  for f in config/accounts.ini config/server.ini config/community.ini; do
-    if [ -e "$MT4DIR/$f" ]; then
-      rm -f "$MT4DIR/$f" 2>/dev/null && n=$((n + 1))
-    fi
-  done
+  # A tree prepared from this broker's own terminal carries the account created or
+  # logged in on it. Keeping it is the difference between "the second hostname
+  # arrives knowing its broker" and "…its broker and its login".
+  if [ "${MT4_KEEP_SEED_LOGIN:-0}" = "1" ]; then
+    log "seed: MT4_KEEP_SEED_LOGIN=1 - the seeded account, its last server and the MQL5 session stay: this tree was prepared for instance $MT4_INSTANCE"
+  else
+    for f in config/accounts.ini config/server.ini config/community.ini; do
+      if [ -e "$MT4DIR/$f" ]; then
+        rm -f "$MT4DIR/$f" 2>/dev/null && n=$((n + 1))
+      fi
+    done
+  fi
   mkdir -p "$park" 2>/dev/null || true
   for f in MQL4/Files/Common/HEX-Logs MQL4/Logs logs; do
     if [ -d "$MT4DIR/$f" ]; then
@@ -247,9 +262,17 @@ neutralise_seed() {
   done
   rm -rf "$MT4DIR"/history/* 2>/dev/null || true
   printf 'instance=%s\n' "$MT4_INSTANCE" > "$marker" 2>/dev/null || true
-  log "seed: $n file(s) of the previous account's state moved out of the way - the saved login, the last server and the MQL5 session are gone; its CSV log and journals are in $park"
+  if [ "${MT4_KEEP_SEED_LOGIN:-0}" = "1" ]; then
+    log "seed: $n file(s) moved out of the way (last server, MQL5 session); the account stays because this tree was prepared for instance $MT4_INSTANCE - its CSV log and journals are in $park"
+  else
+    log "seed: $n file(s) of the previous account's state moved out of the way - the saved login, the last server and the MQL5 session are gone; its CSV log and journals are in $park"
+  fi
   log "seed: config/experts.ini stays: that is where the WebRequest allow-list (the ntfy URL) lives, and nothing in deploy/ can write it back"
-  log "seed: this terminal has no account yet - the login comes from startup.ini. If the desktop shows a login dialog on the first start, log in once: the broker's server is unknown to this copy of the terminal, and MT4 saves it on this volume from then on"
+  if [ "${MT4_KEEP_SEED_LOGIN:-0}" = "1" ]; then
+    log "seed: this terminal knows its broker and its account - startup.ini re-logs it in, no desktop step needed"
+  else
+    log "seed: this terminal has no account yet - the login comes from startup.ini. If the desktop shows a login dialog on the first start, log in once: the broker's server is unknown to this copy of the terminal, and MT4 saves it on this volume from then on"
+  fi
 }
 
 # Extraction is filtered rather than trusted. An archive built on a Mac can carry

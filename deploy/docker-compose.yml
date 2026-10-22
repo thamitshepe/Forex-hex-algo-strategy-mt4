@@ -104,6 +104,11 @@ services:
       # Optional: a prepared terminal tarball. file:// works, so a distro dropped
       # into the volume is 'file:///data/mt4-portable.tar.gz'.
       MT4_DISTRO_URL: "${MT4_DISTRO_URL:-}"
+      # Only used when the volume has no terminal yet: the installer to run. The
+      # MetaQuotes one does not run under Wine (64-bit web stub); a broker's own
+      # setup.exe may, which is the only route that teaches a terminal its broker
+      # without a prepared distro.
+      MT4_SETUP_URL: "${MT4_SETUP_URL:-}"
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
     volumes:
       # Everything that must survive a redeploy lives here: the terminal, the
@@ -142,6 +147,12 @@ services:
       # its own charts and its own saved login. Empty = use the shared MT4_DISTRO_URL.
       MT4_DISTRO_URL2: "${MT4_DISTRO_URL2:-}"
       MT4_FORCE_SEED2: "${MT4_FORCE_SEED2:-0}"
+      # The seeded tree's account and server stay: set this when the distro above
+      # (or in the volume) was prepared from *this* broker's terminal with this
+      # account, which is the whole point of a second-broker distro.
+      MT4_KEEP_SEED_LOGIN2: "${MT4_KEEP_SEED_LOGIN2:-0}"
+      # A broker's own installer, run only when this volume has no terminal yet.
+      MT4_SETUP_URL2: "${MT4_SETUP_URL2:-}"
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
     volumes:
       # Its own volume, because a shared one means a shared config/accounts.ini -
