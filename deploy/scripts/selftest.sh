@@ -100,6 +100,23 @@ check_contains "once it has an account, the login is written again" "Login=17642
   "$(cat "$inin")"
 
 
+echo "login state"
+# One file decides whether the terminal can log in by itself: config/accounts.ini,
+# written by MT4 on a successful login. startup.ini re-uses it; it cannot create it.
+# Everything the operator sees ("Waiting for update", "No connection") follows from
+# this being absent, so the check and the reminder are pinned here.
+load_fn "$ENTRYPOINT" login_check >/dev/null
+MT4DIR="$TMP/mt4login"
+if login_check; then bad "no record -> not logged in"; else ok "no record -> not logged in"; fi
+mkdir -p "$MT4DIR/config"; : > "$MT4DIR/config/accounts.ini"
+if login_check; then ok "record written -> logged in"; else bad "record written -> logged in"; fi
+check_contains "the reminder names the file it waits for" "config/accounts.ini" \
+  "$(sed -n '/^login_watch() {/,/^}/p' "$ENTRYPOINT")"
+check_contains "the reminder says the login is manual" "File -> Login" \
+  "$(sed -n '/^login_watch() {/,/^}/p' "$ENTRYPOINT")"
+check_contains "and that it happens once" "every later start is automatic" \
+  "$(sed -n '/^login_watch() {/,/^}/p' "$ENTRYPOINT")"
+
 echo "capability reporting"
 # SYS_PTRACE is bit 19. Docker's default CapEff (a80425fb) does not have it; with
 # `cap_add: SYS_PTRACE` it is a80825fb. The banner used to test CapEff, which is
@@ -257,6 +274,26 @@ check_contains "kept following"       "[mt4] after"   "$out"
 check_eq "no duplicate lines" "1" "$(printf '%s\n' "$out" | grep -c '^\[mt4\] three$')"
 check_eq "mirrored lines are unique" "$(printf '%s\n' "$out" | grep '^\[mt4\] ' | sort -u | wc -l | tr -d ' ')" \
                                      "$(printf '%s\n' "$out" | grep -c '^\[mt4\] ')"
+
+# The case that actually happens in the container: the folder is empty when the
+# mirror starts (a fresh volume, before MT4 has written its first journal) and the
+# journal appears later. Under the entrypoint's `set -e` this killed the mirror at the
+# first `.seen` lookup - `cat` of a file that is not there yet - so a whole session of
+# terminal output never reached `docker logs`, and "the terminal says nothing" looked
+# like "the terminal is fine".
+echo "log mirror: a journal that appears after the mirror started"
+fdir="$TMP/logs-late"; mkdir -p "$fdir"
+( set -euo pipefail; mirror_dir "[late]" "$fdir" ) > "$TMP/late.out" 2>&1 &
+late_pid=$!
+sleep 2
+mkdir -p "$fdir"; printf 'MetaTrader 4 build 1450 started\nlogin failed\n' > "$fdir/20261022.log"
+sleep 4
+kill "$late_pid" 2>/dev/null
+wait "$late_pid" 2>/dev/null
+lout="$(cat "$TMP/late.out")"
+check_contains "says what it follows before anything is there" "following $fdir" "$lout"
+check_contains "a journal created later is mirrored" "[late] login failed" "$lout"
+check_contains "and the first line of it too" "[late] MetaTrader 4 build 1450 started" "$lout"
 
 echo "why no trade"
 # Reject() in the expert appends a CSV row and returns - it never prints - so a

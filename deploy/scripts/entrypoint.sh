@@ -141,6 +141,7 @@ EA_SRC="/opt/ea/${MT4_EXPERT}.mq4"
 EA_BAKED_EX4="/opt/ea/${MT4_EXPERT}.ex4"
 
 XVFB_PID=""
+WM_PID=""
 X11VNC_PID=""
 WEBSOCKIFY_PID=""
 TERMINAL_PID=""
@@ -559,6 +560,23 @@ EOF
   [ -n "$MT4_SERVER" ] || warn "MT4_SERVER is empty - no Server= is claimed, so MT4 uses the server saved on this volume or shows the login dialog once (visible on the VNC desktop)"
 }
 
+# Whether this volume has an account record, i.e. whether the terminal has ever
+# logged in here. That one file is the difference between "MT4 re-logs in from
+# startup.ini" and "MT4 sits on an offline chart and looks broken".
+login_check() {
+  [ -f "$MT4DIR/config/accounts.ini" ]
+}
+
+# The first login cannot be automated (see write_startup_ini), so it gets a second
+# reminder *after* the terminal had its chance: the startup warning is easy to miss
+# in a wall of seeding output, and "the chart says Waiting for update" is what the
+# operator actually sees from the outside.
+login_watch() {
+  sleep "${HEX_LOGIN_WATCH:-90}"
+  login_check && return 0
+  warn "login: still no config/accounts.ini on this volume ${HEX_LOGIN_WATCH:-90}s after start, so the terminal has not logged in. It cannot do it alone: startup.ini only re-logs an account this volume already knows. Open the desktop and use File -> Login${MT4_LOGIN:+ (login $MT4_LOGIN)}${MT4_SERVER:+ on $MT4_SERVER}; one login is stored on the volume and every later start is automatic."
+}
+
 start_display() {
   Xvfb "$DISPLAY" -screen 0 "$SCREEN" +extension GLX +extension RANDR +extension RENDER \
     >/tmp/xvfb.log 2>&1 &
@@ -567,6 +585,19 @@ start_display() {
   for _ in $(seq 1 50); do [ -e "/tmp/.X11-unix/X${n}" ] && break; sleep 0.2; done
   [ -e "/tmp/.X11-unix/X${n}" ] || die "Xvfb did not start - see /tmp/xvfb.log"
   log "virtual display $DISPLAY ($SCREEN)"
+  # A window manager, because MT4 has modal windows and X does not decorate or
+  # focus anything by itself. Without one, a dialog is an unmanaged rectangle that
+  # can open *behind* the main window, the keyboard focus stays wherever Wine last
+  # put it, and there is no title bar - which on MT4 is where the account number and
+  # server name are printed. The manual steps (login window, Options, the WebRequest
+  # list) all need focus, so this is not cosmetic.
+  if command -v openbox >/dev/null 2>&1; then
+    openbox --sm-disable >/tmp/openbox.log 2>&1 &
+    WM_PID=$!
+    log "window manager: openbox (title bars, focus, dialogs raised)"
+  else
+    warn "no window manager in this image. MT4 windows are then unmanaged: no title bar (the account and server live there), a dialog can open behind the main window, and typing into it may go to the window behind it."
+  fi
 }
 
 start_vnc() {
@@ -625,6 +656,14 @@ wait_for_terminal() {
 # that was loaded once - which reads exactly like a double expert load.
 mirror_dir() {
   local tag="$1" dir="$2"
+  # A supervisor, not a task: it runs for the life of the container and must never
+  # end because one command failed. With `set -e` inherited from the entrypoint that
+  # is exactly what happened - `cat` of a `.seen` file that does not exist *yet* (the
+  # first time a journal appears) returned 1, the assignment carried it, and this
+  # function exited before printing the very line that would have explained why the
+  # terminal looked silent. Nothing in here is worth dying for.
+  set +e
+  set +o pipefail
   local state="${TMPDIR:-/tmp}/hex-mirror$(printf '%s' "$dir" | tr -c 'A-Za-z0-9' '_')" f n seen
   mkdir -p "$state" 2>/dev/null || true
   seen=0
@@ -642,6 +681,11 @@ mirror_dir() {
     printf '%s %s line(s) from the previous run are already in %s - not replayed, the file is on the volume\n' \
       "$tag" "$seen" "$dir"
   fi
+  # Say it out loud even when there is nothing to print. A mirror that stays silent
+  # is indistinguishable from a journal that never got written, and that ambiguity
+  # is what makes "the terminal shows nothing" so hard to read from `docker logs`.
+  printf '%s following %s (%s file(s) there now)\n' "$tag" "$dir" \
+    "$(ls -1 "$dir"/*.log 2>/dev/null | wc -l | tr -d '[:space:]')"
   while :; do
     for f in "$dir"/*.log; do
       [ -f "$f" ] || continue
@@ -696,6 +740,11 @@ ea_state_line() {  # <HEX-Logs dir>
 mirror_rejections() {
   local dir="$MT4DIR/MQL4/Files/Common/HEX-Logs" f="$MT4DIR/MQL4/Files/Common/HEX-Logs/rejections.csv"
   local state="${TMPDIR:-/tmp}/hex-rej" n s i=0
+  # Same rule as mirror_dir: a supervisor that must outlive a failed command. The
+  # first rejections.csv on a fresh volume arrives *after* this loop started, and
+  # reading a `.seen` file that is not there yet must not end the loop.
+  set +e
+  set +o pipefail
   mkdir -p "$state" 2>/dev/null || true
   # Rows already on the volume are history, not news - the same rule the log
   # mirror follows. (Detail strings can differ per tick, so replaying them all
@@ -846,6 +895,10 @@ lease_volume() {
 # minutes later shares the volume silently as far as this boot was concerned.
 lease_beat() {
   local meta lease host now holder last=""
+  # A supervisor too: a failed write must not stop the beat, or a live container
+  # starts looking dead and the shared-volume warning fires on a healthy pair.
+  set +e
+  set +o pipefail
   meta="$(dirname "$MT4DIR")"
   lease="$meta/.hex-lease"
   host="${HEX_HOST_ID:-$(hostname 2>/dev/null || echo unknown)}"
@@ -954,6 +1007,7 @@ on_term() {
   pgrep -f 'terminal\.exe' >/dev/null && warn "terminal.exe still alive after 25s, killing it"
   [ -n "$X11VNC_PID" ] && kill "$X11VNC_PID" 2>/dev/null || true
   [ -n "$WEBSOCKIFY_PID" ] && kill "$WEBSOCKIFY_PID" 2>/dev/null || true
+  [ -n "$WM_PID" ] && kill "$WM_PID" 2>/dev/null || true
   [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null || true
   log "stopped"
   exit 0
@@ -985,6 +1039,7 @@ main() {
   mirror_dir "[ea] " "$MT4DIR/MQL4/Logs" &
   mirror_rejections &
   launch_terminal
+  login_watch &
   wait_for_terminal
 
   # The terminal's exit code decides the container's. No silent restart loop: a

@@ -109,6 +109,7 @@ RUN dpkg --add-architecture i386 \
       procps psmisc gosu tini tzdata fonts-liberation \
       wine wine32 wine64 \
       xvfb xauth x11vnc xdotool \
+      openbox \
       novnc websockify \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*

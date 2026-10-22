@@ -766,7 +766,9 @@ MT4's level and timestamp columns, tab-separated):
 18:03:55 [hex] compiled HEX-FVG-Breaker.ex4 from source (152972 bytes)
 18:03:55 [hex] startup.ini: profile=default server=MetaQuotes-Demo symbol=XAUUSD expert=HEX-FVG-Breaker preset=100usd-demo
 18:03:55 [hex] virtual display :99 (1440x900x24)
+18:03:55 [hex] window manager: openbox (title bars, focus, dialogs raised)
 18:03:55 [hex] remote desktop: http://<this-host>:6080/vnc.html  (or tunnel it: ...)
+18:03:56 [hex] following /data/mt4/logs (0 file(s) there now)
 18:03:56 [hex] terminal.exe started (pid 42)
 18:03:58 [hex] terminal.exe is up
 18:04:02 [mt4] 0   18:04:02.101   MetaTrader 4 build 1492 started (MetaQuotes Software Corp.)
@@ -778,6 +780,13 @@ MT4's level and timestamp columns, tab-separated):
 The two `[ea]` lines are the same first-run proof `FIRST-RUN.md` §5 asks for, now
 readable from a phone. Then the phone gets the INIT push, which now also says
 whether trading is allowed.
+
+`[mt4] following /data/mt4/logs` is printed once, before `terminal.exe` starts, and
+it is the line that makes silence meaningful: the mirrors are background loops, and
+one that has quietly died prints nothing — which looks exactly like a terminal with
+nothing to say. If that line is missing, the mirror is the problem, not MT4. On a
+volume with no account record yet, `login :` (or the `login:` warning) also says
+whether the terminal intends to log in by itself or is waiting for you.
 
 
 **Day to day:**
@@ -840,6 +849,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 |---|---|---|
 | both hostnames show the same account and the same chart | the second container is instance 1 too: a Docker-Image app copied from the first (no `MT4_INSTANCE=2`, plain `MT4_LOGIN`), a compose service pointed at the other service's **volume**, or an old application still serving that hostname on a stale `:sha` | the first three log lines answer it: `instance N` must be `1` on `trade.thami.dev` and `2` on `trade2.thami.dev`, and `image build` must be the commit you deployed. `WARN: shared volume: … in use right now by another container` means the volume, and nothing else |
 | the second hostname serves nothing, or its certificate is for the wrong app | the DNS record is missing, or the domain was added without a service name (compose apps route per service) | Domains → host, path `/`, **service `mt4-doge`**, port `6080`, HTTPS + Let's Encrypt; its `A` record must point at this server. One hostname, one service — delete any older application still claiming it |
+| no `[mt4]` lines at all for a whole session, though the terminal is clearly running | the journal mirror ended at its first poll: under the entrypoint's `set -e`, reading a `.seen` file that did not exist *yet* returned 1 and killed the background loop — so every message that would have explained the terminal (a failed login above all) went only to a file on the volume | fixed — the mirror prints `[mt4] following /data/mt4/logs (N file(s) there now)` at start and survives a failed command. If that line is missing, the mirror is the thing to look at, not the terminal |
+| the login window does not appear, or typing into a dialog does nothing | the image had no window manager, so MT4's dialogs are unmanaged: they can open *behind* the main window, and the keyboard focus stays on the window behind them | fixed — `openbox` starts with the display: title bars (that is where MT4 prints the account and server), dialogs raised and focused |
 | the desktop shows the chart (`DOGEUSD,M5` in the title) but `Waiting for update`, `No connection` in the corner and an empty Market Watch | not logged in — and not a chart problem: the chart comes from the profile, the terminal is offline. This is the first start of a volume with no `config/accounts.ini`, and `startup.ini`'s login can only re-use an account, never create one | `File → Login` once in the desktop with `MT4_LOGIN2`/`MT4_PASSWORD2`. The log line `login: this volume has no config/accounts.ini …` says the same thing; after the login it becomes `login : … - re-used from config/accounts.ini`. §3 |
 | the login window does not list the broker (`TradeMaxGlobal-Demo-2`) | this copy of the terminal has never seen that server, and MT4 cannot dial a server it has no address for — it is not a typo it can recover from | copy `config/servers.ini` from a terminal that is logged into that account into `/data/mt4/config/` (`docker cp servers.ini <mt4-doge>:/data/mt4/config/`), or add the broker once via `File → Open an Account`, then log in. One time; it is on the volume afterwards |
 | `app not found` at both hostnames, containers running | the domain was added *after* the last deploy, so no Traefik label points at the container (labels are written at container creation) | **Deploy** once more after adding the domains. Verify: `docker inspect <container> --format '{{index .Config.Labels "traefik.http.routers.<app>.rule"}}'` must print your `Host(...)` rule, and `docker logs dokploy-traefik 2>&1 \| tail` must not say "no such service" |
