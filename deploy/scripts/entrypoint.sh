@@ -331,10 +331,16 @@ main() {
   banner
   mkdir -p "$MT4DIR"
   resolve_distro
+  # The display comes up before the compile, not after: metaeditor.exe is a GUI
+  # binary and under Wine with no X server it exits without writing the .ex4 -
+  # the same reason deploy/Dockerfile's ea-check stage runs it through xvfb-run.
+  # An image built without a distro has no baked .ex4 to fall back on, so that
+  # failure is fatal, and it looks like a source problem rather than a missing
+  # display. A second of Xvfb buys a compile that either works or says why.
+  start_display
   sync_ea
   compile_ea
   write_startup_ini
-  start_display
   start_vnc
   mirror_dir "[mt4]" "$MT4DIR/logs" &
   mirror_dir "[ea] " "$MT4DIR/MQL4/Logs" &

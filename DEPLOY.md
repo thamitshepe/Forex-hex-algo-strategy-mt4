@@ -65,24 +65,29 @@ compiled and checked in CI — see `deploy/scripts/entrypoint.sh`.
 
 ## 2. The 30-second version
 
-Once, in the repo — Settings → Secrets and variables → Actions, the values listed
-in §5. The ones that matter: `DOKPLOY_URL`, `DOKPLOY_API_TOKEN`, `MT4_LOGIN`,
-`MT4_PASSWORD`, and `MT4_DISTRO_URL` for the terminal itself. Then push to `main`,
-and the push:
+**One push, then one click.** The push to `main` builds `deploy/Dockerfile` and
+publishes `ghcr.io/<owner>/forex-hex-mt4:live` plus the commit SHA, and fails if the
+MQL4 does not compile. Then, in Dokploy:
 
-1. builds `deploy/Dockerfile` and pushes `ghcr.io/<owner>/forex-hex-mt4:live` plus
-   the commit SHA — and fails if the MQL4 does not compile;
-2. creates the Dokploy project, the Compose app and its environment, or finds the
-   ones it made last time;
-3. sends the compose file and the environment, then asks Dokploy to deploy.
+1. **Create Project** `forex-hex-mt4` → **Create Service** → **Compose**.
+2. Paste `deploy/docker-compose.yml` into the compose editor.
+3. Paste the environment block from §6 into the **Environment** tab, with your demo
+   account and the `MT4_DISTRO_URL` from §4.
+4. **Deploy**, then watch the log until `terminal.exe is up` (§7).
 
-No server commands in any of that, and no clicks. §6 is what each step is.
+Everything site-specific lives in Dokploy's environment: that is the one place to
+change a password, a symbol or a preset, and no credential is stored in git. The
+container pulls the terminal tarball itself on its first start, so there is no file
+to copy onto the server and no shell needed.
 
-Then open `http://<server>:6080/vnc.html`, log in with `VNC_PASSWORD`, and check
-the two things a headless start cannot check for you (§3). After that, the
-terminal is on its own: a new commit builds a new image, Dokploy restarts the
-container, the entrypoint recompiles the EA from that commit, and the chart comes
-back exactly as it was because the profile is on the volume.
+If you would rather not click at all, §6 also has the CI route — set `DOKPLOY_URL`
+and `DOKPLOY_API_TOKEN` as repository variables/secrets and the workflow creates and
+deploys the same app. The two routes are alternatives, not stages: the workflow only
+touches Dokploy when those two are set.
+
+After the first start the terminal is on its own: a new commit builds a new image,
+the redeploy pulls it, the entrypoint recompiles the EA from that commit, and the
+chart comes back exactly as it was because the profile is on the volume.
 
 ---
 
@@ -92,6 +97,14 @@ Two switches in MetaTrader decide whether the EA may trade, and neither of them
 can be set reliably from outside the running terminal. This is not a container
 problem — it is the same on any MT4 VPS — and it is the same thing that made this
 EA look broken on the laptop.
+
+**If the volume was seeded from a distro (§4) prepared on a machine that already ran
+the robot, neither switch needs a click.** `config/experts.ini` comes across with the
+WebRequest list in it, and `startup.ini` asks for AutoTrading on every start. Confirm
+it from the phone rather than the desktop: an INIT push arriving at all means the
+allow-list is in place, and it ends with `AutoTrading ON`. Only a `BLOCKED` line, or
+`err 4060` in the dashboard, sends you to the desktop — the rest of this section is
+what to do when it does.
 
 **1. AutoTrading (the button in the toolbar).** Its state is not on disk. Not in
 `terminal.ini`, not in `experts.ini`, not anywhere that survived a diff of the
@@ -160,7 +173,8 @@ all.
 
 ```bash
 gh release create mt4-distro dist/mt4-portable.tar.gz    # or any https:// host
-# repo variable (§5):
+# then set it as MT4_DISTRO_URL in Dokploy's environment (§6) — or as a repository
+# variable (§5) if you are using the CI route:
 # MT4_DISTRO_URL=https://github.com/<you>/<repo>/releases/download/mt4-distro/mt4-portable.tar.gz
 ```
 
@@ -263,11 +277,39 @@ variable edited in Dokploy's UI and nowhere else is overwritten by the next push
 
 ## 6. Dokploy
 
-You do not create anything here. On the first push to `main` with `DOKPLOY_URL` and
-`DOKPLOY_API_TOKEN` set, `deploy/scripts/dokploy-apply.sh` makes the whole thing
-and deploys it; on every push after that it finds what it made, updates it and
-deploys again. The prerequisites are only an **amd64** VPS with Dokploy installed
-(§8 costs this out) and those two settings.
+**By hand, in the UI — the short route.** Everything the container needs is one of
+eleven environment variables, and setting them here keeps every credential out of
+git. Create **Project** `forex-hex-mt4` → **Create Service** → **Compose**, then:
+
+- **Compose file**: paste `deploy/docker-compose.yml` verbatim. The `cap_add` and
+  `shm_size` it needs are below, and only a Compose service carries them.
+- **Environment**: paste this, with your own demo account and a VNC password.
+
+```dotenv
+MT4_LOGIN=12345678
+MT4_PASSWORD=...
+MT4_SERVER=MetaQuotes-Demo
+MT4_SYMBOL=XAUUSD
+MT4_PRESET=100usd-demo
+MT4_PROFILE=default
+MT4_DISTRO_URL=https://github.com/<you>/<repo>/releases/download/mt4-distro/mt4-portable.tar.gz
+ENABLE_VNC=1
+VNC_PASSWORD=...
+TZ=UTC
+# MT4_IMAGE=ghcr.io/<owner>/forex-hex-mt4:<sha>    # pin an older build to roll back
+```
+
+Then **Deploy**. The first start downloads the tarball (36 MB, once — it lands in the
+volume), compiles the EA with the container's own `metaeditor.exe`, logs the account
+in from `MT4_LOGIN`/`MT4_PASSWORD`, and prints `terminal.exe is up` when it is up.
+§7 is what to look at. `uname -m` on the VPS must say `x86_64`: the image is built
+for `linux/amd64` only.
+
+**Or let CI do it.** On the first push to `main` with `DOKPLOY_URL` and
+`DOKPLOY_API_TOKEN` set, `deploy/scripts/dokploy-apply.sh` makes the same project and
+app and deploys it; on every push after that it finds what it made, updates it and
+deploys again. It only acts when those two are set, so an app you made by hand is
+never touched by a workflow run.
 
 **What the first run does**, in order:
 

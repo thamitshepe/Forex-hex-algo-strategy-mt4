@@ -55,7 +55,13 @@ fi
 echo "data folder : $MD"
 echo "terminal    : $(ls -l "$MD/terminal.exe" | awk '{print $5" bytes"}')"
 echo "ea present  : $(ls "$MD/MQL4/Experts/HEX-FVG-Breaker.ex4" 2>/dev/null || echo 'no - the container compiles it from source')"
-echo "ntfy allow  : $(strings -a "$MD/config/experts.ini" 2>/dev/null | grep -m1 -o 'https://ntfy.sh[^[:space:]]*' || echo 'not found in config/experts.ini')"
+# config/experts.ini is a binary MetaQuotes file: its strings are UTF-16LE, so
+# `strings | grep` reports a false "not found" for a WebRequest list that is right
+# there. Decode it the way the entrypoint decodes MT4's own logs, blank the
+# non-printable bytes, and the URL becomes a plain ASCII token again.
+ntfy_url="$(iconv -f UTF-16LE -t UTF-8 "$MD/config/experts.ini" 2>/dev/null \
+  | tr -c '[:print:]\n' ' ' | grep -o 'https://ntfy[^ ]*' | head -1 || true)"
+echo "ntfy allow  : ${ntfy_url:-not in config/experts.ini - add it once in the terminal (DEPLOY.md section 3)}"
 echo "charts      : $(ls "$MD/profiles/default/"*.chr 2>/dev/null | wc -l | tr -d ' ') in profiles/default"
 if [ -f "$MD/profiles/default/chart04.chr" ] && ! strings -a "$MD/profiles/default/chart04.chr" | grep -qi xauusd; then
   echo "  note: the default profile's charts do not mention XAUUSD - check the symbol"
