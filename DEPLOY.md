@@ -520,7 +520,9 @@ old account, on both hostnames":
 `SHARED` (both applications, identical), `APP 1` (gold), `APP 2` (DOGE). Paste
 `SHARED + APP 1` into `hex-mt4` and `SHARED + APP 2` into `hex-mt4-doge`. That is the
 one-file promise kept where this route can keep it: one file to fill, nothing to
-hand-edit per app beyond deleting the half it does not want.
+hand-edit per app beyond deleting the half it does not want. **Paste one half per
+app, never the whole file**: both halves carry `MT4_INSTANCE`, and a dotenv is read
+top to bottom, so the whole file in one app is an instance-2 app.
 
 ```sh
 MT4_INSTANCE=1
