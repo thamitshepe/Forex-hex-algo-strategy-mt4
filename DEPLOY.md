@@ -426,6 +426,7 @@ UI-made app and a script-made app cannot stay different for long.
 |---|---|
 | `MT4_LOGIN` / `MT4_PASSWORD` / `MT4_SERVER` | the demo account the terminal logs into |
 | `MT4_SYMBOL` / `MT4_PRESET` | what to trade: `XAUUSD` + `100usd-demo.set` |
+| `MT4_PERIOD` | optional: move the volume's chart onto this timeframe (`5`, `15`, `60`). Empty = leave the chart alone. An instance whose symbol the profile does not carry gets the chart *moved* onto it — never a second chart, because a second chart loads a second expert |
 | `MT4_PROFILE` | which profile in the volume to open (default `default`) |
 | `ENABLE_VNC` / `VNC_PASSWORD` | the remote desktop. Empty password ⇒ no desktop, deliberately |
 | `TZ` | leave `UTC`: the preset's trading hours are UTC |
@@ -433,6 +434,81 @@ UI-made app and a script-made app cannot stay different for long.
 | `MT4_FORCE_SEED` | `1` replaces the tree in `/data/mt4` with a fresh distro *even though* a `terminal.exe` is already there — the profile, the saved login and the EA's CSV trade log under `MQL4/Files/Common/HEX-Logs` are replaced with it. One-shot per archive: after a forced seed the entrypoint records the archive's sha256 in `/data/.seeded-from` and refuses to replace the tree again from that same archive, so leaving the flag on cannot keep erasing trade history. A *different* archive still goes in; delete `/data/.seeded-from` to force the same one again |
 | `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
 | `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before the healthcheck says so. CI does not set it; the compose file's `180` applies |
+
+### A second instance (different account, different strategy)
+
+Scaling here means **one Dokploy application per instance**, never one container
+running two terminals. Each application has its own volume, its own environment,
+its own domain and its own logs; deleting the application is the whole of
+"downscale", and the other instances never notice.
+
+| | instance 1 (gold) | instance 2 (DOGE scalp) |
+|---|---|---|
+| app | the one you have | a second application, same image |
+| env | `MT4_SYMBOL=XAUUSD`, `MT4_PRESET=100usd-demo` | `MT4_SYMBOL=DOGEUSD`, `MT4_PERIOD=5`, `MT4_PRESET=doge-scalp-shadow` |
+| volume | `hex-mt4-data` → `/data` | **its own** volume, e.g. `hex-doge-data` → `/data` |
+| domain | `trade.thami.dev` → 6080 | `trade2.thami.dev` → 6080 |
+| push | `HEX XAUUSD` → ntfy `hex-xauusd-…` | `HEX DOGEUSD` → ntfy `hex-doge-…` |
+
+Steps, in order:
+
+1. **DNS first.** Add an `A` record for the new hostname (the one you used for
+   `trade.thami.dev`) pointing at the same server. Let's Encrypt will not issue a
+   certificate for a name that does not resolve yet.
+2. **Application** → Docker → image `ghcr.io/thamitshepe/forex-hex-mt4:live`,
+   port `6080`, **a new volume** mounted at `/data`, domain → HTTPS.
+3. **Environment**: `dist/dokploy-doge.env` (in this repo, filled in), or copy it
+   from the first app and change `MT4_LOGIN`/`MT4_PASSWORD`/`MT4_SERVER`/
+   `MT4_SYMBOL`/`MT4_PERIOD`/`MT4_PRESET`/`VNC_PASSWORD`.
+4. **Deploy**, then read its log the same way as §7. First start downloads the
+   distro into the *new* volume (~36 MB) and logs
+   `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`.
+
+**Why a subdomain and not `trade.thami.dev/vnc2.html`.** The desktop is
+noVNC + websockify, and both build their URLs from the root of the site: the page
+is `/vnc.html` and it opens a WebSocket at `/websockify`. Served under a path
+prefix, that socket request goes to `/vnc2/websockify`, which the container does
+not answer — you get a black page with `404` on the socket. Making it work means a
+proxy that rewrites the prefix (`StripPrefix` on every path, including the
+WebSocket upgrade) plus the same prefix known to websockify. That is a Compose
+application with Traefik labels, not a field in the Docker-Image form, and it is
+one more thing to get wrong at 3 a.m. A second hostname is one DNS record and
+costs nothing. So: `https://trade2.thami.dev/vnc.html` — same page, same
+behaviour, its own cookie and password.
+
+**The chart is moved, not added.** The distro's profile carries an `XAUUSD M15`
+chart. An instance asking for `DOGEUSD 5` would, on a naive start, get *that*
+chart restored **and** a second one opened for `Symbol=DOGEUSD` — two charts, two
+copies of the expert, and the MagicNumber lock refusing one of them at random.
+So `ensure_profile_chart` moves the profile's chart onto the requested
+symbol/timeframe (keeping the original in `/data/mt4/.profile-orig`) and drops the
+`<expert>` block that carried the other instrument's inputs; `startup.ini` then
+attaches this instance's expert and preset to the only chart there is. You will
+see it in the log as `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`, or
+`chart: chart04.chr carries DOGEUSD 5 - no rewrite needed` on every later start.
+
+**A third, a fourth.** Same three steps. Practically, what runs out first is
+memory: each instance is a Wine prefix, one terminal, Xvfb and x11vnc — budget
+~700 MB–1 GB per instance, so three fit on a 4 GB VPS and two comfortably. Watch
+`docker stats` on the host rather than guessing, and remember every instance needs
+its own trading account (or at least its own magic number *and* symbol if it
+shares one — but separate accounts is the honest way, so one account's drawdown
+cannot starve another's margin).
+
+**Per-instance presets.** A new strategy that is a *tuning* of this engine is a
+new entry in `Tools/make_presets.py` → `PRESETS`, then
+`python3 Tools/make_presets.py` (never hand-edit a `.set`: `--check` fails on
+overrides that do not match a real input, and the generator is what keeps the
+`differs from the EA default` header honest). A strategy that is a *different
+engine* is a new `.mq4` in `MQL4/Experts/`, a Dockerfile that copies it, and
+`MT4_EXPERT` naming it — the entrypoint already syncs and compiles whatever
+`MT4_EXPERT` points at.
+
+**Before a new instance risks money.** Point it at a `-shadow` preset for one
+session (`doge-scalp-shadow.set`, `100usd-shadow.set`): the signals, rejections
+and dashboard are identical, `trades.csv` stays empty, and you find out whether
+the broker's spread, the symbol name and the lot step are what the preset assumed
+*before* the first order.
 
 ---
 
@@ -540,6 +616,9 @@ shows the EA's prints, and a rebuild is a `git push`.
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |
 | it trades the wrong timeframe | the chart comes from the profile, not from the env | prepare a distro with the XAUUSD M15 chart, or set the chart once in the desktop (the profile is then saved on the volume) |
 | two robots on one account | the laptop copy is still running | stop one of them, always |
+| a second instance opens an XAUUSD chart, or logs `FATAL another copy of this EA holds MagicNumber` | the volume's profile carried a symbol the env did not ask for, and `Symbol=` opened a second chart next to it | `ensure_profile_chart` moves the profile's chart instead of adding one (`chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`). If it logs `chart: could not rewrite`, that volume's `.chr` is not the plain-text form it expects — set the symbol once in the desktop (right-click the chart → Symbol) and it is saved on the volume |
+| `spread 0.0012 > 0.0008` in `rejections.csv` on the crypto instance | the preset's spread cap is tighter than the broker's normal spread | raise `MaxSpreadDollars` in `Tools/make_presets.py` to just above what Market Watch shows, `python3 Tools/make_presets.py`, redeploy |
+| the second instance's chart is empty and the expert never trades | the broker names the pair differently (`DOGEUSD.a`, `DOGEUSD.raw`) | read the exact name off its Market Watch, set `MT4_SYMBOL` to it, redeploy — the chart is moved onto the new name on the next start |
 
 ---
 

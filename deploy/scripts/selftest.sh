@@ -92,6 +92,60 @@ rm -rf "$MT4DIR/profiles"
 write_startup_ini >/dev/null 2>&1
 check_contains "no profile -> Symbol= kept" "Symbol=XAUUSD" "$(cat "$inip")"
 
+echo "profile chart moves to the instance's symbol"
+# A second instance asks for a symbol the archived profile does not carry. Two
+# charts would load the expert twice, so the chart must be moved, not joined.
+load_fn "$ENTRYPOINT" ensure_profile_chart >/dev/null
+MT4DIR="$TMP/mt4c"; MT4_SYMBOL=DOGEUSD; MT4_PERIOD=5
+mkdir -p "$MT4DIR/profiles/default"
+cat > "$MT4DIR/profiles/default/chart04.chr" <<'CHR'
+<chart>
+id=134368953844317820
+symbol=XAUUSD
+period=15
+digits=2
+scale=2
+<window>
+height=100
+</window>
+<expert>
+name=HEX-FVG-Breaker
+<inputs>
+MaxSpreadDollars=0.45
+</inputs>
+</expert>
+</chart>
+CHR
+ensure_profile_chart >/dev/null 2>&1
+chr="$MT4DIR/profiles/default/chart04.chr"
+check_contains "symbol moved"  "symbol=DOGEUSD" "$(cat "$chr")"
+check_contains "period moved"  "period=5"       "$(cat "$chr")"
+check_eq "other instrument's inputs dropped" "0" "$(grep -c 'MaxSpreadDollars' "$chr")"
+check_eq "no stale digits/scale" "0" "$(grep -c '^digits=\|^scale=' "$chr")"
+check_eq "chart structure survives" "1" "$(grep -c '^</chart>' "$chr")"
+check_eq "original kept outside the profile" "1" "$(ls "$MT4DIR/.profile-orig" | wc -l | tr -d ' ')"
+# A second chart in the profile is moved out, so exactly one expert can load.
+printf '<chart>\nsymbol=EURUSD\nperiod=15\n</chart>\n' > "$MT4DIR/profiles/default/chart07.chr"
+ensure_profile_chart >/dev/null 2>&1
+check_eq "one chart left in the profile" "1" "$(ls "$MT4DIR/profiles/default"/*.chr | wc -l | tr -d ' ')"
+check_eq "extra chart parked, not deleted" "1" "$(ls "$MT4DIR/.profile-extra" | wc -l | tr -d ' ')"
+# Running again with the same env must be a no-op, or every restart rewrites the
+# file the operator may have tuned in the desktop.
+before="$(cat "$chr")"
+ensure_profile_chart >/dev/null 2>&1
+check_eq "second run is a no-op" "$before" "$(cat "$chr")"
+# End to end, and the point of the whole function: once the profile carries this
+# instance's symbol, startup.ini must not name it again - that line is what used
+# to open a second chart and a second expert on the same magic number.
+write_startup_ini >/dev/null 2>&1
+check_eq "instance chart -> startup.ini omits Symbol=" "0" "$(grep -c '^Symbol=' "$MT4DIR/startup.ini")"
+check_contains "instance chart -> expert still attached" "Expert=HEX-FVG-Breaker" "$(cat "$MT4DIR/startup.ini")"
+# No profile at all: nothing to move, and startup.ini's Symbol= is what opens the
+# chart. The function must not create anything.
+rm -rf "$MT4DIR/profiles"
+ensure_profile_chart >/dev/null 2>&1
+check_eq "no profile -> no chart invented" "0" "$(ls -d "$MT4DIR/profiles" 2>/dev/null | wc -l | tr -d ' ')"
+
 echo "log mirror"
 # The mirror has to survive the four things a naive tail does not: a journal that
 # already holds a previous run (a restart must not replay it - two "loaded

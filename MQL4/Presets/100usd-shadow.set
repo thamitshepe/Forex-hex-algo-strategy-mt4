@@ -13,6 +13,7 @@
 ; differs from the EA default:
 ;   DryRun: 0  ->  1
 ;   MaxSignalsPerDay: 6  ->  10
+;   NotifyUrl:   ->  https://ntfy.sh/hex-xauusd-e7b863cd
 ;-------------------------------------------------------------------
 MagicNumber=20261015
 TradeSymbol=

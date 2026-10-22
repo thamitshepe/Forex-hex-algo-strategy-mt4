@@ -20,6 +20,7 @@
 ;   MaxMarginUsagePct: 50.0  ->  60
 ;   MaxRiskAmount: 0.0  ->  300
 ;   MinFreeMarginUsd: 40.0  ->  500
+;   NotifyUrl:   ->  https://ntfy.sh/hex-xauusd-e7b863cd
 ;-------------------------------------------------------------------
 MagicNumber=20261015
 TradeSymbol=

@@ -19,6 +19,7 @@
 ;   StopTradingHourUTC: 21  ->  20
 ;   StartTradingHourUTC: 1  ->  7
 ;   MaxRiskAmount: 0.0  ->  2.0
+;   NotifyUrl:   ->  https://ntfy.sh/hex-xauusd-e7b863cd
 ;-------------------------------------------------------------------
 MagicNumber=20261015
 TradeSymbol=

@@ -42,6 +42,9 @@ services:
       MT4_PASSWORD: "${MT4_PASSWORD:?set the demo account password}"
       MT4_SERVER: "${MT4_SERVER:-MetaQuotes-Demo}"
       MT4_SYMBOL: "${MT4_SYMBOL:-XAUUSD}"
+      # Empty = keep the profile chart's own timeframe; set it to move that chart
+      # onto another one (a second instance on DOGEUSD M5, say).
+      MT4_PERIOD: "${MT4_PERIOD:-}"
       MT4_PRESET: "${MT4_PRESET:-100usd-demo}"
       MT4_PROFILE: "${MT4_PROFILE:-default}"
       # Remote desktop. ENABLE_VNC=0 means no desktop at all; a VNC_PASSWORD that

@@ -124,6 +124,13 @@ def preset(inputs, name, title, notes, overrides):
 # ---------------------------------------------------------------- presets
 # (id, title, notes, overrides)
 
+# The push topic belongs to the deployment, not to the strategy: every XAUUSD
+# preset notifies the same chat. It used to be patched into the .set files by
+# hand, which meant one regeneration silently dropped it and the phone went
+# quiet - so it is applied in main() to every preset that does not name its own.
+# A preset for a different instance (see doge-scalp) carries its own topic.
+NOTIFY_XAU = "https://ntfy.sh/hex-xauusd-e7b863cd"
+
 PRESETS = [
     ("100usd-demo",
      "HEX-FVG-Breaker - $100 live-size demo (START HERE)",
@@ -221,6 +228,88 @@ PRESETS = [
       "MaxRiskAmount": "2.0", "MaxOpenTrades": "1", "MaxSpreadDollars": "0.45",
       "MinFreeMarginUsd": "40", "MaxDailyLossPct": "5", "MaxTotalDrawdownPct": "15",
       "EntryModel": "1", "AllowMarketEntry": "1"}),
+
+    # The second instance: a different instrument on a different account. Every
+    # *_Dollars input is a PRICE distance, so these are DOGE-sized, not gold-sized
+    # - copying the gold preset here would ask for a stop six times the price of
+    # the coin and nothing would ever trade.
+    ("doge-scalp",
+     "HEX-FVG-Breaker - DOGEUSD M5 scalp (second instance, TMGM)",
+     ["Same engine, different job. Volume/scalp tuning for a 24/7 crypto pair,",
+      "not the gold swing tuning. Read this before trusting any number:",
+      "",
+      "* Every *_Dollars input is in PRICE units. DOGE near $0.20 means a stop of",
+      "  0.003, not 1.20. If DOGE has moved a long way from there, re-read the",
+      "  stop bracket (MinStopDollars/MaxStopDollars) before starting it.",
+      "* Trend is EMA-only (TrendMode 0) on M30 over M5 entries: structure",
+      "  confirmation on an instrument that just moved 3% is a veto, not a filter.",
+      "* Confluence is off - an FVG that also overlaps a breaker is rare on M5,",
+      "  and this instance wants many small trades, not six well-fed ones.",
+      "* One target at 1R, all of it, breakeven at 0.55R, no trail: small wins",
+      "  taken off the table instead of runners given back.",
+      "* Session 0-24 and CloseOnWeekend 0, because crypto does not close.",
+      "",
+      "Sizing is by risk (0.5% of equity), not by lots: a DOGE lot is not a gold",
+      "lot, and the margin guard plus MaxLot are what actually bound it.",
+      "",
+      "Watch rejections.csv on day one: 'spread > 0.0008' means the broker's",
+      "normal spread is wider than this assumes, so raise MaxSpreadDollars to",
+      "just above what Market Watch shows."],
+     {"MagicNumber": "20261016", "DryRun": "0", "MaxSpreadDollars": "0.0008",
+      "MaxOpenTrades": "1", "MaxSignalsPerDay": "40", "RequireNewBar": "1",
+      "CloseOnWeekend": "0", "StartTradingHourUTC": "0", "StopTradingHourUTC": "24",
+      "TrendTimeframe": "30", "TrendMode": "0", "FastEMAPeriod": "9", "SlowEMAPeriod": "21",
+      "MinTrendSlopeDollars": "0.0002", "MaxDistFromEmaDollars": "0.004",
+      "SwingLookback": "2", "MinSwingRangeDollars": "0.0015",
+      "MinDisplacementPct": "50.0", "MinDisplacementAtr": "0.90",
+      "FvgMinSizeAtrPct": "30", "FvgMaxSizeAtrPct": "250", "MitigatePct": "45.0",
+      "EntryZonePct": "55.0", "MaxZoneAgeBars": "36", "RequireFVGConfluence": "0",
+      "ConfluenceLookback": "30", "BreakerMinAtr": "0.50", "BreakerMaxAtr": "4.0",
+      "MitigConsolBars": "3", "MitigConsolAtrMax": "0.70", "MitigBreakAtr": "1.10",
+      "EntryModel": "1", "AllowMarketEntry": "1", "MaxEntryDistanceDollars": "0.004",
+      "MinRejectionWickPct": "25.0", "MinTriggerRangeAtr": "0.30",
+      "MinTriggerClosePct": "40.0", "MaxBarsSinceTouch": "3", "LimitExpiryBars": "2",
+      "RiskPercent": "0.5", "MaxLot": "0.20", "MaxMarginUsagePct": "20",
+      "StopBufferAtrPct": "20.0", "MinStopDollars": "0.0015", "MaxStopDollars": "0.012",
+      "Tp1RR": "1.0", "Tp1Percent": "100.0", "Tp2RR": "2.0",
+      "BreakEvenTriggerRR": "0.55", "BreakEvenOffsetDollars": "0.0001",
+      "UseAtrTrail": "0", "TrailStartRR": "1.2", "MinHoldBars": "0",
+      "MaxDailyLossPct": "3.0", "MaxTotalDrawdownPct": "10.0", "MinFreeMarginUsd": "20",
+      "NotifyUrl": "https://ntfy.sh/hex-doge-b652c737", "NotifyTitle": "HEX DOGEUSD",
+      "NotifyMinMinutes": "1", "NotifyMaxPerHour": "60"}),
+
+    ("doge-scalp-shadow",
+     "HEX-FVG-Breaker - DOGEUSD M5 scalp, DRY RUN (no orders sent)",
+     ["doge-scalp.set with DryRun=1: the EA computes, draws and logs every",
+      "signal, writes the CSVs, and never calls OrderSend.",
+      "",
+      "Point the second instance at this for its first session. The dashboard",
+      "still says SIGNAL, rejections.csv still says why not, and trades.csv stays",
+      "empty on purpose - which is how you separate 'the strategy is bad' from",
+      "'the plumbing is bad' before either costs anything."],
+     {"MagicNumber": "20261016", "DryRun": "1", "MaxSpreadDollars": "0.0008",
+      "MaxOpenTrades": "1", "MaxSignalsPerDay": "40", "RequireNewBar": "1",
+      "CloseOnWeekend": "0", "StartTradingHourUTC": "0", "StopTradingHourUTC": "24",
+      "TrendTimeframe": "30", "TrendMode": "0", "FastEMAPeriod": "9", "SlowEMAPeriod": "21",
+      "MinTrendSlopeDollars": "0.0002", "MaxDistFromEmaDollars": "0.004",
+      "SwingLookback": "2", "MinSwingRangeDollars": "0.0015",
+      "MinDisplacementPct": "50.0", "MinDisplacementAtr": "0.90",
+      "FvgMinSizeAtrPct": "30", "FvgMaxSizeAtrPct": "250", "MitigatePct": "45.0",
+      "EntryZonePct": "55.0", "MaxZoneAgeBars": "36", "RequireFVGConfluence": "0",
+      "ConfluenceLookback": "30", "BreakerMinAtr": "0.50", "BreakerMaxAtr": "4.0",
+      "MitigConsolBars": "3", "MitigConsolAtrMax": "0.70", "MitigBreakAtr": "1.10",
+      "EntryModel": "1", "AllowMarketEntry": "1", "MaxEntryDistanceDollars": "0.004",
+      "MinRejectionWickPct": "25.0", "MinTriggerRangeAtr": "0.30",
+      "MinTriggerClosePct": "40.0", "MaxBarsSinceTouch": "3", "LimitExpiryBars": "2",
+      "RiskPercent": "0.5", "MaxLot": "0.20", "MaxMarginUsagePct": "20",
+      "StopBufferAtrPct": "20.0", "MinStopDollars": "0.0015", "MaxStopDollars": "0.012",
+      "Tp1RR": "1.0", "Tp1Percent": "100.0", "Tp2RR": "2.0",
+      "BreakEvenTriggerRR": "0.55", "BreakEvenOffsetDollars": "0.0001",
+      "UseAtrTrail": "0", "TrailStartRR": "1.2", "MinHoldBars": "0",
+      "MaxDailyLossPct": "3.0", "MaxTotalDrawdownPct": "10.0", "MinFreeMarginUsd": "20",
+      "NotifyUrl": "https://ntfy.sh/hex-doge-b652c737",
+      "NotifyTitle": "HEX DOGEUSD (shadow)",
+      "NotifyMinMinutes": "1", "NotifyMaxPerHour": "60"}),
 ]
 
 
@@ -233,6 +322,11 @@ def main(argv):
     inputs = parse_inputs(EA)
     names = [n for _, n, _ in inputs]
     print(f"{EA}: {len(names)} extern inputs parsed")
+
+    # Push topic is deployment, not strategy (see NOTIFY_XAU). Applied to the
+    # overrides rather than to the .set files, so regeneration cannot drop it.
+    for _name, _title, _notes, _over in PRESETS:
+        _over.setdefault("NotifyUrl", NOTIFY_XAU)
 
     if "--check" in argv:
         bad = [f"{name}: {k}" for name, _, _, over in PRESETS for k in over if k not in names]

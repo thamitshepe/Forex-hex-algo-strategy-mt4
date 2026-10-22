@@ -27,6 +27,10 @@ MT4_LOGIN="${MT4_LOGIN:-}"
 MT4_PASSWORD="${MT4_PASSWORD:-}"
 MT4_SERVER="${MT4_SERVER:-}"
 MT4_SYMBOL="${MT4_SYMBOL:-XAUUSD}"
+# Optional: the chart's timeframe. Empty = whatever the profile's chart already
+# is. Set it to move an existing profile onto another timeframe (see
+# ensure_profile_chart) instead of editing the desktop by hand.
+MT4_PERIOD="${MT4_PERIOD:-}"
 MT4_PROFILE="${MT4_PROFILE:-default}"
 MT4_EXPERT="${MT4_EXPERT:-HEX-FVG-Breaker}"
 MT4_PRESET="${MT4_PRESET:-100usd-demo}"
@@ -295,6 +299,65 @@ profile_charts() {
   return 0
 }
 
+# An instance trades exactly one chart, and it is the chart the env asked for.
+# MT4 restores every chart in the profile and *also* opens one for startup.ini's
+# Symbol= when it names a symbol the profile does not have - which is how one
+# account ends up running the expert twice (once per chart) on one magic number.
+# The lock refuses the second copy, but which copy wins is whichever loaded first,
+# i.e. a coin toss between two different symbols. So the profile is moved onto the
+# requested symbol instead of adding to it.
+ensure_profile_chart() {
+  local dir="$MT4DIR/profiles/$MT4_PROFILE" f first="" extra
+  [ -d "$dir" ] || return 0
+
+  for f in "$dir"/chart*.chr; do
+    [ -f "$f" ] || continue
+    if [ -z "$first" ]; then
+      first="$f"
+      continue
+    fi
+    mkdir -p "$MT4DIR/.profile-extra" 2>/dev/null || true
+    extra="$MT4DIR/.profile-extra/$(basename "$f")"
+    if [ -e "$extra" ]; then extra="$extra.$(date +%s)"; fi
+    if mv -f "$f" "$extra" 2>/dev/null; then
+      log "chart: moved an extra chart out of the profile ($(basename "$f")) - one chart, one expert"
+    fi
+  done
+  [ -n "$first" ] || return 0
+
+  local cur_sym cur_per want_per repl
+  cur_sym="$(grep -a -m1 '^symbol=' "$first" 2>/dev/null | cut -d= -f2 | tr -d '\r' || true)"
+  cur_per="$(grep -a -m1 '^period=' "$first" 2>/dev/null | cut -d= -f2 | tr -d '\r' || true)"
+  want_per="${MT4_PERIOD:-$cur_per}"
+  repl="$(printf '%s' "$MT4_SYMBOL" | sed 's/[&|\\]/\\&/g')"
+
+  if [ "$cur_sym" = "$MT4_SYMBOL" ] && [ "$cur_per" = "$want_per" ]; then
+    log "chart: $(basename "$first") carries ${cur_sym:-?} ${want_per:-?} - no rewrite needed"
+    return 0
+  fi
+
+  # A <chart> file is plain text, so it can be moved rather than guessed at. The
+  # <expert> block goes with the move: those inputs belong to the symbol that was
+  # there, and startup.ini's Expert=/ExpertParameters= attach this instance's
+  # preset. Leaving both behind puts two sets of inputs in the same chart, and
+  # which one wins is decided inside the terminal, not here.
+  mkdir -p "$MT4DIR/.profile-orig" 2>/dev/null || true
+  cp -f "$first" "$MT4DIR/.profile-orig/$(basename "$first")" 2>/dev/null || true
+  local tmp; tmp="$(mktemp)"
+  awk '/^<expert>/{skip=1} skip==0{print} /^<\/expert>/{skip=0}' "$first" 2>/dev/null \
+    | sed -e "s|^symbol=.*|symbol=${repl}|" \
+          -e "s|^period=.*|period=${want_per}|" \
+          -e '/^digits=/d' -e '/^scale=/d' > "$tmp" || true
+  if grep -qx "symbol=${repl}" "$tmp" 2>/dev/null && grep -qx "period=${want_per}" "$tmp" 2>/dev/null; then
+    cat "$tmp" > "$first"
+    log "chart: $(basename "$first") moved ${cur_sym:-?} ${cur_per:-?} -> ${MT4_SYMBOL} ${want_per} (the original is in $MT4DIR/.profile-orig)"
+  else
+    warn "chart: could not rewrite $(basename "$first") - MT4 will open whatever it carries, and Symbol=${MT4_SYMBOL} may add a second chart"
+  fi
+  rm -f "$tmp"
+}
+
+
 write_startup_ini() {
   local f="$MT4DIR/startup.ini"
   # MetaTrader reads this file when it is named on the command line. Names are the
@@ -448,7 +511,7 @@ mirror_dir() {
 
 banner() {
   log "----------------------------------------------------------------"
-  log " HEX-FVG-Breaker on MT4 | $MT4_SYMBOL | $MT4_EXPERT | preset $MT4_PRESET"
+  log " HEX-FVG-Breaker on MT4 | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
   log " data folder  : $MT4DIR (portable, on the volume)"
   log " mt4 journal  : $MT4DIR/logs          - mirrored below as [mt4]"
   log " ea prints    : $MT4DIR/MQL4/Logs     - mirrored below as [ea]"
@@ -517,6 +580,7 @@ main() {
   start_display
   sync_ea
   compile_ea
+  ensure_profile_chart
   write_startup_ini
   start_vnc
   mirror_dir "[mt4]" "$MT4DIR/logs" &

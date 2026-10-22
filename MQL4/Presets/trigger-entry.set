@@ -13,6 +13,7 @@
 ; differs from the EA default:
 ;   EntryModel: 0  ->  1
 ;   MaxRiskAmount: 0.0  ->  2.0
+;   NotifyUrl:   ->  https://ntfy.sh/hex-xauusd-e7b863cd
 ;-------------------------------------------------------------------
 MagicNumber=20261015
 TradeSymbol=
