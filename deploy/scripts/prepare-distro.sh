@@ -70,9 +70,13 @@ fi
 mkdir -p "$OUTDIR"
 echo
 echo "archiving (history, logs, tester, sounds and backups are left out) ..."
+# --no-mac-metadata keeps the archive to files MetaTrader knows. Without it bsdtar
+# writes an AppleDouble "._name" beside every file plus an xattr header each, which
+# bloats the tarball, makes the container's tar warn once per file, and drops
+# "._ATR.ex4" into MQL4/Indicators. Nothing on the server wants origin metadata.
 # history/ is excluded on purpose: it is per-server and re-downloads on first
 # connect, and it is the one folder that grows without limit.
-tar -czf "$OUT" -C "$MD" \
+COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$OUT" -C "$MD" \
   --exclude='history' \
   --exclude='logs' \
   --exclude='tester' \

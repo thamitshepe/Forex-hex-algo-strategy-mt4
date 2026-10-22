@@ -100,15 +100,38 @@ install_fresh_terminal() {
   cp -a "$(dirname "$src")/." "$MT4DIR/"
 }
 
+# A seeded tree is built beside $MT4DIR and swapped in whole. An extraction that
+# dies halfway leaves a folder that has a terminal.exe and half its indicators -
+# which looks like a working install and then fails a hundred lines later somewhere
+# else. Nothing replaces a working tree until the new one has a terminal.exe.
+swap_in_new_tree() {
+  local new="$1"
+  [ -f "$new/terminal.exe" ] || die "the seeded tree has no terminal.exe at its root - refusing to touch $MT4DIR"
+  rm -rf "$MT4DIR.old"
+  [ -d "$MT4DIR" ] && mv "$MT4DIR" "$MT4DIR.old"
+  mv "$new" "$MT4DIR"
+  rm -rf "$MT4DIR.old"
+}
+
 resolve_distro() {
+  local new="$MT4DIR.seeding"
+  # One line instead of a wall of tar errors when the volume belongs to someone
+  # else. This is the single most common way a fresh server fails, and the message
+  # tar prints for it names MQL4 and config rather than the mount.
+  if ! ( : > "$MT4DIR/.write-test" ) 2>/dev/null; then
+    die "$MT4DIR is not writable by uid $(id -u) ($(id -un)). The volume belongs to another user - docker-entrypoint.sh normally fixes that as root, so check the mount: a bind mount keeps its host ownership, a named volume inherits the image's."
+  fi
+  rm -f "$MT4DIR/.write-test"
   if have_terminal; then
     log "terminal present: $MT4DIR/terminal.exe ($(stat -c %s "$MT4DIR/terminal.exe") bytes)"
     return 0
   fi
   if [ -f /opt/mt4-distro/terminal.exe ]; then
     log "seeding $MT4DIR from the MT4 distro baked into this image"
-    mkdir -p "$MT4DIR"
-    cp -a /opt/mt4-distro/. "$MT4DIR/"
+    rm -rf "$new"
+    mkdir -p "$new"
+    cp -a /opt/mt4-distro/. "$new/"
+    swap_in_new_tree "$new"
     return 0
   fi
   if [ -n "$MT4_DISTRO_URL" ]; then
@@ -116,14 +139,15 @@ resolve_distro() {
     log "seeding $MT4DIR from MT4_DISTRO_URL"
     curl -fsSL --retry 3 --retry-delay 5 -o "$arc" "$MT4_DISTRO_URL" \
       || die "distro download failed: $MT4_DISTRO_URL"
-    mkdir -p "$MT4DIR"
+    rm -rf "$new"
+    mkdir -p "$new"
     case "$MT4_DISTRO_URL" in
-      *.zst|*.tzst) tar --use-compress-program=unzstd -xf "$arc" -C "$MT4DIR" ;;
-      *.gz|*.tgz)   tar -xzf "$arc" -C "$MT4DIR" ;;
-      *)            tar -xf  "$arc" -C "$MT4DIR" ;;
+      *.zst|*.tzst) tar --use-compress-program=unzstd -xf "$arc" -C "$new" ;;
+      *.gz|*.tgz)   tar -xzf "$arc" -C "$new" ;;
+      *)            tar -xf  "$arc" -C "$new" ;;
     esac
     rm -f "$arc"
-    have_terminal || die "the distro unpacked but $MT4DIR/terminal.exe is missing"
+    swap_in_new_tree "$new"
     return 0
   fi
   [ "$MT4_ALLOW_FRESH_INSTALL" = "1" ] \
