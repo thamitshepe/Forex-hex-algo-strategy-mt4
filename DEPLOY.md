@@ -494,23 +494,31 @@ designing against. With `MT4_INSTANCE=2`:
 **The terminal it starts from is not neutral either.** The distro is a *copy of a
 working terminal*, so it arrives carrying everything that made that copy work: the
 saved login (`config/accounts.ini`), the last server it talked to, the MQL5
-community session, the per-chart expert inputs, and the EA's CSV log. For instance
+community session, the chart's expert inputs, and the EA's CSV log. For instance
 1 that is its own account. For instance 2 it is somebody else's — the terminal
 comes up as the gold account, and the dashboard starts from a trade log it never
 wrote. So on its first boot instance 2 moves that state aside, before MT4 starts:
 
 ```
-seed: 4 file(s) of the previous account's state moved out of the way - saved login,
-      last server, MQL5 session and expert inputs are gone, its CSV log and journals
+seed: 3 file(s) of the previous account's state moved out of the way - the saved
+      login, the last server and the MQL5 session are gone; its CSV log and journals
       are in /data/mt4/.before-instance2
+seed: config/experts.ini stays: that is where the WebRequest allow-list (the ntfy
+      URL) lives, and nothing in deploy/ can write it back
 seed: this terminal has no account yet - the login comes from startup.ini. If the
       desktop shows a login dialog on the first start, log in once: the broker's
       server is unknown to this copy of the terminal, and MT4 saves it on this
       volume from then on
 ```
 
-Those files are binary and encrypted, so they are removed rather than edited — the
-next login re-creates them. The previous account's CSV log and journals are *moved*
+Those three files are binary and encrypted, so they are removed rather than edited —
+the next login re-creates them. `config/experts.ini` is deliberately *kept*: it is
+the one file the new instance cannot be given any other way, because the WebRequest
+allow-list (the ntfy URL, UTF-16 inside a binary) lives in it and nothing in
+`deploy/` can write that back — delete it and every push on instance 2 fails with
+`err 4060`. What it does *not* carry is the other instrument's expert inputs: those
+are in the profile chart's `<expert>` block, which `ensure_profile_chart` drops
+anyway. The previous account's CSV log and journals are *moved*
 into `/data/mt4/.before-instance<N>/`, not deleted, because "did that first boot
 trade anything?" is answered from exactly those files. It happens once per volume
 (`/data/.hex-neutralised`, dropped again by a re-seed), because after that the saved
@@ -540,6 +548,24 @@ Steps, in order:
 4. **Deploy**, then read its log the same way as §7. First start downloads the
    distro into the *new* volume (~36 MB) and logs
    `chart: chart04.chr moved XAUUSD 15 -> DOGEUSD 5`.
+
+**Which instance am I looking at?** The first three lines of the log answer it, so
+that "it still shows the old account" is checkable instead of guessed:
+
+```
+[hex] HEX-FVG-Breaker on MT4 | instance 2 | DOGEUSD 5m | HEX-FVG-Breaker | preset doge-scalp-shadow
+[hex] image build  : cb0ddcee2fef9772cebeed714610bbbd714f0025
+[hex] account      : 12345678 @ TMGM-Demo
+```
+
+`image build` is the commit the image was built from: if it is not the commit you
+think you deployed, the application is still on a stale tag (`:live` needs a pull, a
+pinned `:sha` never moves) and nothing below that line will have changed either. And
+an application whose *volume* was already claimed by the other instance stops with
+`FATAL: this volume was claimed by instance 2 …` before Wine starts — instance 1 and
+instance 2 read different names out of the same env file, so run at the wrong number
+it uses the other application's account and symbol, with a log that says nothing, as
+if that were what you had asked for.
 
 CI keeps deploying instance 1 (`DOKPLOY_APP`, default `hex-mt4`); it does not know
 about the others, which is why they are made once by hand (or with
@@ -590,7 +616,26 @@ engine* is a new `.mq4` in `MQL4/Experts/`, a Dockerfile that copies it, and
 session (`doge-scalp-shadow.set`, `100usd-shadow.set`): the signals, rejections
 and dashboard are identical, `trades.csv` stays empty, and you find out whether
 the broker's spread, the symbol name and the lot step are what the preset assumed
-*before* the first order.
+*before* the first order. An empty `trades.csv` on a `-shadow` preset is the
+expected result, not a fault — `DryRun=1` places no orders at all.
+
+**"No trades" is a question the log can now answer.** The expert writes *why* it
+passed to `rejections.csv` and never prints, so the container log used to show a
+session that traded nothing and said nothing about it — indistinguishable from a
+robot that never started. The entrypoint now reads that file back:
+
+```
+[rej] 2026.10.22 10:00:00  GUARD 1  outside session
+[rej] 2026.10.22 10:07:00  GUARD 1  spread 19.0 > 12.0
+[hex] state: last 200 rejections -> GUARD 50, NO_CONFLUENCE 9, NO_TRIGGER 3 | closed
+      trades in trades.csv: 0 | signals today: 53 | last reason: GUARD
+```
+
+Only a *change* of reason-and-detail is printed (while a reason holds, `Reject()`
+writes a row per tick), and the state line repeats every ten minutes. If the last reason is
+`AUTOTRADE_DISABLED`, the terminal's AutoTrading button is off — nothing outside the
+terminal can turn it on, and the entrypoint says so in words instead of leaving you
+to find it in a CSV.
 
 ---
 
@@ -705,6 +750,10 @@ shows the EA's prints, and a rebuild is a `git push`.
 | the DOGE desktop sits on a login dialog with no accounts listed | that copy of the terminal has never seen TMGM's server, so `MT4_SERVER2` resolves to nothing | log in once on that desktop (File → Login / Open an Account) and read the exact server name off the dialog; MT4 saves it on this volume and later boots log in from `startup.ini` |
 | `FATAL: MT4_INSTANCE=2 has no MT4_LOGIN2 …` | the application says it is instance 2 but its env has no `…2` copies — usually a copied application whose values were not replaced | fill `MT4_LOGIN2`/`MT4_PASSWORD2`/`MT4_SERVER2`/`MT4_SYMBOL2`/`MT4_PRESET2` in this app's Environment tab. This refusal is deliberate: the alternative is trading the DOGE preset on the gold account |
 | `FATAL: this volume belongs to account … and this container is …` | two applications were given the same volume (the second one has no volume of its own, or was created from the first without changing its mount) | give this application its own volume at `/data`. If you really mean to move *this* volume to the other account, delete `/data/.hex-instance` on it first |
+| `FATAL: this volume was claimed by instance 2 … but this container runs as instance 1` | the app's `MT4_INSTANCE` does not match the volume. Instance 1 reads `MT4_LOGIN`, instance 2 reads `MT4_LOGIN2` — so the wrong number means this app is using the *other* app's account and symbol while its env looks perfectly complete | set `MT4_INSTANCE` to the number in the message. If the volume really belongs to this instance now, delete `/data/.hex-instance` and restart |
+| the second app still shows the gold account and the gold chart, and its log has no `seed:` line | it is not running a build with the instance rules in it, or it is not instance 2 at all — the neutralise step only runs for instance ≥ 2, and an old image has no such step | compare the log's `image build` line with the commit you deployed, and `instance N` on the first line with what that app is supposed to be. A pinned `:sha` tag never moves, and `:live` needs a pull |
+| no trades at all, and nothing in the log about it | three unrelated causes that used to look identical: the preset says `DryRun=1` (`-shadow`), the terminal's AutoTrading is off, or every setup is being rejected by a filter | read the `[rej]` and `[hex] state:` lines — they name the reason. `AUTOTRADE_DISABLED` → click AutoTrading on the desktop; `GUARD … spread` → the preset's cap is tighter than the broker; `NO_CONFLUENCE`/`TOO_FAR`/`OVEREXTENDED` → filters working as designed; an empty `trades.csv` on a `-shadow` preset is correct behaviour |
+| `AUTOTRADE_DISABLED` in `rejections.csv`, dashboard `Trading : BLOCKED` | AutoTrading is a terminal-wide button and no MQL4 code can turn it on | click it once on the desktop (§3). It is not stored on the volume, so a re-created Wine prefix starts with it off again |
 | instance 2 logs into the wrong account | the login is also stored in the volume's `config/accounts.ini`, so a shared volume logs in as whoever used it last | the same fix as above — one volume per instance. The `FATAL` above catches it before the terminal starts |
 | `MT4_INSTANCE must be a number` | `MT4_INSTANCE` holds something other than `1`, `2`, `3` … | it is an instance *number*, not a name |
 

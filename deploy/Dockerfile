@@ -138,6 +138,14 @@ RUN set -eux; \
 COPY deploy/scripts/ /opt/hex/
 RUN chmod 0755 /opt/hex/*.sh
 
+# Which commit this image is. Without it "am I even running the fix?" is answered
+# by docker inspect on the server, or not at all - and the failure mode it hides is
+# a Dokploy app pointed at a stale tag, which looks exactly like a code bug: the
+# container comes up, keeps its old behaviour, and logs nothing to say so. The
+# entrypoint prints this as the second line of the banner.
+ARG HEX_BUILD="local"
+ENV HEX_BUILD="${HEX_BUILD}"
+
 # Bake a prepared terminal into the image instead of seeding it from the volume.
 # Empty by default: an image without MetaQuotes' binaries in it is the cleaner
 # default, and MT4_DISTRO_URL still works at runtime.

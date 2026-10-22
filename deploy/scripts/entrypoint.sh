@@ -216,7 +216,14 @@ neutralise_seed() {
   marker="$meta/.hex-neutralised"
   [ -f "$marker" ] && return 0
   park="$MT4DIR/.before-instance$MT4_INSTANCE"
-  for f in config/accounts.ini config/server.ini config/community.ini config/experts.ini; do
+  # config/experts.ini is deliberately *kept*: it holds the WebRequest allow-list
+  # (the ntfy URL, UTF-16 in a binary file that nothing in deploy/ can write), and
+  # the "disable automated trading when the account/profile/symbol changed" flags.
+  # Deleting it would strip the one setting the new instance cannot be given any
+  # other way, and in exchange for nothing: the other instrument's expert *inputs*
+  # are not here, they are in the profile chart's <expert> block, which
+  # ensure_profile_chart already drops.
+  for f in config/accounts.ini config/server.ini config/community.ini; do
     if [ -e "$MT4DIR/$f" ]; then
       rm -f "$MT4DIR/$f" 2>/dev/null && n=$((n + 1))
     fi
@@ -231,7 +238,8 @@ neutralise_seed() {
   done
   rm -rf "$MT4DIR"/history/* 2>/dev/null || true
   printf 'instance=%s\n' "$MT4_INSTANCE" > "$marker" 2>/dev/null || true
-  log "seed: $n file(s) of the previous account's state moved out of the way - saved login, last server, MQL5 session and expert inputs are gone, its CSV log and journals are in $park"
+  log "seed: $n file(s) of the previous account's state moved out of the way - the saved login, the last server and the MQL5 session are gone; its CSV log and journals are in $park"
+  log "seed: config/experts.ini stays: that is where the WebRequest allow-list (the ntfy URL) lives, and nothing in deploy/ can write it back"
   log "seed: this terminal has no account yet - the login comes from startup.ini. If the desktop shows a login dialog on the first start, log in once: the broker's server is unknown to this copy of the terminal, and MT4 saves it on this volume from then on"
 }
 
@@ -622,6 +630,80 @@ mirror_dir() {
   done
 }
 
+# The robot's answer to "why did nothing trade" is a CSV row: Reject() appends to
+# rejections.csv and returns, it never prints. So the container log - the only
+# thing visible on a server - showed a session that took no trades and said
+# nothing about why, which is indistinguishable from a robot that did not start.
+# These two print instead: each *distinct* rejection as it appears (while a reason
+# holds, Reject() writes a row per tick, so only a change is worth a line), and a
+# state line every ten minutes with what the files actually contain.
+rej_reasons() {  # <file> <max rows> -> "REASON n, REASON n, ..."
+  tail -n "${2:-200}" "$1" 2>/dev/null | cut -d, -f3 | grep -v '^reason$' \
+    | sort | uniq -c | sort -rn | head -3 \
+    | awk '{printf "%s%s %s", sep, $2, $1; sep = ", "}'
+}
+
+ea_state_line() {  # <HEX-Logs dir>
+  local dir="$1" rej="$1/rejections.csv" trades="$2" n=0 signals last
+  [ -f "$rej" ] || { log "state: no rejections.csv yet - the expert has not rejected a setup on this volume"; return 0; }
+  if [ -f "$trades" ]; then
+    n=$(wc -l < "$trades" 2>/dev/null | tr -d '[:space:]')
+    case "$n" in ''|*[!0-9]*) n=1 ;; esac
+    [ "$n" -gt 0 ] && n=$((n - 1))
+  fi
+  signals="$(tail -n 1 "$dir/daily.csv" 2>/dev/null | cut -d, -f4)"
+  last="$(tail -n 1 "$rej" 2>/dev/null | cut -d, -f3)"
+  log "state: last 200 rejections -> $(rej_reasons "$rej" 200) | closed trades in trades.csv: $n | signals today: ${signals:-?} | last reason: ${last:-none}"
+  if [ "$last" = "AUTOTRADE_DISABLED" ]; then
+    warn "the terminal's AutoTrading button is OFF: every setup is being rejected with AUTOTRADE_DISABLED. Nothing outside the terminal can turn it on - open the desktop and click AutoTrading."
+  fi
+  return 0
+}
+
+mirror_rejections() {
+  local dir="$MT4DIR/MQL4/Files/Common/HEX-Logs" f="$MT4DIR/MQL4/Files/Common/HEX-Logs/rejections.csv"
+  local state="${TMPDIR:-/tmp}/hex-rej" n s i=0
+  mkdir -p "$state" 2>/dev/null || true
+  # Rows already on the volume are history, not news - the same rule the log
+  # mirror follows. (Detail strings can differ per tick, so replaying them all
+  # would be a flood rather than a summary.)
+  if [ -f "$f" ]; then
+    n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s\n' "$n" > "$state/seen" 2>/dev/null || true
+    [ "$n" -gt 1 ] && log "rejections: $((n - 1)) row(s) from earlier runs in $f - not replayed, the file is on the volume"
+  fi
+  while :; do
+    if [ -f "$f" ]; then
+      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+      s=$(cat "$state/seen" 2>/dev/null | tr -d '[:space:]')
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      case "$s" in ''|*[!0-9]*) s=0 ;; esac
+      [ "$n" -lt "$s" ] && s=0
+      if [ "$n" -gt "$s" ]; then
+        tail -n "+$((s + 1))" "$f" 2>/dev/null \
+          | awk -F, -v prevf="$state/last" '
+              BEGIN { while ((getline l < prevf) > 0) prev = l; close(prevf) }
+              $3 == "reason" || NF < 3 { next }
+              { key = $3 "|" $13
+                if (key == prev) next
+                prev = key
+                printf "%s  %s %s  %s\n", $1, $3, $4, $13 }
+              END { printf "%s", prev > prevf; close(prevf) }' \
+          | sed 's/^/[rej] /' || true
+      fi
+      printf '%s\n' "$n" > "$state/seen" 2>/dev/null || true
+    fi
+    i=$((i + 1))
+    # Two minutes in (the expert needs a bar or two to reject anything) and then
+    # every ten, so "no trades" turns into a reason without anyone opening a file.
+    if [ "$i" = "24" ] || [ $((i % 120)) -eq 0 ]; then
+      ea_state_line "$dir" "$dir/trades.csv" || true
+    fi
+    sleep 5
+  done
+}
+
 # A container must be given its own volume. Two terminals writing one MT4 tree
 # corrupt each other, and the likelier version of that is quieter: the second
 # application is created without its own volume, inherits the first one's
@@ -629,14 +711,24 @@ mirror_dir() {
 # matter what its env says - and trades the second preset against the first
 # account's money. So the volume records which instance claimed it.
 claim_volume() {
-  local meta marker cur was_login was_sym
+  local meta marker cur was_inst was_login was_sym
   meta="$(dirname "$MT4DIR")"
   marker="$meta/.hex-instance"
   cur="instance=${MT4_INSTANCE} login=${MT4_LOGIN:-?} symbol=${MT4_SYMBOL} preset=${MT4_PRESET}"
-  was_login=""; was_sym=""
+  was_inst=""; was_login=""; was_sym=""
   if [ -f "$marker" ]; then
+    was_inst="$(sed -n 's/^instance=\([0-9][0-9]*\).*$/\1/p' "$marker" 2>/dev/null | head -1)"
     was_login="$(sed -n 's/^.* login=\([^ ]*\).*$/\1/p' "$marker" 2>/dev/null | head -1)"
     was_sym="$(sed -n 's/^.* symbol=\([^ ]*\).*$/\1/p' "$marker" 2>/dev/null | head -1)"
+  fi
+  # Checked before the account, because it explains the account: instance 1 reads
+  # the plain MT4_* names and instance 2+ reads the "<n>" copies, so an app that
+  # runs at the wrong instance number is exactly how the second volume ends up
+  # driving the first account - the symptom is "it still shows the old account
+  # and the old chart", with nothing in the log saying why.
+  if [ -n "$was_inst" ] && [ "$was_inst" != "$MT4_INSTANCE" ]; then
+    die "this volume was claimed by instance $was_inst (account ${was_login:-?}, ${was_sym:-?}), but this container runs as instance $MT4_INSTANCE and so reads the other instance's names. Set MT4_INSTANCE=$was_inst on this application - or, if this volume really is instance $MT4_INSTANCE now, delete $marker and restart, which re-claims it."
+    return 1
   fi
   # "?" is what an instance with no login yet writes; it proves nothing either way.
   if [ -n "$MT4_LOGIN" ] && [ -n "$was_login" ] && [ "$was_login" != "?" ] && [ "$was_login" != "$MT4_LOGIN" ]; then
@@ -656,6 +748,8 @@ claim_volume() {
 banner() {
   log "----------------------------------------------------------------"
   log " HEX-FVG-Breaker on MT4 | instance $MT4_INSTANCE | ${MT4_SYMBOL}${MT4_PERIOD:+ $MT4_PERIODm} | $MT4_EXPERT | preset $MT4_PRESET"
+  log " image build  : ${HEX_BUILD:-unknown - a local build, not a CI image}"
+  log " account      : ${MT4_LOGIN:-<unset>} @ ${MT4_SERVER:-<unset>}"
   if [ "$MT4_INSTANCE" = "1" ]; then
     log " instance env : the unsuffixed names (MT4_LOGIN, MT4_SYMBOL, ...)"
   else
@@ -736,6 +830,7 @@ main() {
   start_vnc
   mirror_dir "[mt4]" "$MT4DIR/logs" &
   mirror_dir "[ea] " "$MT4DIR/MQL4/Logs" &
+  mirror_rejections &
   launch_terminal
   wait_for_terminal
 

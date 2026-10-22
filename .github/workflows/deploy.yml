@@ -62,6 +62,7 @@ jobs:
           push: true
           build-args: |
             MT4_DISTRO_URL=${{ vars.MT4_DISTRO_URL }}
+            HEX_BUILD=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}

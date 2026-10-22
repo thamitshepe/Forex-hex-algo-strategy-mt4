@@ -177,6 +177,55 @@ check_eq "no duplicate lines" "1" "$(printf '%s\n' "$out" | grep -c '^\[mt4\] th
 check_eq "mirrored lines are unique" "$(printf '%s\n' "$out" | grep '^\[mt4\] ' | sort -u | wc -l | tr -d ' ')" \
                                      "$(printf '%s\n' "$out" | grep -c '^\[mt4\] ')"
 
+echo "why no trade"
+# Reject() in the expert appends a CSV row and returns - it never prints - so a
+# session that took no trades looked in the container log exactly like a robot that
+# never started. These turn the file into log lines: each *distinct* reason as it
+# happens (while a reason holds it is written once per tick, so only a change is
+# news) plus a state line, and an explicit warning when the terminal itself is why.
+load_fn "$ENTRYPOINT" rej_reasons >/dev/null
+load_fn "$ENTRYPOINT" ea_state_line >/dev/null
+load_fn "$ENTRYPOINT" mirror_rejections >/dev/null
+rdir="$TMP/rej/mt4/MQL4/Files/Common/HEX-Logs"; mkdir -p "$rdir"
+printf 'time,bar_time,reason,dir,zone_type,zone_top,zone_bottom,spread_pts,atr,dist_pts,equity,trend,detail\n' > "$rdir/rejections.csv"
+printf '2026.10.01 09:00:00,2026.10.01 09:00,GUARD,0,,,,,,,,,an older run\n' >> "$rdir/rejections.csv"
+printf 'a,2026.10.22 09:00,GUARD,0,,,,,,,,,x\nb,2026.10.22 09:05,NO_TRIGGER,0,,,,,,,,,x\nc,2026.10.22 09:06,GUARD,0,,,,,,,,,x\n' > "$TMP/r.csv"
+check_eq "counts reasons, most frequent first" "GUARD 2, NO_TRIGGER 1" "$(rej_reasons "$TMP/r.csv" 50)"
+check_contains "the state line says how many trades closed" "closed trades in trades.csv: 0" \
+  "$( ( log() { echo "$*"; }; ea_state_line "$rdir" "$rdir/trades.csv" ) 2>&1 )"
+check_contains "and what the last rejection was" "last reason: GUARD" \
+  "$( ( log() { echo "$*"; }; ea_state_line "$rdir" "$rdir/trades.csv" ) 2>&1 )"
+printf 'ticket,login\n7,222\n' > "$rdir/trades.csv"
+check_contains "a closed trade is counted, the header is not" "closed trades in trades.csv: 1" \
+  "$( ( log() { echo "$*"; }; ea_state_line "$rdir" "$rdir/trades.csv" ) 2>&1 )"
+printf '2026.10.22 09:10:00,2026.10.22 09:10,AUTOTRADE_DISABLED,1,,,,,,,,,terminal AutoTrading button is off\n' >> "$rdir/rejections.csv"
+check_contains "AutoTrading off is called out, not just counted" "AutoTrading button is OFF" \
+  "$( ( warn() { echo "$*"; }; ea_state_line "$rdir" "$rdir/trades.csv" ) 2>&1 )"
+# TMPDIR separates the mirror's position marker from any other run of this test,
+# and `log` prints here (the selftest's stub is silent) so the startup line is
+# checkable - it is what tells an operator the old rows are on the volume, not lost.
+( log() { echo "$*"; }; TMPDIR="$TMP" MT4DIR="$TMP/rej/mt4" mirror_rejections ) \
+  > "$TMP/rej.out" 2>&1 &
+rej_pid=$!
+sleep 6
+printf '2026.10.22 10:00:00,2026.10.22 10:00,GUARD,1,,,,,,,,,outside session\n' >> "$rdir/rejections.csv"
+printf '2026.10.22 10:00:00,2026.10.22 10:00,GUARD,1,,,,,,,,,outside session\n' >> "$rdir/rejections.csv"
+sleep 6
+printf '2026.10.22 10:05:00,2026.10.22 10:05,NO_TRIGGER,1,,,,,,,,,no rejection candle in the zone\n' \
+  >> "$rdir/rejections.csv"
+sleep 6
+kill "$rej_pid" 2>/dev/null
+wait "$rej_pid" 2>/dev/null
+out="$(cat "$TMP/rej.out")"
+check_contains "a rejection reaches the container log" \
+  "[rej] 2026.10.22 10:00:00  GUARD 1  outside session" "$out"
+check_eq "a reason that repeats per tick is printed once" "1" \
+  "$(printf '%s\n' "$out" | grep -c 'GUARD')"
+check_contains "a new reason is printed" "NO_TRIGGER" "$out"
+check_eq "an earlier run's rows are not replayed" "0" \
+  "$(printf '%s\n' "$out" | grep -c 'an older run')"
+check_contains "and the log says it skipped them" "not replayed" "$out"
+
 echo "healthcheck"
 # A fake process with terminal.exe in its argv, so the check is exercised without
 # MetaTrader. macOS and Linux pgrep both match the full command line.
@@ -258,6 +307,26 @@ check_eq "a symbol change on the same volume is allowed (chart gets moved)" "0" 
 check_contains "the marker follows the symbol change" "symbol=EURUSD" \
   "$(cat "$vol/.hex-instance" 2>/dev/null)"
 
+# The instance number is half of a volume's identity: instance 1 reads the plain
+# MT4_* names and instance 2 reads the "<n>" copies. An application running at the
+# wrong number therefore drives the *other* application's account and symbol while
+# its own env looks complete - "it still shows the old account and the old chart",
+# with nothing in the log explaining it. Checked even when the login matches.
+vol2="$TMP/vol2"; mkdir -p "$vol2/mt4"
+( MT4DIR="$vol2/mt4" MT4_INSTANCE=2 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+  claim_volume ) >/dev/null 2>&1
+check_eq "a fresh volume records the instance that claimed it" "2" \
+  "$(sed -n 's/^instance=\([0-9]*\).*/\1/p' "$vol2/.hex-instance" 2>/dev/null)"
+( MT4DIR="$vol2/mt4" MT4_INSTANCE=1 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+  claim_volume ) >/dev/null 2>&1
+check_eq "the same account at the wrong instance number is refused" "1" "$?"
+check_contains "and the refusal says which MT4_INSTANCE to set" "MT4_INSTANCE=2" \
+  "$( ( MT4DIR="$vol2/mt4" MT4_INSTANCE=1 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+        claim_volume ) 2>&1 )"
+( MT4DIR="$vol2/mt4" MT4_INSTANCE=2 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+  claim_volume ) >/dev/null 2>&1
+check_eq "its own instance number is allowed" "0" "$?"
+
 echo "instance seed: the other account's state"
 # The distro is a copy of a working terminal, so it carries the saved login, the
 # last server and the EA's CSV log. Instance 1 may have them; instance 2 must not,
@@ -282,8 +351,8 @@ check_eq "instance 2 drops the saved login" "gone" \
   "$([ -f "$seedvol/mt4/config/accounts.ini" ] || echo gone)"
 check_eq "instance 2 drops the last server" "gone" \
   "$([ -f "$seedvol/mt4/config/server.ini" ] || echo gone)"
-check_eq "instance 2 drops the other instrument's expert inputs" "gone" \
-  "$([ -f "$seedvol/mt4/config/experts.ini" ] || echo gone)"
+check_eq "instance 2 keeps config/experts.ini (the WebRequest allow-list lives in it)" "binary" \
+  "$(cat "$seedvol/mt4/config/experts.ini" 2>/dev/null)"
 check_eq "instance 2 drops the other account's CSV log" "gone" \
   "$([ -f "$seedvol/mt4/MQL4/Files/Common/HEX-Logs/daily.csv" ] || echo gone)"
 check_eq "that CSV log is parked, not destroyed" "date,equity" \
