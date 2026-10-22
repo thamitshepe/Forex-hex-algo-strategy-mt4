@@ -869,7 +869,6 @@ banner() {
   log " mt4 journal  : $MT4DIR/logs          - mirrored below as [mt4]"
   log " ea prints    : $MT4DIR/MQL4/Logs     - mirrored below as [ea]"
   log " ea csv logs  : $MT4DIR/MQL4/Files/Common/HEX-Logs"
-  log " account      : ${MT4_LOGIN:-<unset>} @ ${MT4_SERVER:-<unset>}"
   log " auto trading : requested through startup.ini (ExpertsTrades=true). The"
   log "                button state is not stored on disk, so confirm it once in"
   log "                the desktop - the EA's dashboard and its INIT push both say"
