@@ -571,6 +571,64 @@ login_check() {
 # reminder *after* the terminal had its chance: the startup warning is easy to miss
 # in a wall of seeding output, and "the chart says Waiting for update" is what the
 # operator actually sees from the outside.
+# MT4 states the reason in one journal line and never names the fix:
+#
+#   '990158154': connect failed [No connection]
+#   '990158154': invalid account
+#   '990158154': invalid server
+#
+# Reading those is a skill, and getting it wrong costs an afternoon: "connect
+# failed" with a correct password looks like a wrong password. This watches the
+# same files the mirror does and prints the matching sentence once, in the log,
+# at the moment it happens. It changes nothing - it is the log explaining
+# itself - so it is written like the mirrors: no `set -e`, no way to die.
+journal_hints() { # DIR
+  local dir="$1" state="${TMPDIR:-/tmp}/hex-hints" f n s p key lead line
+  set +e
+  set +o pipefail
+  mkdir -p "$state" 2>/dev/null || true
+  : > "$state/fired" 2>/dev/null || true
+  while :; do
+    for f in "$dir"/*.log; do
+      [ -f "$f" ] || continue
+      s="$state/$(basename "$f").seen"
+      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]')
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      case "$p" in ''|*[!0-9]*) p=0 ;; esac
+      # Shrunk under us (new journal for the day): from the top, as the mirror does.
+      [ "$n" -lt "$p" ] && p=0
+      if [ "$n" -gt "$p" ]; then
+        tail -n "+$((p + 1))" "$f" 2>/dev/null | while IFS= read -r line; do
+          key=""; lead=""
+          case "$line" in
+            *"connect failed"*)
+              key=connect
+              lead="the terminal could not reach ${MT4_SERVER:-the server} with login ${MT4_LOGIN:-<none>}. MT4 dials only servers whose address is in its own config/servers.ini, and this tree came from one broker's terminal - a server name it has never seen fails exactly like this, right password or not. Give this instance that broker's server list: File -> Open an Account in the desktop, or copy config/servers.ini from a terminal logged into this account into $MT4DIR/config/, or seed it from that broker's own terminal with MT4_DISTRO_URL2 (DEPLOY.md section 4C)." ;;
+            *"invalid account"*)
+              key=account
+              lead="the broker answered and refused login ${MT4_LOGIN:-<none>} - wrong number or password, or the demo account has expired. Check MT4_PASSWORD${MT4_INSTANCE} character by character (a trailing space counts) and whether the demo is still open in the broker's portal." ;;
+            *"invalid server"*)
+              key=server
+              lead="the broker has no server called ${MT4_SERVER:-<none>} - the name is not in this terminal's list at all. Take the exact spelling from the broker's welcome mail and its server list (DEPLOY.md section 4C)." ;;
+            *"account disabled"*|*"account closed"*)
+              key=disabled
+              lead="the broker has disabled or closed ${MT4_LOGIN:-<none>}. Nothing in this container can undo that; it has to be re-enabled in the broker's portal." ;;
+          esac
+          [ -n "$key" ] || continue
+          # Once per container run. MT4 retries a failed connection every few
+          # seconds, and a hint every few seconds is not a hint.
+          grep -qx "$key" "$state/fired" 2>/dev/null && continue
+          printf '%s\n' "$key" >> "$state/fired" 2>/dev/null || true
+          log "HINT: $lead"
+        done
+      fi
+      printf '%s\n' "$n" > "$s" 2>/dev/null || true
+    done
+    sleep 3
+  done
+}
+
 login_watch() {
   sleep "${HEX_LOGIN_WATCH:-90}"
   login_check && return 0
@@ -1037,6 +1095,7 @@ main() {
   start_vnc
   mirror_dir "[mt4]" "$MT4DIR/logs" &
   mirror_dir "[ea] " "$MT4DIR/MQL4/Logs" &
+  journal_hints "$MT4DIR/logs" &
   mirror_rejections &
   launch_terminal
   login_watch &

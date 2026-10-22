@@ -135,6 +135,13 @@ services:
       VNC_PASSWORD: "${VNC_PASSWORD:-}"
       TZ: "${TZ:-UTC}"
       MT4_DISTRO_URL: "${MT4_DISTRO_URL:-}"
+      # A different broker means a different terminal: MT4 can only dial a server
+      # whose address is in its own config/servers.ini, and the distro above is one
+      # broker's tree. Point this at a distro prepared from *this* broker's terminal
+      # (prepare-distro.sh) and the second instance arrives knowing its own server,
+      # its own charts and its own saved login. Empty = use the shared MT4_DISTRO_URL.
+      MT4_DISTRO_URL2: "${MT4_DISTRO_URL2:-}"
+      MT4_FORCE_SEED2: "${MT4_FORCE_SEED2:-0}"
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
     volumes:
       # Its own volume, because a shared one means a shared config/accounts.ini -

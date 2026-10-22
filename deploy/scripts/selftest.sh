@@ -295,6 +295,35 @@ check_contains "says what it follows before anything is there" "following $fdir"
 check_contains "a journal created later is mirrored" "[late] login failed" "$lout"
 check_contains "and the first line of it too" "[late] MetaTrader 4 build 1450 started" "$lout"
 
+# The journal names the reason and never the fix. This is the pair of lines that
+# cost an afternoon: a correct password, a server this terminal has no address
+# for, and a log that said nothing.
+echo "journal hints"
+load_fn "$ENTRYPOINT" journal_hints >/dev/null
+hdir="$TMP/hints"; mkdir -p "$hdir"
+( set -euo pipefail
+  log() { echo "$*"; }
+  MT4_LOGIN=990158154 MT4_SERVER=TradeMaxGlobal-Demo-2 MT4_INSTANCE=2
+  TMPDIR="$TMP" journal_hints "$hdir" ) > "$TMP/hints.out" 2>&1 &
+hints_pid=$!
+sleep 2
+check_eq "silent while there is nothing to read" "0" "$(grep -c HINT "$TMP/hints.out")"
+check_eq "the watcher is still running" "alive" "$(kill -0 "$hints_pid" 2>/dev/null && echo alive || echo dead)"
+printf "0\t15:38:52.219\t'990158154': connect failed [No connection]\n" > "$hdir/20261022.log"
+sleep 4
+check_contains "connect failed -> says what it means" "MT4 dials only servers whose address is in its own config/servers.ini" \
+  "$(cat "$TMP/hints.out")"
+printf "0\t15:38:53.000\t'990158154': connect failed [No connection]\n" >> "$hdir/20261022.log"
+printf "0\t15:38:54.000\t'990158154': invalid account\n" >> "$hdir/20261022.log"
+sleep 4
+check_eq "a repeated failure is not repeated" "1" "$(grep -c 'HINT: the terminal could not reach' "$TMP/hints.out")"
+check_eq "a second reason gets its own line" "1" "$(grep -c 'HINT: the broker answered and refused' "$TMP/hints.out")"
+printf "0\t15:39:00.000\t'990158154': login on TradeMaxGlobal-Demo-2\n" >> "$hdir/20261022.log"
+sleep 4
+check_eq "a healthy journal produces no hint" "2" "$(grep -c HINT "$TMP/hints.out")"
+kill "$hints_pid" 2>/dev/null
+wait "$hints_pid" 2>/dev/null
+
 echo "why no trade"
 # Reject() in the expert appends a CSV row and returns - it never prints - so a
 # session that took no trades looked in the container log exactly like a robot that
@@ -590,6 +619,9 @@ if docker compose version >/dev/null 2>&1; then
   check_eq "and resolves it into two services" "2" \
     "$(printf '%s\n' "$out" | grep -cE '^  (mt4|mt4-doge):$')"
   check_contains "with the second on its own volume" "hex-mt4-doge-data" "$out"
+  # The second broker's own terminal, reachable per service (§4C). Without this the
+  # variable would exist in the docs and in the entrypoint and reach no container.
+  check_contains "and can seed instance 2 from its own distro" 'MT4_DISTRO_URL2' "$out"
 else
   printf '  skip docker compose (not installed)\n'
 fi
