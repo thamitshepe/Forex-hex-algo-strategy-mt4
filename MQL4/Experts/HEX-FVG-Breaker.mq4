@@ -131,6 +131,10 @@ string    g_setupMsg  = "scanning...";
 double    g_atr       = 0.0;
 int       g_trend     = 0;
 string    g_trendMsg  = "";
+// The point size the dollar->point thresholds were last derived from. Point is not
+// reliable at OnInit on a cold terminal (see the check in OnTick), so this is what
+// says whether those thresholds still match the symbol in front of us.
+double    g_pointUsed = 0.0;
 double    g_swingHigh = 0.0;    // last confirmed structure level (resistance)
 double    g_swingLow  = 0.0;    // last confirmed structure level (support)
 int       g_lastBreakDir = 0;     // last structure side that produced a breaker block
@@ -544,6 +548,7 @@ void ComputePointEquivalents()
   {
    double p = Point;
    if(p <= 0.0) p = 0.01;
+   g_pointUsed      = p;
    g_maxSpreadPts   = MaxSpreadDollars / p;
    g_minStopPts     = MinStopDollars / p;
    g_maxStopPts     = MaxStopDollars / p;
@@ -583,6 +588,13 @@ void OnTick()
       GlobalVariableSet(g_instanceLock, (double)TimeCurrent());
       g_instanceStamp = TimeCurrent();
      }
+   // Point is not trustworthy at OnInit on a cold terminal. Two starts of this same
+   // MetaQuotes demo account reported digits=4/point=0.0001 and digits=2/point=0.01,
+   // and every dollar->point threshold is derived from Point once in OnInit: the
+   // first of those boots ran with maxSpread=4500pt instead of 45pt - a spread gate
+   // a hundred times too loose, on the input that exists to stop wide-spread fills.
+   // Re-derive whenever the symbol's point moves, and say so in the log.
+   if(Point != g_pointUsed) ComputePointEquivalents();
    bool newBar = (Time[0] != g_barTime);
 
    // --- 1. housekeeping: day roll, kill switches, equity snapshot ---
