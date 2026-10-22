@@ -32,6 +32,11 @@ MT4_EXPERT="${MT4_EXPERT:-HEX-FVG-Breaker}"
 MT4_PRESET="${MT4_PRESET:-100usd-demo}"
 MT4_EA_PRESET_SYNC="${MT4_EA_PRESET_SYNC:-1}"
 MT4_EA_COMPILE="${MT4_EA_COMPILE:-1}"
+# Re-seed over a tree that already has a terminal.exe. Off by default: a volume
+# that works is not something to overwrite on every restart, and the tree holds
+# the live profile and the account login. Needed once after a distro changes (or
+# after a tree was seeded from an archive that carried macOS junk).
+MT4_FORCE_SEED="${MT4_FORCE_SEED:-0}"
 ENABLE_VNC="${ENABLE_VNC:-1}"
 VNC_PASSWORD="${VNC_PASSWORD:-}"
 VNC_PORT="${VNC_PORT:-5900}"
@@ -113,6 +118,35 @@ swap_in_new_tree() {
   rm -rf "$MT4DIR.old"
 }
 
+# Extraction is filtered rather than trusted. An archive built on a Mac can carry
+# AppleDouble "._name" files, and MetaEditor batch-compiles every one it finds -
+# 200+ files and about 15 seconds of boot for this distro, with their object files
+# landing in MQL4. GNU tar also warns once per "LIBARCHIVE.xattr" header, which is
+# 272 lines of noise for the same archive. prepare-distro.sh produces clean
+# archives now (--no-mac-metadata --no-xattrs); this makes an older or foreign
+# archive harmless instead of noisy.
+untar_into() {
+  local arc="$1" dest="$2" out=/tmp/untar.log
+  local -a args=(-xf "$arc" -C "$dest" --exclude='._*' --exclude='.DS_Store')
+  case "$arc" in
+    *.zst|*.tzst) args=(--use-compress-program=unzstd "${args[@]}") ;;
+    *.gz|*.tgz)   args=(-z "${args[@]}") ;;
+  esac
+  # GNU tar only: bsdtar does not know this option and would refuse to run.
+  if tar --version 2>/dev/null | head -1 | grep -q 'GNU tar'; then
+    args=(--warning=no-unknown-keyword "${args[@]}")
+  fi
+  if ! tar "${args[@]}" 2>"$out"; then
+    sed 's/^/[tar] /' "$out" | tail -15 >&2
+    die "extracting $arc failed - the [tar] lines above name the file or the reason"
+  fi
+  if [ -s "$out" ]; then
+    warn "tar printed $(grep -c . "$out") line(s) while extracting; first few:"
+    sed 's/^/[tar] /' "$out" | head -5 >&2
+  fi
+  rm -f "$out"
+}
+
 resolve_distro() {
   local new="$MT4DIR.seeding"
   # One line instead of a wall of tar errors when the volume belongs to someone
@@ -122,9 +156,12 @@ resolve_distro() {
     die "$MT4DIR is not writable by uid $(id -u) ($(id -un)). The volume belongs to another user - docker-entrypoint.sh normally fixes that as root, so check the mount: a bind mount keeps its host ownership, a named volume inherits the image's."
   fi
   rm -f "$MT4DIR/.write-test"
-  if have_terminal; then
+  if have_terminal && [ "$MT4_FORCE_SEED" != "1" ]; then
     log "terminal present: $MT4DIR/terminal.exe ($(stat -c %s "$MT4DIR/terminal.exe") bytes)"
     return 0
+  fi
+  if [ "$MT4_FORCE_SEED" = "1" ] && have_terminal; then
+    warn "MT4_FORCE_SEED=1: replacing the tree in $MT4DIR with a fresh distro - the profile and the account login go with it"
   fi
   if [ -f /opt/mt4-distro/terminal.exe ]; then
     log "seeding $MT4DIR from the MT4 distro baked into this image"
@@ -139,14 +176,17 @@ resolve_distro() {
     log "seeding $MT4DIR from MT4_DISTRO_URL"
     curl -fsSL --retry 3 --retry-delay 5 -o "$arc" "$MT4_DISTRO_URL" \
       || die "distro download failed: $MT4_DISTRO_URL"
+    # The URL and the hash are what answer "which distro is this container
+    # actually running". A tarball rebuilt on a Mac and a release asset look
+    # identical from the inside, and a stale one shows up as odd content rather
+    # than as an error - this log line makes the comparison a one-liner.
+    log "distro url  : $MT4_DISTRO_URL"
+    log "distro sha  : $(sha256sum "$arc" | cut -d' ' -f1) ($(stat -c %s "$arc") bytes)"
     rm -rf "$new"
     mkdir -p "$new"
-    case "$MT4_DISTRO_URL" in
-      *.zst|*.tzst) tar --use-compress-program=unzstd -xf "$arc" -C "$new" ;;
-      *.gz|*.tgz)   tar -xzf "$arc" -C "$new" ;;
-      *)            tar -xf  "$arc" -C "$new" ;;
-    esac
+    untar_into "$arc" "$new"
     rm -f "$arc"
+    log "extracted   : $(find "$new" -type f | wc -l | tr -d ' ') files"
     swap_in_new_tree "$new"
     return 0
   fi
@@ -214,6 +254,25 @@ fall_back_to_baked_ex4() {
   warn "$1 - falling back to the .ex4 compiled at image build time"
 }
 
+# One chart, one robot. MT4 restores the charts saved in the profile *and* opens a
+# chart for startup.ini's Symbol=, so a distro prepared with an XAUUSD M15 chart
+# starts with XAUUSD M15 (from the profile) plus XAUUSD H1 (from Symbol=) - two
+# copies of the expert on one magic number, each running its own signal engine.
+# The profile chart is the one that was verified by hand, so it wins: the symbol
+# line is only written when the profile has no chart for it, which is the case the
+# line exists for. Newlines and tabs below are the field separators, so the caller
+# can grep for a symbol without parsing a binary .chr.
+profile_charts() {
+  local f sym per
+  for f in "$MT4DIR/profiles/$MT4_PROFILE"/chart*.chr; do
+    [ -f "$f" ] || continue
+    sym="$(grep -a -m1 '^symbol=' "$f" 2>/dev/null | cut -d= -f2 | tr -d '\r')"
+    per="$(grep -a -m1 '^period=' "$f" 2>/dev/null | cut -d= -f2 | tr -d '\r')"
+    printf '%s\t%s\t%s\n' "$(basename "$f")" "${sym:-?}" "${per:-?}"
+  done
+  return 0
+}
+
 write_startup_ini() {
   local f="$MT4DIR/startup.ini"
   # MetaTrader reads this file when it is named on the command line. Names are the
@@ -224,6 +283,16 @@ write_startup_ini() {
   # The chart itself (symbol, timeframe, inputs) comes from the profile in the
   # data folder. A distro prepared from a machine that already runs the robot
   # therefore starts with the exact chart that was verified on that machine.
+  local charts symbol_line
+  charts="$(profile_charts)"
+  if [ -n "$charts" ]; then
+    log "profile $MT4_PROFILE carries: $(printf '%s' "$charts" | tr '\t\n' '  ' | sed 's/  *$//')"
+  fi
+  symbol_line="Symbol=${MT4_SYMBOL}"
+  if [ -n "$charts" ] && printf '%s\n' "$charts" | cut -f2 | grep -qx -- "$MT4_SYMBOL"; then
+    symbol_line="; Symbol= deliberately left out - the profile above already carries a $MT4_SYMBOL chart, and adding it opens a second one"
+    log "chart source: the $MT4_PROFILE profile (Symbol= omitted, so MT4 does not open a second chart)"
+  fi
   umask 077
   cat > "$f" <<EOF
 ; written by deploy/scripts/entrypoint.sh on every start - change the env, not this file
@@ -238,11 +307,15 @@ ExpertsEnable=true
 ExpertsDllImport=true
 ExpertsExpImport=true
 ExpertsTrades=true
-Symbol=${MT4_SYMBOL}
+${symbol_line}
 Expert=${MT4_EXPERT}
 ExpertParameters=${MT4_PRESET}.set
 EOF
-  log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol=$MT4_SYMBOL expert=$MT4_EXPERT preset=$MT4_PRESET"
+  if [ "$symbol_line" = "Symbol=${MT4_SYMBOL}" ]; then
+    log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol=$MT4_SYMBOL expert=$MT4_EXPERT preset=$MT4_PRESET"
+  else
+    log "startup.ini: profile=$MT4_PROFILE server=${MT4_SERVER:-<unset>} symbol from profile expert=$MT4_EXPERT preset=$MT4_PRESET"
+  fi
   [ -n "$MT4_LOGIN" ] || warn "MT4_LOGIN is empty - MT4 will wait at its login dialog (visible on the VNC desktop)"
 }
 

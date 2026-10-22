@@ -70,13 +70,16 @@ fi
 mkdir -p "$OUTDIR"
 echo
 echo "archiving (history, logs, tester, sounds and backups are left out) ..."
-# --no-mac-metadata keeps the archive to files MetaTrader knows. Without it bsdtar
-# writes an AppleDouble "._name" beside every file plus an xattr header each, which
-# bloats the tarball, makes the container's tar warn once per file, and drops
-# "._ATR.ex4" into MQL4/Indicators. Nothing on the server wants origin metadata.
+# Both flags, and they are not the same flag:
+#   --no-mac-metadata  stops the AppleDouble "._name" entries that land in MQL4 and
+#                      get batch-compiled by MetaEditor on the server.
+#   --no-xattrs        stops the per-file "LIBARCHIVE.xattr.com.apple.provenance"
+#                      header. Measured on bsdtar 3.5.3: --no-mac-metadata alone
+#                      leaves those headers in, and GNU tar on the server warns
+#                      once for each of them - 272 lines for this archive.
 # history/ is excluded on purpose: it is per-server and re-downloads on first
 # connect, and it is the one folder that grows without limit.
-COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$OUT" -C "$MD" \
+COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT" -C "$MD" \
   --exclude='history' \
   --exclude='logs' \
   --exclude='tester' \
@@ -88,6 +91,34 @@ COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$OUT" -C "$MD" \
 
 echo "wrote       : $OUT ($(du -h "$OUT" | cut -f1))"
 echo "sha256      : $(shasum -a 256 "$OUT" | cut -d' ' -f1)"
+
+# The archive is checked, not assumed, and with a reader that shows everything:
+# macOS `tar -t` HIDES AppleDouble entries - it treats "._name" as metadata for
+# "name" rather than as a member - so it reports 0 for an archive that a Linux
+# tar extracts as 544 files. Python's tarfile lists members as stored, which is
+# what the container's GNU tar will do.
+member_count="$(python3 - "$OUT" <<'PY' 2>/dev/null || echo "?"
+import sys, tarfile
+names = [m.name for m in tarfile.open(sys.argv[1])]
+double = [n for n in names if n.rsplit("/", 1)[-1].startswith("._")]
+print("%d %d" % (len(names), len(double)))
+PY
+)"
+set -- $member_count
+members="${1:-?}"; apple_double="${2:-?}"
+xattr_headers="$(gunzip -c "$OUT" | grep -ac 'LIBARCHIVE.xattr' || true)"
+echo "members     : ${members}   AppleDouble: ${apple_double}   xattr hdrs: ${xattr_headers:-0}"
+# 272 real files is the expected size of this distro; twice that means every one
+# of them arrived with an AppleDouble twin and Linux will see 544 files.
+if [ "${apple_double:-?}" != "0" ] || [ "${xattr_headers:-0}" != "0" ]; then
+  echo
+  echo "REFUSING TO SHIP: the archive still carries macOS metadata."
+  echo "  AppleDouble ._name -> Linux tar extracts them, MetaEditor batch-compiles"
+  echo "                        every one, and they land in MQL4 (~15 s of boot)"
+  echo "  xattr headers      -> GNU tar on the server warns once per file"
+  echo "Rebuild with --no-mac-metadata --no-xattrs (both are in this script)."
+  exit 1
+fi
 cat <<EOF
 
 Next, on the server:

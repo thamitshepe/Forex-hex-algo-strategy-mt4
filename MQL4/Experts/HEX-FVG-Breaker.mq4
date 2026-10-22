@@ -413,6 +413,40 @@ string CsvTime(datetime t)
 //+------------------------------------------------------------------+
 //| Init                                                               |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| One terminal, one robot                                            |
+//+------------------------------------------------------------------+
+// startup.ini attaches the expert to every chart the terminal opens, and MT4 both
+// restores the charts saved in a profile and opens one for its Symbol= line. A
+// terminal that ends up with two charts therefore runs two copies of this EA on
+// one magic number: two signal engines, two ideas of "the" position, both
+// modifying the same stop. MaxOpenTrades caps the exposure at one position, so
+// the account survives - but the pattern statistics, the CSVs and the
+// notifications all stop meaning anything. The second copy refuses to start.
+//
+// GlobalVariableTemp dies with the terminal, so a crash never leaves a lock for
+// the next start to trip over. The timestamp covers the other case: a copy that
+// stops ticking without running OnDeinit in the same session.
+#define HEX_LOCK_STALE_SECS 300
+
+bool     g_instanceOwner = false;
+string   g_instanceLock  = "";
+datetime g_instanceStamp = 0;
+
+bool ClaimInstanceSlot()
+  {
+   g_instanceLock = "HEXLOCK_" + IntegerToString(MagicNumber) + "_" +
+                    IntegerToString((int)AccountNumber());
+   if(GlobalVariableCheck(g_instanceLock))
+      if(TimeCurrent() - (datetime)GlobalVariableGet(g_instanceLock) < HEX_LOCK_STALE_SECS)
+         return(false);
+   GlobalVariableTemp(g_instanceLock);
+   GlobalVariableSet(g_instanceLock, (double)TimeCurrent());
+   g_instanceStamp = TimeCurrent();
+   g_instanceOwner = true;
+   return(true);
+  }
+
 int OnInit()
   {
    EnsureFolders();
@@ -440,6 +474,15 @@ int OnInit()
    if(!UseFVG && !UseBreaker && !UseMitigation)
      {
       Alert(Prefix, ": all three detectors are off - nothing to trade.");
+      return(INIT_FAILED);
+     }
+
+   if(!ClaimInstanceSlot())
+     {
+      Print(Prefix, ": FATAL another copy of this EA holds MagicNumber ",
+            IntegerToString(MagicNumber), " on ", Symbol(),
+            " - this chart will not trade. One chart, one robot: close the extra",
+            " chart, or give this one a different MagicNumber.");
       return(INIT_FAILED);
      }
 
@@ -516,6 +559,13 @@ void ComputePointEquivalents()
 
 void OnDeinit(const int reason)
   {
+   // Only the copy that claimed the slot may release it. A copy that failed
+   // OnInit still gets an OnDeinit, and it must not delete the running copy's lock.
+   if(g_instanceOwner)
+     {
+      GlobalVariableDel(g_instanceLock);
+      g_instanceOwner = false;
+     }
    ObjectsDeleteAll(0, Prefix);
    Comment("");
   }
@@ -526,6 +576,13 @@ void OnDeinit(const int reason)
 void OnTick()
   {
    g_tickCount++;
+   // Heartbeat for the instance lock: once a minute is enough to tell a live copy
+   // from one that stopped without cleaning up, and cheap enough to sit in OnTick.
+   if(g_instanceOwner && TimeCurrent() - g_instanceStamp >= 60)
+     {
+      GlobalVariableSet(g_instanceLock, (double)TimeCurrent());
+      g_instanceStamp = TimeCurrent();
+     }
    bool newBar = (Time[0] != g_barTime);
 
    // --- 1. housekeeping: day roll, kill switches, equity snapshot ---

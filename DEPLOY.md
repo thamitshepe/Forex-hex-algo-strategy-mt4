@@ -430,6 +430,7 @@ UI-made app and a script-made app cannot stay different for long.
 | `ENABLE_VNC` / `VNC_PASSWORD` | the remote desktop. Empty password ⇒ no desktop, deliberately |
 | `TZ` | leave `UTC`: the preset's trading hours are UTC |
 | `MT4_DISTRO_URL` | the prepared terminal (§4A), as `https://…`, or `file:///data/mt4-portable.tar.gz` on the copy-by-hand route |
+| `MT4_FORCE_SEED` | `1` replaces the tree in `/data/mt4` with a fresh distro *even though* a `terminal.exe` is already there — the profile and the account login are replaced with it. The entrypoint logs the distro's URL and sha256 on every seed, so this is how you check that the volume holds the archive you think it does. Set it back to `0` (or delete it) afterwards |
 | `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
 | `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before the healthcheck says so. CI does not set it; the compose file's `180` applies |
 
@@ -532,6 +533,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 | INIT push: `AutoTrading BLOCKED (terminal not connected yet)` | the hello went out before the login finished | harmless once. If it persists, the server name or password is wrong — check the `[mt4]` login lines |
 | `X Error ... BadAccess (MIT-SHM)` and a black desktop | `/dev/shm` too small | `shm_size: 512m` is already set; if it still happens add `ipc: host` |
 | `no desktop at all` in the log | by design: `ENABLE_VNC=1` with an empty `VNC_PASSWORD` | set the password |
+| two `Expert HEX-FVG-Breaker …: loaded successfully` lines, one per timeframe | MT4 restores the profile's charts **and** opens one for `startup.ini`'s `Symbol=`, so the expert runs twice on one magic number. The entrypoint now omits `Symbol=` when the profile already carries a chart for the symbol (`chart source: the default profile`), and the EA refuses to start a second copy (`FATAL another copy of this EA holds MagicNumber`) | if you still see two charts, the profile itself has two — remove one and redeploy |
+| `Compiling '._HEX-FVG-Breaker'` (and 200 more `._` names) while MT4 starts | the distro was built on macOS without `--no-mac-metadata`: Linux tar extracts the AppleDouble twins that macOS `tar -t` hides, and MetaEditor compiles every one. Costs ~15 s of boot and puts junk in `MQL4` | rebuild the distro with `deploy/scripts/prepare-distro.sh` (it now refuses to write an archive with AppleDouble members) and re-seed with `MT4_FORCE_SEED=1`. The entrypoint also filters `._*` on extraction, so a stale archive is no longer noisy |
 | healthcheck `unhealthy` while the market is shut | `equity.csv` is only written on ticks | raise `HEX_HEARTBEAT_MAX_AGE_MIN`, or ignore it over the weekend |
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |
 | it trades the wrong timeframe | the chart comes from the profile, not from the env | prepare a distro with the XAUUSD M15 chart, or set the chart once in the desktop (the profile is then saved on the volume) |

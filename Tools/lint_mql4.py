@@ -58,6 +58,7 @@ WebRequest StringToCharArray CharArrayToString StringGetCharacter StringSetChara
 IsOptimization IsVisualMode IsStopped UninitializeReason
 DoubleToStr StrToDouble StringFormat MathRound StrToInteger
 RefreshRates SendNotification TimeGMT
+GlobalVariableCheck GlobalVariableGet GlobalVariableSet GlobalVariableTemp GlobalVariableDel
 """.split())
 
 # Names MQL4 build 1491 does not define. Each was compiled and answered
