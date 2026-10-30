@@ -1,33 +1,25 @@
-# HEX-FVG-Breaker on a server: two accounts, two strategies, one image, one file.
+# HEX-FVG-Breaker on a server: one account, one instrument, one image, one file.
 #
-# This is the DEFAULT Dokploy route (DEPLOY.md §2): one Compose application that
-# runs both accounts as two services of one image. The alternative is two
-# Docker-Image applications (DEPLOY.md §6), which is what this replaces. Both pull
-# ghcr.io/thamitshepe/forex-hex-mt4:live; nothing here is built. Choose one route.
+# This is the DEFAULT Dokploy route (DEPLOY.md §2): one Compose application, one
+# service. The gold (XAUUSD) instance was retired 2026-10-30 - DOGEUSD is the
+# only strategy being run. The two-service version of this file is in git
+# history if it is ever needed again.
 #
-#   service    instance   account                     symbol      hostname
-#   ---------  ---------  --------------------------  ----------  -------------------
-#   mt4        1          MT4_LOGIN  (MetaQuotes)     XAUUSD M15  trade.thami.dev
-#   mt4-doge   2          MT4_LOGIN2 (its own)        DOGEUSD M5  trade2.thami.dev
+#   service    instance   account                symbol      hostname
+#   ---------  ---------  ---------------------  ----------  -------------------
+#   mt4-doge   2          MT4_LOGIN2 (its own)   DOGEUSD M5  trade2.thami.dev
 #
-# One deploy brings up both. One Environment tab feeds both. One domain per
-# service is the only per-service thing in Dokploy (Domains tab) - and a domain
-# only routes after a deploy, because its Traefik label is written when the
-# container is created. The instance number is a property of the *service*, not of
-# the env - which is the point: two applications hand-configured from one env file
-# is how you end up looking at the gold account on both hostnames.
+# The service keeps its old name (mt4-doge) and its old instance number (2) ON
+# PURPOSE: its volume hex-mt4-doge-data is owned by instance 2 - the entrypoint's
+# claim_volume refuses to start anything else against it - so renaming either
+# the service or the number would strand the terminal, the profile with the
+# chart, and every trade CSV the report reads.
 #
-# The rule that makes it safe is in the two environment blocks below: instance 1
-# is handed MT4_LOGIN and instance 2 is handed MT4_LOGIN2 *and never the plain
-# name*. So the DOGE container does not possess the gold credentials at all - not
-# "uses them only if MT4_INSTANCE is wrong", does not have them. The entrypoint
-# enforces the rest: instance 2 refuses to boot without its own values
-# (check_instance_env), a volume claimed by another instance is refused
-# (claim_volume), and instance 2's first boot strips the previous account's saved
-# login out of the copied terminal (neutralise_seed).
+# A domain still only routes after a deploy, because its Traefik label is
+# written when the container is created.
 #
-# Two things still have to be true before either instance trades:
-#   1. the container can log in (MT4_LOGIN / MT4_LOGIN2 and the server name)
+# One thing still has to be true before it trades:
+#   1. the container can log in (MT4_LOGIN2 and the server name)
 #   2. MetaTrader has the ntfy URL on its WebRequest allow-list, and AutoTrading
 #      on - see DEPLOY.md, "the one look you have to take"
 #
@@ -36,8 +28,7 @@
 # so the server runs exactly the file in the commit. Nothing is built on the
 # server; the image is pulled from GHCR.
 
-# Everything both services must never disagree about. The two service blocks below
-# differ only in the lines marked "instance 1" / "instance 2".
+# Everything the service must never disagree about with itself.
 x-mt4-common: &mt4-common
   image: ${MT4_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt4:live}
   # Every deploy has to re-pull: :live is a moving tag and `up -d` against an
@@ -66,57 +57,12 @@ x-mt4-common: &mt4-common
   # never generated, 502 when it was but the network is missing.
   networks:
     - dokploy-network
-  # The port both services serve noVNC + websockify on, which is the number to
+  # The port the service serves noVNC + websockify on, which is the number to
   # type into a domain's "container port". Not published anywhere by itself.
   expose:
     - "6080"
 
 services:
-  mt4:
-    <<: *mt4-common
-    ports:
-      # noVNC desktop, for the one-time look and for emergencies. It is only as
-      # exposed as you make it - an empty VNC_PASSWORD publishes nothing, and
-      # DEPLOY.md has the SSH-tunnel option. Instance 2 publishes no host port at
-      # all: its desktop is its own hostname (https://trade2.thami.dev/vnc.html),
-      # which is also what keeps the two from fighting over 6080.
-      - "${HOST_VNC_PORT:-6080}:6080"
-    environment:
-      # instance 1 - reads the plain names below.
-      MT4_INSTANCE: "1"
-      MT4_LOGIN: "${MT4_LOGIN:-}"
-      MT4_PASSWORD: "${MT4_PASSWORD:-}"
-      MT4_SERVER: "${MT4_SERVER:-MetaQuotes-Demo}"
-      MT4_SYMBOL: "${MT4_SYMBOL:-XAUUSD}"
-      # Empty = keep the profile chart's own timeframe; set it to move that chart
-      # onto another one.
-      MT4_PERIOD: "${MT4_PERIOD:-}"
-      MT4_PRESET: "${MT4_PRESET:-100usd-demo}"
-      MT4_PROFILE: "${MT4_PROFILE:-default}"
-      # Remote desktop. ENABLE_VNC=0 means no desktop at all; a VNC_PASSWORD that
-      # is empty means the entrypoint refuses to publish one. One password for
-      # both instances is fine - they are separate containers on separate
-      # hostnames.
-      ENABLE_VNC: "${ENABLE_VNC:-1}"
-      VNC_PASSWORD: "${VNC_PASSWORD:-}"
-      # Hours in the preset are UTC. Changing this moves the trading window.
-      TZ: "${TZ:-UTC}"
-      # Optional: a prepared terminal tarball. file:// works, so a distro dropped
-      # into the volume is 'file:///data/mt4-portable.tar.gz'.
-      MT4_DISTRO_URL: "${MT4_DISTRO_URL:-}"
-      # Only used when the volume has no terminal yet: the installer to run. The
-      # MetaQuotes one does not run under Wine (64-bit web stub); a broker's own
-      # setup.exe may, which is the only route that teaches a terminal its broker
-      # without a prepared distro.
-      MT4_SETUP_URL: "${MT4_SETUP_URL:-}"
-      HEX_HEARTBEAT_MAX_AGE_MIN: "180"
-    volumes:
-      # Everything that must survive a redeploy lives here: the terminal, the
-      # profile with the chart on it, the compiled EA, and the HEX-Logs CSVs that
-      # DEMO-PLAN.md reads. This volume's name predates the second service, so
-      # adding mt4-doge does not disturb the gold instance's data.
-      - hex-mt4-data:/data
-
   mt4-doge:
     <<: *mt4-common
     environment:
@@ -163,7 +109,11 @@ services:
       - hex-mt4-doge-data:/data
 
 volumes:
-  hex-mt4-data:
+  # The DOGE instance's state: terminal, profile, compiled EA, HEX-Logs CSVs.
+  # The gold instance's volume (<project>_hex-mt4-data) is no longer referenced;
+  # it still exists on the server untouched, and can be removed with
+  # `docker volume ls | grep hex-mt4 && docker volume rm <name>` once its
+  # contents are no longer wanted.
   hex-mt4-doge-data:
 
 # Dokploy's Traefik proxy is attached to this network; a compose service that is

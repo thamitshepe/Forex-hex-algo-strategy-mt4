@@ -187,7 +187,7 @@ api POST /api/compose.update "$(jq -nc \
     autoDeploy: false}')" >/dev/null
 log "compose file pushed from ${COMPOSE_FILE#"$REPO"/}"
 
-# The compose file runs a second instance (`mt4-doge`) from the same image. Its
+# The compose file runs instance 2 (`mt4-doge`, the only service). Its
 # identity is not in the environment - the service block hard-codes MT4_INSTANCE=2
 # - but its *credentials* are, and this call replaces the whole environment. An
 # environment without MT4_LOGIN2 therefore doesn't quietly deploy a DOGE instance
@@ -195,12 +195,12 @@ log "compose file pushed from ${COMPOSE_FILE#"$REPO"/}"
 # service restart-loops. Better to say so in the run log than to leave someone
 # reading a crash loop on the server.
 if grep -qE '^  mt4-doge:' "$COMPOSE_FILE" && ! printf '%s\n' "${DOKPLOY_ENV-}" | grep -qE '^MT4_LOGIN2=..*'; then
-  log "WARNING: ${DOKPLOY_APP} runs a second instance (mt4-doge) and this environment has no MT4_LOGIN2 - that container will refuse to boot (by design) until it has its own account"
+  log "WARNING: ${DOKPLOY_APP} runs the mt4-doge instance and this environment has no MT4_LOGIN2 - that container will refuse to boot (by design) until it has its own account"
 fi
 
 # The YAML reads ${MT4_LOGIN} and friends, so without this the interpolations are
 # empty and the container boots with no account - which is why the environment is
-# part of provisioning rather than a later click. One env file feeds both services
+# part of provisioning rather than a later click. One env file feeds the service
 # in the compose file: instance 1 reads the plain names, instance 2 reads the "2"
 # copies, and the instance number never appears here at all.
 if [ -n "$DOKPLOY_ENV" ]; then

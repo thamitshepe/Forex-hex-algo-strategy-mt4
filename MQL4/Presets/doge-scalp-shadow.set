@@ -46,7 +46,7 @@
 ;   MinTriggerClosePct: 45.0  ->  40.0
 ;   MaxBarsSinceTouch: 6  ->  3
 ;   LimitExpiryBars: 4  ->  2
-;   RiskPercent: 0.0  ->  0.5
+;   RiskPercent: 0.0  ->  1.5
 ;   MaxLot: 0.02  ->  0.20
 ;   MaxMarginUsagePct: 50.0  ->  20
 ;   StopBufferAtrPct: 25.0  ->  20.0
@@ -113,7 +113,7 @@ MinTriggerClosePct=40.0
 MaxBarsSinceTouch=3
 AllowMarketEntry=1
 LimitExpiryBars=2
-RiskPercent=0.5
+RiskPercent=1.5
 FixedLot=0.01
 MaxLot=0.20
 MaxMarginUsagePct=20

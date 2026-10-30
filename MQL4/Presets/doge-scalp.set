@@ -15,8 +15,10 @@
 ;   taken off the table instead of runners given back.
 ; * Session 0-24 and CloseOnWeekend 0, because crypto does not close.
 ;
-; Sizing is by risk (0.5% of equity), not by lots: a DOGE lot is not a gold
-; lot, and the margin guard plus MaxLot are what actually bound it.
+; Sizing is by risk (1.5% of equity), not by lots: a DOGE lot is not a gold
+; lot, and the margin guard plus MaxLot are what actually bound it. 0.5%
+; ran six live days at +1.4% total: the strategy pays for itself, it just
+; pays slowly. 1.5% triples the pace and still caps the damage.
 ;
 ; Watch rejections.csv on day one: 'spread > 0.0008' means the broker's
 ; normal spread is wider than this assumes, so raise MaxSpreadDollars to
@@ -58,7 +60,7 @@
 ;   MinTriggerClosePct: 45.0  ->  40.0
 ;   MaxBarsSinceTouch: 6  ->  3
 ;   LimitExpiryBars: 4  ->  2
-;   RiskPercent: 0.0  ->  0.5
+;   RiskPercent: 0.0  ->  1.5
 ;   MaxLot: 0.02  ->  0.20
 ;   MaxMarginUsagePct: 50.0  ->  20
 ;   StopBufferAtrPct: 25.0  ->  20.0
@@ -125,7 +127,7 @@ MinTriggerClosePct=40.0
 MaxBarsSinceTouch=3
 AllowMarketEntry=1
 LimitExpiryBars=2
-RiskPercent=0.5
+RiskPercent=1.5
 FixedLot=0.01
 MaxLot=0.20
 MaxMarginUsagePct=20

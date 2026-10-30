@@ -71,20 +71,20 @@ MQL4 does not compile. Then, in Dokploy:
 
 1. **Create Project** `forex-hex-mt4` → **Create Service** → **Compose**.
 2. Paste `deploy/docker-compose.yml` into the compose editor (provider: raw).
-   It defines both services — `mt4` (XAUUSD) and `mt4-doge` (DOGEUSD) — from
-   `ghcr.io/thamitshepe/forex-hex-mt4:live`, both attached to `dokploy-network`
-   because that is the only network Traefik can reach them on.
-3. Paste **all of** `dist/dokploy.env` into the **Environment** tab: one place, both
-   instances, nothing per service. Fill `MT4_LOGIN`/`MT4_PASSWORD` and the `…2`
-   copies, with the `MT4_DISTRO_URL` from §4.
+   It defines one service — `mt4-doge` (DOGEUSD) — from
+   `ghcr.io/thamitshepe/forex-hex-mt4:live`, attached to `dokploy-network`
+   because that is the only network Traefik can reach it on.
+3. Paste **all of** `dist/dokploy.env` into the **Environment** tab: one place,
+   nothing per service. Fill `MT4_LOGIN2`/`MT4_PASSWORD2` and the
+   `MT4_DISTRO_URL` from §4.
 4. **Deploy**, then watch the log until `terminal.exe is up` (§7) — the log has a
-   service selector, so `mt4` and `mt4-doge` are read separately.
-5. **Domains** tab, one per service: `trade.thami.dev` → service `mt4` → port `6080`
-   → HTTPS; `trade2.thami.dev` → service `mt4-doge` → port `6080` → HTTPS.
+   service selector, so `mt4-doge` is read directly.
+5. **Domains** tab: `trade2.thami.dev` → service `mt4-doge` → port `6080`
+   → HTTPS.
 6. **Deploy again.** A domain becomes a Traefik label on the *container*, and labels
    are written when the container is created — so a domain added to a running app
-   routes nowhere (`app not found`) until the next deploy. Add both domains first,
-   then deploy once; from then on the domains survive every later deploy.
+   routes nowhere (`app not found`) until the next deploy. Add the domain first,
+   then deploy once; from then on the domain survives every later deploy.
 
 
 Everything site-specific lives in that one Environment tab: that is the one place to
@@ -100,6 +100,24 @@ touches Dokploy when those two are set.
 After the first start the terminal is on its own: a new commit builds a new image,
 the redeploy pulls it, the entrypoint recompiles the EA from that commit, and the
 chart comes back exactly as it was because the profile is on the volume.
+
+**What a redeploy keeps, and what it resets.** Everything that matters lives on the
+named volume `hex-mt4-doge-data` (compose: `hex-mt4-doge-data:/data`), and a
+redeploy — `up -d` against a new image — replaces the *container*, never the
+volume. Kept across every deploy: the account login, the balance and open
+positions (they live at the broker anyway), the chart profile, the CSV logs
+(`trades.csv`, `equity.csv`, …), and the WebRequest allow-list. Reset on every
+deploy, on purpose: the EA is recompiled from the commit being deployed, the
+presets are re-copied from the image (`sync_ea`), and `startup.ini` is rewritten —
+which is why hand-edits inside the container do not survive. The preset the EA
+*runs* comes from the env (`MT4_PRESET2`) each boot, so that too survives — as
+long as it is set in the Environment tab or the repo, never inside the container.
+
+One thing that looks like data loss but is not: right after a (re)start the
+terminal can push `Account 0 | balance 0.00` before it has finished dialling the
+broker — a minute later the next banner shows the real account and balance.
+Positions and history were never gone; the terminal just woke up before the
+connection did.
 
 ---
 
@@ -389,11 +407,12 @@ variable edited in Dokploy's UI and nowhere else is overwritten by the next push
 
 ## 6. Dokploy
 
-**The compose route is §2 plus “A second instance”** — one application, two services,
-one Environment tab. What follows describes the same image run as a **Docker-Image
-application** instead, which is one container per app; it is the route to take if you
-only ever want one instance, or if you would rather keep two apps than one compose
-app (the two-application alternative at the end of “A second instance”).
+**The compose route is §2** — one application, one service (the `mt4-doge`
+DOGEUSD instance; the gold `mt4` service was retired 2026-10-30 and its
+service block removed from the compose file). What follows describes the same image
+run as a **Docker-Image application** instead, which is one container per app; it
+is the route to take if you would rather keep a standalone app than a compose
+app, or when growing a second account (§“A second instance”).
 
 **By hand, in the UI — the Docker-Image route.** Everything the container needs is
 one of eleven environment variables, and setting them here keeps every credential
@@ -570,12 +589,14 @@ UI-made app and a script-made app cannot stay different for long.
 
 Scaling here means **one service per instance inside one compose application**,
 never one container running two terminals and never two hand-configured
-applications. `deploy/docker-compose.yml` already defines both:
+applications. The compose file currently defines one service (`mt4-doge`); the
+gold (`mt4`) service block it used to carry is in git history and is the template
+for adding an instance back:
 
 ```yaml
 services:
-  mt4:        # instance 1  MT4_LOGIN   XAUUSD M15  trade.thami.dev
   mt4-doge:   # instance 2  MT4_LOGIN2  DOGEUSD M5  trade2.thami.dev
+  # mt4:     # instance 1  MT4_LOGIN   XAUUSD M15  trade.thami.dev  (retired 2026-10-30)
 ```
 
 One deploy brings up both. **One Environment tab** (`dist/dokploy.env`, pasted
@@ -812,6 +833,52 @@ the broker's spread, the symbol name and the lot step are what the preset assume
 *before* the first order. An empty `trades.csv` on a `-shadow` preset is the
 expected result, not a fault — `DryRun=1` places no orders at all.
 
+**Turning dry-run off.** Out of shadow mode is a preset change, because `DryRun`
+is an input and every preset carries it: `doge-scalp-shadow` → `doge-scalp`
+(the gold pair `100usd-shadow` → `100usd-demo` worked the same way while that
+instance ran — the point of the pairs is that going live is never just `DryRun`;
+the shadow copy carries the uncapped guards and the live copy restores the caps).
+Reaching for the shadow preset's values and flipping `DryRun` by hand would leave
+the risk cap off.
+
+**Sizing follows the account, and the preset names it.** `RiskPercent` sizes every
+trade as a share of equity, but the broker's minimum lot (0.01) sets a floor on how
+small a trade can be — and `CalcLots` *blocks* a trade whose risk-sized size falls
+below that floor rather than over-risking silently. The practical consequence:
+
+- `doge-scalp` — 1.5% of equity per trade. Comfortable from roughly $100 up
+  (measured at 0.5% for six live days: +1.4% total, +0.28R/trade — the strategy
+  pays, 0.5% just pays slowly, so it was raised).
+- `doge-10` — the $10-account variant: 3.0% per trade with the stop bracket
+  tightened to 150–300 pts, so worst-case min-lot risk is ~$0.30 = 3% of the
+  starting balance; `MaxDailyLossPct`/`MinFreeMarginUsd` widened from the $100
+  defaults, which a $10 account would trip on its first normal loss or first
+  boot. Grow the account, then switch the instance to `doge-scalp`
+  (`MT4_PRESET2=doge-scalp`, redeploy).
+
+1. Change the env, not the file in the container. `MT4_PRESET2`
+   in the application's Environment tab (or the `MT4_PRESET2`
+   repository variable the workflow sends), then redeploy. Editing
+   `/data/mt4/MQL4/Presets/*.set` over `docker exec` looks like it works and is
+   undone at the next start: `sync_ea` re-copies `/opt/ea/presets/*.set` from the
+   image whenever `MT4_EA_PRESET_SYNC=1` (the default), and `startup.ini` is
+   rewritten with `ExpertParameters=<preset>.set` every boot.
+2. Turn AutoTrading on in that instance's desktop and untick the three
+   "disable automated trading when …" boxes (§3). A live preset with the button
+   off places nothing and logs `BLOCKED_NO_AUTOTRADE` per signal instead of
+   `DRY`.
+3. Confirm the preset actually moved: the boot banner names it —
+   `[hex] … | preset doge-scalp` — and the chart's `Mode` line reads `LIVE`
+   instead of `DRY RUN (no orders)`. A shadow preset left on instance 1 while you
+   are testing instance 2 is the usual reason "it still does nothing".
+
+**Real money is a second, separate step.** All the presets are tuned against a
+$100 *demo* (`FixedLot=0.01`, `MaxRiskAmount=2.0`, `MinFreeMarginUsd=40`,
+`MaxSpreadDollars=0.45` on gold / `0.0008` on DOGE). Trading live means a live
+account's `MT4_LOGIN`/`MT4_PASSWORD` and a live `MT4_SERVER` (e.g. `TMGM-Live`)
+— plus `config/servers.ini` on that volume must already know the server (§4C), or
+the login sits at `connect failed [No connection]` however right the password is.
+
 **"No trades" is a question the log can now answer.** The expert writes *why* it
 passed to `rejections.csv` and never prints, so the container log used to show a
 session that traded nothing and said nothing about it — indistinguishable from a
@@ -947,7 +1014,10 @@ control.
 
 **A Windows VPS** — MT4 native, no Wine layer, nothing in §3 to check. Around
 $10–20/month, and you maintain a Windows desktop by hand: install, update, log in,
-and notice when it stops. It does not fit GHCR/Dokploy at all.
+and notice when it stops. It does not fit GHCR/Dokploy at all. From a Mac,
+`open 'rdp://…'` fails with *Unable to interpret … as a path or URL* until an RDP
+client exists to receive it, so `Tools/rdp.sh` picks whichever client is installed
+(`brew install freerdp` needs no sudo and no App Store account) and connects.
 
 **This** — one Linux VPS, roughly $5–7/month (MT4 is a 32-bit app: 2 vCPU, 2 GB
 RAM and 10 GB disk is plenty). It fits the CI you already have, `docker logs`
@@ -996,10 +1066,12 @@ shows the EA's prints, and a rebuild is a `git push`.
 | `FATAL: this volume belongs to account … and this container is …` | two applications were given the same volume (the second one has no volume of its own, or was created from the first without changing its mount) | give this application its own volume at `/data`. If you really mean to move *this* volume to the other account, delete `/data/.hex-instance` on it first |
 | `FATAL: this volume was claimed by instance 2 … but this container runs as instance 1` | the app's `MT4_INSTANCE` does not match the volume. Instance 1 reads `MT4_LOGIN`, instance 2 reads `MT4_LOGIN2` — so the wrong number means this app is using the *other* app's account and symbol while its env looks perfectly complete | set `MT4_INSTANCE` to the number in the message. If the volume really belongs to this instance now, delete `/data/.hex-instance` and restart |
 | the second app still shows the gold account and the gold chart, and its log has no `seed:` line | it is not running a build with the instance rules in it, or it is not instance 2 at all — the neutralise step only runs for instance ≥ 2, and an old image has no such step | compare the log's `image build` line with the commit you deployed, and `instance N` on the first line with what that app is supposed to be. A pinned `:sha` tag never moves, and `:live` needs a pull |
-| no trades at all, and nothing in the log about it | three unrelated causes that used to look identical: the preset says `DryRun=1` (`-shadow`), the terminal's AutoTrading is off, or every setup is being rejected by a filter | read the `[rej]` and `[hex] state:` lines — they name the reason. `AUTOTRADE_DISABLED` → click AutoTrading on the desktop; `GUARD … spread` → the preset's cap is tighter than the broker; `NO_CONFLUENCE`/`TOO_FAR`/`OVEREXTENDED` → filters working as designed; an empty `trades.csv` on a `-shadow` preset is correct behaviour |
+| no trades at all, and nothing in the log about it | three unrelated causes that used to look identical: the preset says `DryRun=1` (`-shadow`), the terminal's AutoTrading is off, or every setup is being rejected by a filter | read the `[rej]` and `[hex] state:` lines — they name the reason. `AUTOTRADE_DISABLED` → click AutoTrading on the desktop; `GUARD … spread` → the preset's cap is tighter than the broker; `NO_CONFLUENCE`/`TOO_FAR`/`OVEREXTENDED` → filters working as designed; an empty `trades.csv` on a `-shadow` preset is correct behaviour, and the banner's `preset …` line names which one is loaded (§6, "Turning dry-run off") |
 | `AUTOTRADE_DISABLED` in `rejections.csv`, dashboard `Trading : BLOCKED` | AutoTrading is a terminal-wide button and no MQL4 code can turn it on | click it once on the desktop (§3). It is not stored on the volume, so a re-created Wine prefix starts with it off again |
 | instance 2 logs into the wrong account | the login is also stored in the volume's `config/accounts.ini`, so a shared volume logs in as whoever used it last | the same fix as above — one volume per instance. The `FATAL` above catches it before the terminal starts |
 | `MT4_INSTANCE must be a number` | `MT4_INSTANCE` holds something other than `1`, `2`, `3` … | it is an instance *number*, not a name |
+| no trades on a small account, and `SIZE` in `rejections.csv` ("margin: only … lots affordable, broker minimum 0.01") | `RiskPercent` of a small balance cannot buy the broker's minimum lot — `doge-scalp` needs roughly $100 for that, and `CalcLots` blocks the trade rather than over-risk it | use the `doge-10` preset for a $10 account (§6, "Sizing follows the account"), or fund the account past the minimum-lot threshold |
+| every entry push says `R:R 0.00` | a build older than 2026-10-30: the planned-R:R arithmetic divided a price distance by a point count, so every push and every `signals.csv` row showed 0.00 | redeploy; the fixed build prints the real planned R:R (e.g. `R:R 2.00`), and never places a target closer than 1R |
 
 ---
 

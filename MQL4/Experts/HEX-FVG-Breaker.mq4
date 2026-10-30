@@ -1461,7 +1461,11 @@ string PushEntryBody(int dir, string sigLabel, int confl, double entry, double s
                      double tp, double lots, bool pending)
   {
    double riskPts = MathAbs(entry - sl) / Point;
-   double rr      = (riskPts > 0.0) ? MathAbs(tp - entry) / riskPts : 0.0;
+   // rr is a ratio, so both sides must be in the same unit: the distance to the
+   // target is a price, riskPts is in points. Missing the / Point turned every
+   // planned R:R into 0.00 - which is how a 0.5R target sat in the push text
+   // unread for six trades.
+   double rr      = (riskPts > 0.0) ? MathAbs(tp - entry) / Point / riskPts : 0.0;
    string body = (pending ? "LIMIT PLACED  " : "ENTERED  ") +
                  DirName(dir) + " " + Symbol() + " " + DoubleToString(lots, 2) + " lots\n" +
                  "Entry " + DoubleToString(entry, Digits) +
@@ -1668,7 +1672,9 @@ void LogSignal(string mode, int dir, string sigLabel, int confl, double entry, d
                double tp, double lots, string note)
   {
    double riskPts = MathAbs(entry - sl) / Point;
-   double rr      = riskPts > 0.0 ? MathAbs(tp - entry) / riskPts : 0.0;
+   // Same unit rule as PushEntryBody: price distance over points, or the
+   // rr_planned column is 0.00 on every row and hex_report can't use it.
+   double rr      = riskPts > 0.0 ? MathAbs(tp - entry) / Point / riskPts : 0.0;
    CsvAppend("signals.csv",
      "time,bar_time,mode,dir,signal_label,confluence,entry,sl,tp,stop_pts,rr_planned,lots,risk_usd,spread_pts,atr,session,equity,trend,note",
      CsvTime(TimeCurrent()) + "," + TimeToStr(Time[0], TIME_DATE | TIME_MINUTES) + "," + mode + "," +
@@ -1875,6 +1881,12 @@ void EvaluateSetup()
          double zt = NextOpposingTarget(dir, entry);
          if(zt > 0.0 && MathAbs(zt - entry) / (riskPts * Point) >= 1.2) tp = zt;
         }
+      // A target closer than the risk it guards is a guaranteed-loser trade:
+      // risking 1R to bank 0.5R wins the tick and loses the month. However the
+      // target was chosen - a fixed multiple, or a stale preset's zone fallback -
+      // never place one below 1R; fall back to exactly 1R instead.
+      if(tp > 0.0 && MathAbs(tp - entry) < riskPts * Point)
+         tp = entry + dir * riskPts * Point;
 
       // --- chase guards
       double dist = (dir > 0) ? (Bid - entry) : (entry - Bid);

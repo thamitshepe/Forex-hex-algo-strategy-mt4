@@ -644,31 +644,25 @@ check_eq "KEEP_SEED_LOGIN still parks the previous CSV log" "gone" \
 check_eq "KEEP_SEED_LOGIN still parks the journals" "gone" \
   "$([ -f "$keepvol/mt4/logs/20260101.log" ] || echo gone)"
 
-echo "compose: one application, two services, one image"
+echo "compose: one application, one service, one image"
 # The deployment shape itself is the fix for "both hostnames show the same
-# account": two services from one image, each with its own instance number and its
-# own volume, and the second never holding the first account's credentials. Pinned
-# here because every one of those is a line in a YAML file, which is exactly the
-# kind of thing that gets edited by hand and drifts.
+# account" - in its final form, after the gold (XAUUSD) instance was retired
+# (2026-10-30) and only DOGEUSD runs. The service keeps its old name and its
+# instance number so the volume - terminal, chart profile, trade CSVs - is
+# still the one instance 2 owns. Pinned here because every one of those is a
+# line in a YAML file, which is exactly the kind of thing that gets edited by
+# hand and drifts.
 COMPOSE="$HERE/../docker-compose.yml"
-gold="$(awk '/^  mt4:$/{f=1} /^  mt4-doge:$/{f=0} f' "$COMPOSE")"
 doge="$(awk '/^  mt4-doge:$/{f=1} /^volumes:$/{f=0} f' "$COMPOSE")"
-check_eq "the compose file declares both services" "2" "$(grep -cE '^  (mt4|mt4-doge):$' "$COMPOSE")"
-check_contains "instance 1 is a property of the mt4 service" 'MT4_INSTANCE: "1"' "$gold"
+check_eq "the compose file declares exactly one service" "1" \
+  "$(grep -cE '^  (mt4|mt4-doge):$' "$COMPOSE")"
+check_eq "the gold service is gone" "0" "$(grep -cE '^  mt4:$' "$COMPOSE")"
 check_contains "instance 2 is a property of the mt4-doge service" 'MT4_INSTANCE: "2"' "$doge"
-check_eq "mt4-doge is not given the gold login" "0" \
-  "$(printf '%s\n' "$doge" | grep -c '^      MT4_LOGIN:')"
-check_eq "mt4-doge is not given the gold password" "0" \
-  "$(printf '%s\n' "$doge" | grep -c '^      MT4_PASSWORD:')"
-check_eq "mt4-doge is not given the gold server" "0" \
-  "$(printf '%s\n' "$doge" | grep -c '^      MT4_SERVER:')"
+check_eq "the gold volume is no longer declared" "0" "$(grep -cE '^  hex-mt4-data:$' "$COMPOSE")"
 check_contains "mt4-doge reads its own login" 'MT4_LOGIN2:' "$doge"
 check_contains "mt4-doge has its own volume" 'hex-mt4-doge-data:/data' "$doge"
-check_eq "mt4-doge publishes no host port (it has a hostname)" "0" \
+check_eq "the service publishes no host port (it has a hostname)" "0" \
   "$(printf '%s\n' "$doge" | grep -c '^    ports:')"
-check_contains "the gold volume keeps its old name, so no data moves" 'hex-mt4-data:/data' "$gold"
-check_eq "both volumes are declared" "2" "$(grep -cE '^  hex-mt4(-doge)?-data:$' "$COMPOSE")"
-check_eq "one image, shared by both" "1" "$(grep -c '^  image:' "$COMPOSE")"
 # Traefik only reaches containers on its own network, and Dokploy's is
 # dokploy-network. Without this the domain gets as far as the proxy and stops:
 # 404 "app not found" if the label is missing too, 502 if only this is.
@@ -684,9 +678,9 @@ if docker compose version >/dev/null 2>&1; then
   out="$(docker compose -f "$COMPOSE" config 2>/dev/null)"
   rc=$?
   check_eq "docker compose accepts the file" "0" "$rc"
-  check_eq "and resolves it into two services" "2" \
+  check_eq "and resolves it into one service" "1" \
     "$(printf '%s\n' "$out" | grep -cE '^  (mt4|mt4-doge):$')"
-  check_contains "with the second on its own volume" "hex-mt4-doge-data" "$out"
+  check_contains "on its own volume" "hex-mt4-doge-data" "$out"
   # The second broker's own terminal, reachable per service (§4C). Without this the
   # variable would exist in the docs and in the entrypoint and reach no container.
   check_contains "and can seed instance 2 from its own distro" 'MT4_DISTRO_URL2' "$out"
