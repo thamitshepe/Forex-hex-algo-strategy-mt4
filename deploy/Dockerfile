@@ -41,7 +41,7 @@ RUN dpkg --add-architecture i386 \
  && . /etc/os-release \
  && echo "deb [signed-by=/usr/local/share/keyrings/winehq.gpg] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends winehq-stable \
+ && apt-get install -y --no-install-recommends winehq-stable fonts-wine \
  && rm -rf /var/lib/apt/lists/*
 
 COPY MQL5/Experts/HEX-BoomRider.mq5 /opt/ea/HEX-BoomRider.mq5
@@ -74,8 +74,10 @@ RUN set -eux; \
     # runs is a command-line compile; /log captures the verdict to a file. \
     cd "$md" \
     && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
+       > /tmp/metaeditor.out 2>&1 \
     || true; \
     wineserver -w || true; \
+    tail -c 2000 /tmp/metaeditor.out || true; \
     test -f "$md/MQL5/Experts/HEX-BoomRider.ex5" || { cat "$md/MQL5/Experts/compile.log" 2>/dev/null; exit 1; }; \
     cp "$md/MQL5/Experts/HEX-BoomRider.ex5" /opt/ea-built/; \
     cp "$md/MQL5/Experts/compile.log" /opt/ea-built/; \
@@ -105,7 +107,7 @@ RUN dpkg --add-architecture i386 \
  && . /etc/os-release \
  && echo "deb [signed-by=/usr/local/share/keyrings/winehq.gpg] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends winehq-stable \
+ && apt-get install -y --no-install-recommends winehq-stable fonts-wine \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
