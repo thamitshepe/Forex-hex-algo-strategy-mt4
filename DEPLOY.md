@@ -394,6 +394,7 @@ environment and the deployment (§6). These are the values it carries.
 | variable | `ENABLE_VNC` | default `1` |
 | variable | `TZ` | leave unset (UTC): the preset's trading hours are UTC |
 | variable | `DOKPLOY_PROJECT` / `DOKPLOY_APP` | optional. Rename the project or the Compose app away from `forex-hex-mt4` / `hex-mt4`. `DOKPLOY_APP` is the Compose *project* name, so changing it later is a fresh volume, not a rename |
+| variable | `MT4_RECLAIM_VOLUME` | **one-shot, normally unset.** `1` moves an existing volume to the account now in the env: the next deploy re-owns it (the log prints `re-claiming …`) instead of the `FATAL: this volume belongs to account …` refusal. Set it, let exactly one deploy through, then **delete the variable** — left set it keeps the volume guard off. A wrong `MT4_INSTANCE` is never reclaimable |
 
 Leave `DOKPLOY_URL` and `DOKPLOY_API_TOKEN` unset and the workflow still does the
 useful half: it publishes `live` and the SHA, and the deploy job prints a notice
