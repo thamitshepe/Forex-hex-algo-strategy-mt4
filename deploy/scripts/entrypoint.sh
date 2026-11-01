@@ -609,6 +609,73 @@ journal_hints() { # DIR
   done
 }
 
+# The EA's worst failure mode has no EA-side fix: the terminal attaches the
+# expert to the chart before the symbol has any data, waits 5 minutes for the
+# symbol to synchronize, gives up, and REMOVES the expert - and never retries.
+# Watch for that exact journal line and restart the terminal so it re-attaches;
+# boot after seed is fast and each attempt leaves the downloaded symbol data on
+# the volume, so attempt 2 or 3 usually sticks. Bounded: after N fails the
+# desktop itself is the tool - open Market Watch, find the symbol, make its
+# price move, then Ctrl+E the expert back on.
+ea_watchdog() { # DIR
+  local dir="$1" state="${TMPDIR:-/tmp}/hex-ea-watchdog" f n p tries=0
+  set +e
+  set +o pipefail
+  mkdir -p "$state" 2>/dev/null || true
+  while :; do
+    for f in "$dir"/*.log; do
+      [ -f "$f" ] || continue
+      local s="$state/$(basename "$f").seen"
+      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]'); p=${p:-0}
+      case "$p" in ''|*[!0-9]*) p=0 ;; esac
+      [ "$n" -lt "$p" ] && p=0
+      if [ "$n" -gt "$p" ]; then
+        if tail -n "+$((p + 1))" "$f" 2>/dev/null | grep -q 'symbol synchronization timeout'; then
+          tries=$((tries + 1))
+          if [ "$tries" -le 6 ]; then
+            log "WATCHDOG: the EA died waiting for $MT5_SYMBOL to synchronize (attempt $tries/6) - restarting terminal64.exe so it re-attaches"
+            sleep 3
+            kill "$TERMINAL_PID" 2>/dev/null || true
+          else
+            log "WATCHDOG: 6 symbol-sync restarts did not stick. Finish it on the desktop: Market Watch (Ctrl+M) -> find '$MT5_SYMBOL' -> double-click it so its price ticks -> make sure the chart draws candles -> Ctrl+E is auto-trading on. After that the chart state is saved on the volume and survives reboots."
+            sleep 900
+          fi
+        fi
+      fi
+      printf '%s\n' "$n" > "$s" 2>/dev/null || true
+    done
+    sleep 5
+  done
+}
+
+# A dead window manager or a dead VNC bridge looks identical to "the EA is
+# broken" from a browser - and nobody can click through it. Revive the pieces
+# whose death does not mean the terminal should restart.
+desktop_keeper() {
+  while :; do
+    if ! pgrep -x openbox >/dev/null 2>&1; then
+      log "WATCHDOG: openbox died - relaunching (this is why the desktop froze)"
+      openbox >/tmp/openbox.log 2>&1 &
+      WM_PID=$!
+    fi
+    if [ -n "$VNC_PASSWORD" ] && ! pgrep -f 'x11vnc' >/dev/null; then
+      log "WATCHDOG: x11vnc died - relaunching"
+      x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -passwd "$VNC_PASSWORD" \
+        -forever -shared -nolookup -o /tmp/x11vnc.log >/dev/null 2>&1 &
+      X11VNC_PID=$!
+    fi
+    if [ -n "$VNC_PASSWORD" ] && ! pgrep -f 'websockify' >/dev/null; then
+      log "WATCHDOG: websockify died - relaunching (refresh the noVNC tab afterwards)"
+      websockify --web=/usr/share/novnc "$NOVNC_PORT" "localhost:$VNC_PORT" \
+        >/tmp/novnc.log 2>&1 &
+      WEBSOCKIFY_PID=$!
+    fi
+    sleep 20
+  done
+}
+
 # Keep the lease fresh so healthcheck's "container alive" evidence is ours too.
 lease_keeper() {
   while :; do
@@ -654,6 +721,8 @@ main() {
   lease_keeper &
   mirror_dir "MT5" "$MT5DIR/logs" &
   journal_hints "$MT5DIR/logs" &
+  ea_watchdog "$MT5DIR/logs" &
+  desktop_keeper &
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   set +e
