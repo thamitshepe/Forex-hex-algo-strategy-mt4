@@ -1,47 +1,30 @@
-# HEX-FVG-Breaker on a server: one account, one instrument, one image, one file.
+# HEX-BoomRider on a server: one account, one instrument, one image, one file.
 #
 # This is the DEFAULT Dokploy route (DEPLOY.md §2): one Compose application, one
-# service. The gold (XAUUSD) instance was retired 2026-10-30 - DOGEUSD is the
-# only strategy being run. The two-service version of this file is in git
-# history if it is ever needed again.
+# service, one container - the MT4 stack (its containers, volumes and EA) was
+# retired and must not come back. The old MT4 service names and instance numbers
+# are gone on purpose: the MT5 volume is fresh, claimed by instance 1 with the
+# new account.
 #
-#   service    instance   account                symbol      hostname
-#   ---------  ---------  ---------------------  ----------  -------------------
-#   mt4-doge   2          MT4_LOGIN2 (its own)   DOGEUSD M5  trade2.thami.dev
-#
-# The service keeps its old name (mt4-doge) and its old instance number (2) ON
-# PURPOSE: its volume hex-mt4-doge-data is owned by instance 2 - the entrypoint's
-# claim_volume refuses to start anything else against it - so renaming either
-# the service or the number would strand the terminal, the profile with the
-# chart, and every trade CSV the report reads.
-#
-# A domain still only routes after a deploy, because its Traefik label is
-# written when the container is created.
-#
-# One thing still has to be true before it trades:
-#   1. the container can log in (MT4_LOGIN2 and the server name)
-#   2. MetaTrader has the ntfy URL on its WebRequest allow-list, and AutoTrading
-#      on - see DEPLOY.md, "the one look you have to take"
+#   service    instance   account               symbol          hostname
+#   ---------  ---------  --------------------- --------------  ------------------
+#   mt5-boom   1          MT5_LOGIN (Deriv)     Boom 400 Index  boom.thami.dev
 #
 # CI pushes this file: deploy/scripts/dokploy-apply.sh creates the Dokploy app,
 # sends this YAML to it as a raw compose file, sets the environment and deploys -
 # so the server runs exactly the file in the commit. Nothing is built on the
 # server; the image is pulled from GHCR.
-
+#
 # Everything the service must never disagree about with itself.
-x-mt4-common: &mt4-common
-  image: ${MT4_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt4:live}
+x-mt5-common: &mt5-common
+  image: ${MT5_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt5:live}
   # Every deploy has to re-pull: :live is a moving tag and `up -d` against an
   # image that is already present does nothing, so the container would come back
-  # on the old build and look like a successful deploy of the new one. Dokploy
-  # has a "Pull latest images on deploy" switch that adds `--pull always` to the
-  # same command, but it has no API field (compose.pullImages exists on the table
-  # and not in compose.update), so setting it there would be the one click left
-  # in an otherwise clickless deploy. This is the same flag, in the file.
+  # on the old build and look like a successful deploy of the new one.
   pull_policy: always
   restart: unless-stopped
-  # MT4 flushes its journal and the EA's CSVs on the way out, so it gets a real
-  # window to close instead of being killed on the spot.
+  # MetaTrader flushes its journals and the EA's CSVs on the way out, so it gets
+  # a real window to close instead of being killed on the spot.
   stop_grace_period: 30s
   # Wine on some kernels needs ptrace to attach to the processes it spawns, and
   # MetaTrader loads the EA in-process. This is the difference between "expert
@@ -51,82 +34,50 @@ x-mt4-common: &mt4-common
   # Xvfb and Wine share memory to draw windows. Too small a /dev/shm shows up as
   # "BadAccess (MIT-SHM)" and a dead desktop.
   shm_size: 512m
-  # Traefik (Dokploy's proxy) can only reach a container that is on the same
-  # network, and Dokploy's proxy lives on `dokploy-network`. Without this the
-  # domain resolves to Dokploy and then fails - "app not found" when the label was
-  # never generated, 502 when it was but the network is missing.
+  # Dokploy's Traefik proxy lives on `dokploy-network`; a service that is not on
+  # it is unreachable by hostname.
   networks:
     - dokploy-network
-  # The port the service serves noVNC + websockify on, which is the number to
-  # type into a domain's "container port". Not published anywhere by itself.
+  # The port the service serves noVNC + websockify on - the number to type into
+  # a domain's "container port". Not published anywhere by itself.
   expose:
     - "6080"
 
 services:
-  mt4-doge:
-    <<: *mt4-common
+  mt5-boom:
+    <<: *mt5-common
     environment:
-      # instance 2 - reads the "2" copies, and is deliberately NOT given MT4_LOGIN,
-      # MT4_PASSWORD or MT4_SERVER. It cannot log into the gold account because it
-      # has never been told about it: the credentials are not in this container's
-      # environment at all.
-      MT4_INSTANCE: "2"
-      MT4_LOGIN2: "${MT4_LOGIN2:-}"
-      MT4_PASSWORD2: "${MT4_PASSWORD2:-}"
-      MT4_SERVER2: "${MT4_SERVER2:-}"
-      MT4_SYMBOL2: "${MT4_SYMBOL2:-DOGEUSD}"
-      MT4_PERIOD2: "${MT4_PERIOD2:-5}"
-      # A -shadow preset places no orders at all (DryRun=1). Start there for one
-      # session, read the broker's real spread out of rejections.csv, then switch
-      # to doge-scalp.
-      MT4_PRESET2: "${MT4_PRESET2:-doge-scalp-shadow}"
-      MT4_PROFILE2: "${MT4_PROFILE2:-default}"
-      MT4_EXPERT2: "${MT4_EXPERT2:-}"
+      MT5_INSTANCE: "1"
+      MT5_LOGIN: "${MT5_LOGIN:-}"
+      MT5_PASSWORD: "${MT5_PASSWORD:-}"
+      MT5_SERVER: "${MT5_SERVER:-Deriv-Demo}"
+      # Deriv's Boom indices are named with spaces: "Boom 400 Index".
+      MT5_SYMBOL: "${MT5_SYMBOL:-Boom 400 Index}"
+      MT5_PERIOD: "${MT5_PERIOD:-M15}"
+      MT5_EXPERT: "${MT5_EXPERT:-HEX-BoomRider}"
+      MT5_PRESET: "${MT5_PRESET:-HEX-BoomRider}"
+      # A portable MT5 terminal tarball prepared from a Deriv MT5 install
+      # (deploy/scripts/prepare-distro.sh). Empty = the volume must already
+      # carry a terminal64.exe.
+      MT5_DISTRO_URL: "${MT5_DISTRO_URL:-}"
+      MT5_FORCE_SEED: "${MT5_FORCE_SEED:-0}"
+      # One-shot account move for an EXISTING volume: set to 1 in the app's
+      # Environment tab when /data/.hex-instance names the old account and the
+      # login above is the new one. Unset again after the next start.
+      MT5_RECLAIM_VOLUME: "${MT5_RECLAIM_VOLUME:-}"
       ENABLE_VNC: "${ENABLE_VNC:-1}"
       VNC_PASSWORD: "${VNC_PASSWORD:-}"
       TZ: "${TZ:-UTC}"
-      MT4_DISTRO_URL: "${MT4_DISTRO_URL:-}"
-      # A different broker means a different terminal: MT4 can only dial a server
-      # whose address is in its own config/servers.ini, and the distro above is one
-      # broker's tree. Point this at a distro prepared from *this* broker's terminal
-      # (prepare-distro.sh) and the second instance arrives knowing its own server,
-      # its own charts and its own saved login. Empty = use the shared MT4_DISTRO_URL.
-      MT4_DISTRO_URL2: "${MT4_DISTRO_URL2:-}"
-      MT4_FORCE_SEED2: "${MT4_FORCE_SEED2:-0}"
-      # The seeded tree's account and server stay: set this when the distro above
-      # (or in the volume) was prepared from *this* broker's terminal with this
-      # account, which is the whole point of a second-broker distro.
-      MT4_KEEP_SEED_LOGIN2: "${MT4_KEEP_SEED_LOGIN2:-0}"
-      # A broker's own installer, run only when this volume has no terminal yet.
-      MT4_SETUP_URL2: "${MT4_SETUP_URL2:-}"
-      # One-shot account move for an EXISTING volume: set to 1 through the app's
-      # environment when /data/.hex-instance names the old account and the login
-      # above is the new one. The next start re-owns the volume - and tells about
-      # it - after which this must be unset again, or the volume's guard is off.
-      MT4_RECLAIM_VOLUME: "${MT4_RECLAIM_VOLUME:-}"
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
     volumes:
-      # Its own volume, because a shared one means a shared config/accounts.ini -
-      # the second container would log in as whoever used it last, which is the
-      # exact symptom "both hostnames show the same account". Two terminals
-      # writing one MT4 tree also corrupt each other. The entrypoint refuses to
-      # start if this volume turns out to belong to another instance.
-      - hex-mt4-doge-data:/data
+      # Fresh MT5 volume. The old MT4 volumes (hex-mt4-data, hex-mt4-doge-data)
+      # are no longer referenced and can be removed on the server once their
+      # contents are no longer wanted.
+      - hex-mt5-boom-data:/data
 
 volumes:
-  # The DOGE instance's state: terminal, profile, compiled EA, HEX-Logs CSVs.
-  # The gold instance's volume (<project>_hex-mt4-data) is no longer referenced;
-  # it still exists on the server untouched, and can be removed with
-  # `docker volume ls | grep hex-mt4 && docker volume rm <name>` once its
-  # contents are no longer wanted.
-  hex-mt4-doge-data:
+  hex-mt5-boom-data:
 
-# Dokploy's Traefik proxy is attached to this network; a compose service that is
-# not on it is unreachable by hostname. `docker network ls | grep dokploy` on the
-# server shows it - Dokploy creates it on install. For a local `docker compose up`
-# outside Dokploy, create it first: docker network create dokploy-network
 networks:
   dokploy-network:
     external: true
-
-

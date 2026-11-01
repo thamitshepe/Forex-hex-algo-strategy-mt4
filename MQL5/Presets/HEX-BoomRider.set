@@ -1,0 +1,11 @@
+; HEX-BoomRider preset - Volatility Boom 400, $10 effective bankroll on a 10k demo
+; Blow line: equity <= 9990 -> alert + halt (reset the demo to resume)
+InpBaselineEquity=9990.0
+InpRiskPct=20.0
+InpMaxRiskPct=50.0
+InpTakeProfitPct=0.15
+InpStopLossPct=0.40
+InpMaxSpreadPct=0.03
+InpMagic=400400
+InpHeartbeatSec=60
+InpLogDir=HEX-Logs

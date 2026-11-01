@@ -1,5 +1,69 @@
 # Deploy — the robot runs on a server, not on your laptop
 
+> ## ⚠️ MT5 MIGRATION (2026-11-01) — the sections below describe the RETIRED MT4 stack
+>
+> The robot is now **HEX-BoomRider** on **MetaTrader 5**, trading
+> **Volatility Boom 400** on a Deriv demo. The MT4 stack (HEX-FVG-Breaker, its
+> containers, volumes and `MQL4/` tree) is **retired and removed** — everything
+> below the line in this file is kept only as history of the patterns the MT5
+> port reuses (GHCR image, Dokploy compose app, Wine/Xvfb, volume guard, lease,
+> mirrors, noVNC). The MT5 entrypoint is a fresh
+> `deploy/scripts/entrypoint.sh`; the old one is in git history.
+>
+> ### What changed, in one table
+>
+> | | MT4 (retired) | MT5 (current) |
+> |---|---|---|
+> | EA | HEX-FVG-Breaker | HEX-BoomRider (long-only spike rider) |
+> | Symbol | XAUUSD / DOGEUSD | **Boom 400 Index** (note the spaces), M15 |
+> | Terminal | `terminal.exe` /portable `startup.ini` | `terminal64.exe` /portable `/config:mt5.ini` |
+> | First login | manual on the VNC desktop | **automated** — `[Common] Login/Password/Server` autologins |
+> | Chart + EA attach | profile templates | `[StartUp]` in mt5.ini (one chart, EA + preset) |
+> | AutoTrading at start | startup.ini key | `[Experts] Enabled=1` |
+> | Bankroll rule | — | effective bankroll = **Equity − 9990**; risk 20%/trade of it |
+> | Blow guard | — | equity ≤ **9990** → Alert + phone push + marker file + permanent halt |
+> | Data dir | `/data/mt4` | `/data/mt5` (fresh volume) |
+> | Logs | `/data/mt4/MQL4/Files/Common/HEX-Logs` | `/data/mt5/MQL5/Files/HEX-Logs` |
+>
+> ### The migration checklist (what to click, once)
+>
+> 1. **Delete the old Dokploy app** (`hex-mt4` / `forex-hex-mt4` project) and its
+>    volumes: `docker volume ls | grep hex-mt4` → `docker volume rm <name>`.
+> 2. The new app (`hex-mt5`, project `forex-hex-mt5`) is created by CI on the
+>    next push to `main` — or provision it by hand with
+>    `DOKPLOY_ENV_FILE=deploy/.env deploy/scripts/dokploy-apply.sh`.
+> 3. **In the new app's Environment tab (Dokploy only — never in git, never in
+>    GitHub secrets):**
+>    ```
+>    MT5_LOGIN=41311895
+>    MT5_PASSWORD=<the Deriv demo password>
+>    MT5_SERVER=Deriv-Demo
+>    ```
+>    CI pushes never overwrite these: `dokploy-apply.sh` merges the stored
+>    environment and only updates the keys CI itself sends (image tag, distro
+>    URL, VNC switch, TZ). Delete `MT4_*` from any env file — nothing reads them.
+> 4. **Supply a terminal.** MetaQuotes' `mt5setup.exe` installs nothing under
+>    Wine (same as mt4setup). From a Deriv MT5 install on a Windows/Mac machine,
+>    make a portable tarball and set the `MT5_DISTRO_URL` repository variable
+>    (it is a URL, not a secret), e.g. upload `mt5-portable.tar.gz` somewhere and
+>    point the variable at it. CI's `ea-check` stage then compiles
+>    `HEX-BoomRider.mq5` with the real `metaeditor64.exe` on every build.
+> 5. First boot: watch the noVNC desktop once to confirm the login and that
+>    Boom 400 Index is ticking; the chart, EA and autotrading all come from
+>    `mt5.ini` now, so there is nothing else to click.
+> 6. **The blow rule:** when the phone alert says the account is blown
+>    (equity ≤ 9990 — the $10 of headroom is gone), reset the demo account in
+>    Deriv's portal, delete
+>    `/data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt` (via the desktop or
+>    a fresh volume), and it trades again. The halt survives restarts by design.
+
+The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**
+machine off, asleep, or in a bag. Everything here is a container that builds and
+publishes through the same GHCR pattern as the other repos (`skyf`, `agentlinks`,
+`text-stream`): GitHub Actions builds an image, GHCR stores it, Dokploy runs it.
+
+# Deploy — the robot runs on a server, not on your laptop
+
 The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**
 machine off, asleep, or in a bag. Everything here is a container that builds and
 publishes through the same GHCR pattern as the other repos (`skyf`, `agentlinks`,

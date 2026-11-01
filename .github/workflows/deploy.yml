@@ -2,15 +2,15 @@ name: Build and push to GHCR
 
 # This workflow is what puts the robot on the server: it builds deploy/Dockerfile
 # and publishes it to GHCR, where the Dokploy app pulls it from. The build's
-# ea-check stage compiles MQL4/Experts/HEX-FVG-Breaker.mq4 with the real
-# MetaEditor, so a commit whose MQL4 does not compile cannot produce an image -
+# ea-check stage compiles MQL5/Experts/HEX-BoomRider.mq5 with the real
+# MetaEditor, so a commit whose MQL5 does not compile cannot produce an image -
 # "deployed" and "compiles" cannot drift apart.
 on:
   push:
     branches:
       - main
     paths:
-      - "MQL4/**"
+      - "MQL5/**"
       - "deploy/**"
       - ".dockerignore"
       - ".github/workflows/deploy.yml"
@@ -21,7 +21,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/forex-hex-mt4
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/forex-hex-mt5
 
 jobs:
   meta:
@@ -40,11 +40,12 @@ jobs:
             echo "env_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-  # The shell logic between the interesting steps: startup.ini's contents, the log
-  # mirror reporting a line once, the healthcheck failing when it should, both
-  # services in the compose file, and dokploy-apply.sh against stand-ins. None of
-  # that is visible to the image build, and it used to be a script run by hand on
-  # one machine. Now a red check stops the push instead of reaching the server.
+  # The shell logic between the interesting steps: mt5.ini's contents, the log
+  # mirror reporting a line once, the healthcheck failing when it should, the
+  # compose file resolving into one service, and dokploy-apply.sh against
+  # stand-ins. None of that is visible to the image build, and it used to be a
+  # script run by hand on one machine. Now a red check stops the push instead of
+  # reaching the server.
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -63,9 +64,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      # MT4_DISTRO_URL is a repository *variable*, not a secret: it is a URL.
+      # MT5_DISTRO_URL is a repository *variable*, not a secret: it is a URL.
       # Unset, the image ships without MetaQuotes' binaries and the container
-      # either seeds a distro from the volume or installs its own terminal.
+      # seeds its terminal from the volume instead.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -73,13 +74,14 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            MT4_DISTRO_URL=${{ vars.MT4_DISTRO_URL }}
+            MT5_DISTRO_URL=${{ vars.MT5_DISTRO_URL }}
             HEX_BUILD=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha,scope=mt4-${{ needs.meta.outputs.env_tag }}
-          cache-to: type=gha,mode=max,scope=mt4-${{ needs.meta.outputs.env_tag }}
+          cache-from: type=gha,scope=mt5-${{ needs.meta.outputs.env_tag }}
+          cache-to: type=gha,mode=max,scope=mt5-${{ needs.meta.outputs.env_tag }}
+
 
   # Deploy. The server side is a script, not a click: deploy/scripts/dokploy-apply.sh
   # finds or creates the Dokploy project, finds or creates the Compose app, pushes
@@ -97,62 +99,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The values deploy/docker-compose.yml interpolates. Blank values fall
-      # through to that file's defaults (`${VAR:-default}`). The compose file runs
-      # both instances from this one image and one environment: `mt4` reads the
-      # plain names below and `mt4-doge` reads the "2" copies, with the instance
-      # number hard-coded per service - so nothing here can make the two the same
-      # trader. Identity is additionally enforced inside the container
-      # (check_instance_env, claim_volume), which knows about the suffix.
-      # MT4_IMAGE is the exact tag this run published, so the compose file never
-      # has to hardcode an owner and a rollback can pin a SHA.
+      # What deploy/docker-compose.yml interpolates - MINUS the account
+      # credentials, which deliberately have no GitHub counterpart. MT5_LOGIN /
+      # MT5_PASSWORD are set once in the app's Environment tab in Dokploy and
+      # dokploy-apply.sh merges (never replaces) the stored environment, so they
+      # survive every CI push. This step only keeps the moving parts current:
+      # the image tag of this exact build, the distro URL, the desktop switch.
       - name: Write the environment
         env:
-          MT4_LOGIN: ${{ secrets.MT4_LOGIN }}
-          MT4_PASSWORD: ${{ secrets.MT4_PASSWORD }}
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-          MT4_SERVER: ${{ vars.MT4_SERVER }}
-          MT4_SYMBOL: ${{ vars.MT4_SYMBOL }}
-          MT4_PRESET: ${{ vars.MT4_PRESET }}
-          MT4_PROFILE: ${{ vars.MT4_PROFILE }}
-          # The second service in the compose file. Unset values are passed through
-          # empty on purpose: an empty MT4_LOGIN2 makes that service refuse to boot
-          # (it will not borrow the first account), which is louder and safer than
-          # silently deploying a DOGE instance without credentials. dokploy-apply.sh
-          # warns about exactly this before it deploys.
-          MT4_LOGIN2: ${{ secrets.MT4_LOGIN2 }}
-          MT4_PASSWORD2: ${{ secrets.MT4_PASSWORD2 }}
-          MT4_SERVER2: ${{ vars.MT4_SERVER2 }}
-          MT4_SYMBOL2: ${{ vars.MT4_SYMBOL2 }}
-          MT4_PERIOD2: ${{ vars.MT4_PERIOD2 }}
-          MT4_PRESET2: ${{ vars.MT4_PRESET2 }}
-          MT4_PROFILE2: ${{ vars.MT4_PROFILE2 }}
           ENABLE_VNC: ${{ vars.ENABLE_VNC }}
           TZ_NAME: ${{ vars.TZ }}
-          MT4_DISTRO_URL: ${{ vars.MT4_DISTRO_URL }}
-          MT4_IMAGE: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
+          MT5_DISTRO_URL: ${{ vars.MT5_DISTRO_URL }}
+          MT5_IMAGE: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
         run: |
           set -euo pipefail
-          umask 077                     # it holds two secrets
           {
-            echo "MT4_LOGIN=${MT4_LOGIN}"
-            echo "MT4_PASSWORD=${MT4_PASSWORD}"
-            echo "MT4_SERVER=${MT4_SERVER}"
-            echo "MT4_SYMBOL=${MT4_SYMBOL}"
-            echo "MT4_PRESET=${MT4_PRESET}"
-            echo "MT4_PROFILE=${MT4_PROFILE}"
-            echo "MT4_LOGIN2=${MT4_LOGIN2}"
-            echo "MT4_PASSWORD2=${MT4_PASSWORD2}"
-            echo "MT4_SERVER2=${MT4_SERVER2}"
-            echo "MT4_SYMBOL2=${MT4_SYMBOL2}"
-            echo "MT4_PERIOD2=${MT4_PERIOD2}"
-            echo "MT4_PRESET2=${MT4_PRESET2}"
-            echo "MT4_PROFILE2=${MT4_PROFILE2}"
             echo "ENABLE_VNC=${ENABLE_VNC}"
-            echo "VNC_PASSWORD=${VNC_PASSWORD}"
             echo "TZ=${TZ_NAME}"
-            echo "MT4_DISTRO_URL=${MT4_DISTRO_URL}"
-            echo "MT4_IMAGE=${MT4_IMAGE}"
+            echo "MT5_DISTRO_URL=${MT5_DISTRO_URL}"
+            echo "MT5_IMAGE=${MT5_IMAGE}"
           } > "$RUNNER_TEMP/dokploy.env"
 
       - name: Provision and deploy
@@ -170,4 +135,3 @@ jobs:
             exit 0
           fi
           deploy/scripts/dokploy-apply.sh
-

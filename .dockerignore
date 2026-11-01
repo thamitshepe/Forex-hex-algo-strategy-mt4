@@ -1,5 +1,5 @@
 # Build context hygiene for deploy/Dockerfile.
-# The image needs MQL4/ and deploy/ only; everything else just slows the build.
+# The image needs MQL5/ and deploy/ only; everything else just slows the build.
 .git
 logs
 dist

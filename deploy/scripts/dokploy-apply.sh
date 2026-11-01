@@ -39,8 +39,8 @@
 #   deploy/scripts/dokploy-apply.sh
 #
 #   DOKPLOY_URL / DOKPLOY_API_TOKEN  required: the instance and an API key
-#   DOKPLOY_PROJECT                  project name     (default forex-hex-mt4)
-#   DOKPLOY_APP                      compose app name (default hex-mt4)
+#   DOKPLOY_PROJECT                  project name     (default forex-hex-mt5)
+#   DOKPLOY_APP                      compose app name (default hex-mt5)
 #   COMPOSE_FILE                     YAML to deploy   (default deploy/docker-compose.yml)
 #   DOKPLOY_ENV                      KEY=VALUE lines for .env (default: leave as-is)
 #   DOKPLOY_ENV_FILE                 a file holding those lines; used if set
@@ -55,8 +55,8 @@ set -euo pipefail
 
 DOKPLOY_URL="${DOKPLOY_URL:-}"
 DOKPLOY_API_TOKEN="${DOKPLOY_API_TOKEN:-}"
-DOKPLOY_PROJECT="${DOKPLOY_PROJECT:-forex-hex-mt4}"
-DOKPLOY_APP="${DOKPLOY_APP:-hex-mt4}"
+DOKPLOY_PROJECT="${DOKPLOY_PROJECT:-forex-hex-mt5}"
+DOKPLOY_APP="${DOKPLOY_APP:-hex-mt5}"
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.yml}"
 DOKPLOY_ENV="${DOKPLOY_ENV:-}"
 DOKPLOY_ENV_FILE="${DOKPLOY_ENV_FILE:-}"
@@ -187,15 +187,15 @@ api POST /api/compose.update "$(jq -nc \
     autoDeploy: false}')" >/dev/null
 log "compose file pushed from ${COMPOSE_FILE#"$REPO"/}"
 
-# The compose file runs instance 2 (`mt4-doge`, the only service). Its
-# identity is not in the environment - the service block hard-codes MT4_INSTANCE=2
-# - but its *credentials* are, and this call replaces the whole environment. An
-# environment without MT4_LOGIN2 therefore doesn't quietly deploy a DOGE instance
-# that logs into the gold account: check_instance_env refuses to boot, and that
-# service restart-loops. Better to say so in the run log than to leave someone
-# reading a crash loop on the server.
-if grep -qE '^  mt4-doge:' "$COMPOSE_FILE" && ! printf '%s\n' "${DOKPLOY_ENV-}" | grep -qE '^MT4_LOGIN2=..*'; then
-  log "WARNING: ${DOKPLOY_APP} runs the mt4-doge instance and this environment has no MT4_LOGIN2 - that container will refuse to boot (by design) until it has its own account"
+# The account credentials are expected to live in the Dokploy app's stored
+# environment (Environment tab), not in CI's variables - CI never sends them.
+# The merge below keeps them across pushes, but a FRESH app that has never been
+# given MT5_LOGIN would deploy a container that waits at the login dialog. Say
+# so in the run log rather than leave someone reading a silent chart.
+if printf '%s\n' "${DOKPLOY_ENV-}" | grep -qE '^MT5_LOGIN=..*'; then
+  :
+else
+  log "WARNING: this environment has no MT5_LOGIN - set it (and MT5_PASSWORD, MT5_SERVER) in the app's Environment tab in Dokploy, or the terminal will wait at its login dialog"
 fi
 
 # The YAML reads ${MT4_LOGIN} and friends, so without this the interpolations are
@@ -258,7 +258,7 @@ fi
 if [ "$DO_DEPLOY" = "1" ]; then
   api POST /api/compose.deploy "$(jq -nc \
     --arg composeId "$compose_id" '{composeId: $composeId}')" >/dev/null
-  log "deploy started - the boot log ends with 'terminal.exe is up' when it is really up"
+  log "deploy started - the boot log ends with 'terminal64.exe is up' when it is really up"
 else
   log "DEPLOY=0 - provisioned and updated, nothing restarted"
 fi
