@@ -35,11 +35,11 @@ ENV WINEPREFIX=/tmp/wine \
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget gpgv xvfb xauth tar gzip zstd \
+      ca-certificates curl wget gpg xvfb xauth tar gzip zstd \
  && mkdir -pm755 /usr/local/share/keyrings \
- && wget -qO /usr/local/share/keyrings/winehq.asc https://dl.winehq.org/wine-builds/debian/keys.txt \
+ && wget -qO- https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor > /usr/local/share/keyrings/winehq.gpg \
  && . /etc/os-release \
- && echo "deb [signed-by=/usr/local/share/keyrings/winehq.asc] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
+ && echo "deb [signed-by=/usr/local/share/keyrings/winehq.gpg] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends winehq-stable \
  && rm -rf /var/lib/apt/lists/*
@@ -95,15 +95,15 @@ ENV WINEPREFIX=/home/trader/.wine \
 RUN dpkg --add-architecture i386 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget gpgv tar gzip zstd unzip \
+      ca-certificates curl wget gpg tar gzip zstd unzip \
       procps psmisc gosu tini tzdata fonts-liberation \
       xvfb xauth x11vnc xdotool \
       openbox \
       novnc websockify \
  && mkdir -pm755 /usr/local/share/keyrings \
- && wget -qO /usr/local/share/keyrings/winehq.asc https://dl.winehq.org/wine-builds/debian/keys.txt \
+ && wget -qO- https://dl.winehq.org/wine-builds/winehq.key | gpg --dearmor > /usr/local/share/keyrings/winehq.gpg \
  && . /etc/os-release \
- && echo "deb [signed-by=/usr/local/share/keyrings/winehq.asc] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
+ && echo "deb [signed-by=/usr/local/share/keyrings/winehq.gpg] https://dl.winehq.org/wine-builds/debian $VERSION_CODENAME main" > /etc/apt/sources.list.d/winehq.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends winehq-stable \
  && apt-get clean \

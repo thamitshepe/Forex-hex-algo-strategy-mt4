@@ -44,7 +44,7 @@ if pgrep -fl 'MetaTrader 5|terminal64' >/dev/null 2>&1; then
 fi
 
 echo "tree        : $MD"
-echo "terminal    : $(ls -l "$MD/terminal64.exe" | awk '{print $5\" bytes\"}')"
+echo "terminal    : $(stat -f %z "$MD/terminal64.exe" 2>/dev/null || echo '?') bytes"
 [ -f "$MD/metaeditor64.exe" ] \
   && echo "compiler    : present (the container compiles the EA with it)" \
   || echo "compiler    : MISSING - metaeditor64.exe not found"
