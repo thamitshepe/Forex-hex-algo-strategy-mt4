@@ -86,6 +86,11 @@ MT5_PRESET="$(inst_var MT5_PRESET "$MT5_EXPERT")"
 # a 64-bit web installer that installs nothing under Wine, so like MT4 the
 # terminal has to be supplied; without a distro the volume must already have one.
 MT5_DISTRO_URL="$(shared_var MT5_DISTRO_URL)"
+# The broker installer fallback: unlike MT4's setup, MT5's full installer
+# (mt5setup.exe, ~23MB, https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe)
+# DOES run under Wine with /auto and leaves a complete terminal64 tree behind.
+# Tried after the distro; the compose file defaults it to MetaQuotes' URL.
+MT5_SETUP_URL="$(shared_var MT5_SETUP_URL)"
 MT5_FORCE_SEED="$(shared_var MT5_FORCE_SEED 0)"
 # One-shot account move for an existing volume (see claim_volume below).
 MT5_RECLAIM_VOLUME="$(shared_var MT5_RECLAIM_VOLUME)"
@@ -189,6 +194,32 @@ seed_distro_from_url() { # URL
   log "distro seeded (recorded in $MT5DIR/.seeded-from)"
 }
 
+# The MT5 full installer, run with /auto: it installs a complete portable tree
+# (terminal64.exe, metaeditor64.exe, its own servers.ini) under the Wine prefix
+# and we copy that into the volume. This is how Docker MT5 images bootstrap, and
+# unlike MT4's thin web stub it actually works under Wine.
+install_fresh_terminal() {
+  local setup="${TMPDIR:-/tmp}/mt5setup.exe" src
+  log "no terminal in $MT5DIR - running the installer at $MT5_SETUP_URL"
+  command -v wine >/dev/null 2>&1 \
+    || die "wine is not installed - cannot run the installer; supply MT5_DISTRO_URL (a prepared portable tarball) instead"
+  curl -fsSL --retry 3 --retry-delay 5 -o "$setup" "$MT5_SETUP_URL" \
+    || die "download failed: $MT5_SETUP_URL"
+  log "running the installer with /auto"
+  wine "$setup" /auto >/tmp/mt5setup.out 2>&1 \
+    || warn "the installer exited non-zero"
+  wineserver -w >/dev/null 2>&1 || true
+  src="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null)"
+  if [ -z "$src" ]; then
+    sed 's/^/[setup] /' /tmp/mt5setup.out 2>/dev/null | tail -20 || true
+    die "the installer produced no terminal64.exe under $WINEPREFIX/drive_c. Supply MT5_DISTRO_URL (a prepared portable tarball, deploy/scripts/prepare-distro.sh) instead."
+  fi
+  # Copy the whole installed tree: it brings metaeditor64.exe (so the EA
+  # compiles at start) and the server list (so the broker's server is known).
+  cp -a "$(dirname "$src")"/. "$MT5DIR"/
+  log "terminal installed from $MT5_SETUP_URL"
+}
+
 ensure_terminal() {
   if [ "$MT5_FORCE_SEED" = "1" ] && [ -n "$MT5_DISTRO_URL" ]; then
     local stamp="$MT5DIR/.seeded-from"
@@ -205,11 +236,14 @@ ensure_terminal() {
   elif [ -n "$MT5_DISTRO_URL" ]; then
     seed_distro_from_url "$MT5_DISTRO_URL"
     have_terminal || die "seeding from $MT5_DISTRO_URL produced no terminal64.exe"
+  elif [ -n "$MT5_SETUP_URL" ]; then
+    install_fresh_terminal
+    have_terminal || die "installing from $MT5_SETUP_URL produced no terminal64.exe in $MT5DIR"
   else
-    die "no terminal64.exe in $MT5DIR and MT5_DISTRO_URL is empty.
-MetaTrader 5 has to be supplied: prepare a portable distro with
-deploy/scripts/prepare-distro.sh (from a Deriv MT5 install) and point
-MT5_DISTRO_URL at the tarball, or drop the tarball into the volume."
+    die "no terminal64.exe in $MT5DIR, and neither MT5_DISTRO_URL nor MT5_SETUP_URL is set.
+Supply a portable distro (MT5_DISTRO_URL, deploy/scripts/prepare-distro.sh) or let
+the container install MetaTrader 5 itself (MT5_SETUP_URL, e.g.
+https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe)."
   fi
 }
 

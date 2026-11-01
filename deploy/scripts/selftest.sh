@@ -122,13 +122,14 @@ check_eq "another instance is refused even with the flag" "1" "$rc"
 check_eq "marker still names the true owner" "1:99999999" "$(cat "$MT5DIR/.hex-instance")"
 
 echo "ensure_terminal: the distro is the only way a terminal appears"
-MT5DIR="$TMP/vol2"; MT5_INSTANCE=1; MT5_LOGIN=41311895; MT5_FORCE_SEED=0; MT5_DISTRO_URL=""
+MT5DIR="$TMP/vol2"; MT5_INSTANCE=1; MT5_LOGIN=41311895; MT5_FORCE_SEED=0; MT5_DISTRO_URL=""; MT5_SETUP_URL=""
 mkdir -p "$MT5DIR"
 load_fn "$ENTRYPOINT" have_terminal >/dev/null
 load_fn "$ENTRYPOINT" seed_distro_from_url >/dev/null
+load_fn "$ENTRYPOINT" install_fresh_terminal >/dev/null
 load_fn "$ENTRYPOINT" ensure_terminal >/dev/null
 out="$(ensure_terminal 2>&1)" && rc=0 || rc=$?
-check_eq "no terminal and no distro is fatal" "1" "$rc"
+check_eq "no terminal and no source is fatal" "1" "$rc"
 check_contains "and the fix is named" "MT5_DISTRO_URL" "$out"
 mkdir -p "$TMP/src5/MQL5/Experts" "$TMP/src5/logs"
 printf 'fake' > "$TMP/src5/terminal64.exe"
@@ -140,6 +141,24 @@ ensure_terminal >/dev/null 2>&1
 check_eq "file:// distro seeds terminal64.exe" "1" \
   "$([ -f "$MT5DIR/terminal64.exe" ] && echo 1)"
 check_contains "and records where it came from" "file://$TAR" "$(cat "$MT5DIR/.seeded-from")"
+
+echo "ensure_terminal: the installer fallback"
+# A fresh volume with only the installer URL: on a dev machine there is no
+# wine, so the fallback must refuse with a sentence that names the fix - not
+# half-download something. (The happy path runs in the container, where wine
+# is installed; the install step itself needs a display and is CI's ea-check
+# and the first boot's business.)
+MT5DIR="$TMP/vol3"; MT5_INSTANCE=1; MT5_LOGIN=41311895; MT5_FORCE_SEED=0
+MT5_DISTRO_URL=""
+MT5_SETUP_URL="https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
+mkdir -p "$MT5DIR"
+out="$(ensure_terminal 2>&1)" && rc=0 || rc=$?
+check_eq "installer fallback without wine is fatal here" "1" "$rc"
+check_contains "and names the distro alternative" "MT5_DISTRO_URL" "$out"
+# The URL in the compose default is the one that must be live: pin it.
+check_contains "compose defaults the installer URL" \
+  "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" \
+  "$(cat "$COMPOSE")"
 
 echo "healthcheck"
 MT5DIR="$TMP/hc"

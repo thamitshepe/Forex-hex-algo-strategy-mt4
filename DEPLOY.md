@@ -42,12 +42,16 @@
 >    CI pushes never overwrite these: `dokploy-apply.sh` merges the stored
 >    environment and only updates the keys CI itself sends (image tag, distro
 >    URL, VNC switch, TZ). Delete `MT4_*` from any env file — nothing reads them.
-> 4. **Supply a terminal.** MetaQuotes' `mt5setup.exe` installs nothing under
->    Wine (same as mt4setup). From a Deriv MT5 install on a Windows/Mac machine,
->    make a portable tarball and set the `MT5_DISTRO_URL` repository variable
->    (it is a URL, not a secret), e.g. upload `mt5-portable.tar.gz` somewhere and
->    point the variable at it. CI's `ea-check` stage then compiles
->    `HEX-BoomRider.mq5` with the real `metaeditor64.exe` on every build.
+> 4. **Supply a terminal — or don't.** The compose file defaults
+>    `MT5_SETUP_URL` to MetaQuotes' full MT5 installer
+>    (`https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe`,
+>    verified live, 23.8MB), which the container runs under Wine with `/auto`
+>    and copies into the volume — so a fresh volume needs no tarball. The
+>    installer's tree carries MetaQuotes' server list; if `Deriv-Demo` is not in
+>    it, add the server once through File → Open an Account on the VNC desktop.
+>    A tarball via `MT5_DISTRO_URL` (prepared with `prepare-distro.sh` from a
+>    Deriv MT5 install) still works and wins when both are set — it is also what
+>    lets CI's `ea-check` stage compile `HEX-BoomRider.mq5` at build time.
 > 5. First boot: watch the noVNC desktop once to confirm the login and that
 >    Boom 400 Index is ticking; the chart, EA and autotrading all come from
 >    `mt5.ini` now, so there is nothing else to click.
