@@ -463,20 +463,36 @@ launch_terminal() {
   cd "$MT5DIR"
   # /portable keeps config, MQL5 and logs next to terminal64.exe instead of the
   # Wine user's AppData, which is what makes $MT5DIR a self-contained volume.
-  wine terminal64.exe /portable /config:mt5.ini >>/tmp/terminal.out 2>&1 &
+  # WINEDEBUG=+err overrides the image's -all for this one process: the
+  # terminal's own crash text must reach the log even when wine is quiet.
+  WINEDEBUG=+err wine terminal64.exe /portable /config:mt5.ini >>/tmp/terminal.out 2>&1 &
   TERMINAL_PID=$!
   log "terminal64.exe started (pid $TERMINAL_PID)"
 }
 
 wait_for_terminal() {
-  for _ in $(seq 1 90); do
-    if pgrep -f 'terminal64\\.exe' >/dev/null; then
+  # The bracket class matters: 'terminal64\\.exe' means a literal BACKSLASH in
+  # the ERE pgrep applies to the command line, and no command line has one - a
+  # perfectly healthy terminal was invisible to this check. [.] cannot be
+  # misread. 150 x 2s = patient for a first boot after seeding.
+  for _ in $(seq 1 150); do
+    if pgrep -f 'terminal64[.]exe' >/dev/null; then
       log "terminal64.exe is up"
       return 0
     fi
     sleep 2
   done
-  warn "terminal64.exe did not appear within 3 minutes - see /tmp/terminal.out"
+  warn "terminal64.exe did not appear within 5 minutes - the evidence follows"
+  sed 's/^/  [term] /' /tmp/terminal.out 2>/dev/null | tail -25 || true
+  ps -ef 2>/dev/null | grep -i -e wine -e terminal | grep -v grep | head -6 | sed 's/^/  [ps] /' || true
+  ls -la "$MT5DIR/logs/" 2>/dev/null | tail -5 | sed 's/^/  [logs] /' || true
+  local f
+  for f in "$MT5DIR"/logs/*.log; do
+    [ -f "$f" ] || continue
+    echo "  [journal] $(basename "$f"):"
+    tail -15 "$f" 2>/dev/null | sed 's/^/    /'
+  done
+  log "HINT: a terminal64.exe that dies in seconds under wine is usually a font or a prefix problem - the [term] lines above name it"
 }
 
 # MT5 buffers its journals to disk and only flushes them out periodically, so

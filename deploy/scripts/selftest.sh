@@ -165,7 +165,7 @@ MT5DIR="$TMP/hc"
 LOGDIR="$MT5DIR/MQL5/Files/HEX-Logs"
 mkdir -p "$MT5DIR/logs" "$LOGDIR"
 : > "$MT5DIR/mt5.ini"
-if pgrep -f 'terminal64\\.exe' >/dev/null 2>&1; then
+if pgrep -f 'terminal64[.]exe' >/dev/null 2>&1; then
   date +%s > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
   out="$("$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
   check_eq "fresh heartbeat is healthy" "0" "$rc"

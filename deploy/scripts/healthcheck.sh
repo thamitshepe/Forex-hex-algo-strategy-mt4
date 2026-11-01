@@ -21,7 +21,10 @@ fail() { echo "unhealthy: $*"; exit 1; }
 # machine, where the container's coreutils are not the ones in $PATH.
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
-pgrep -f 'terminal64\\.exe' >/dev/null || fail "terminal64.exe is not running"
+# 'terminal64[.]exe' - NOT 'terminal64\\.exe': inside single quotes the shell
+# keeps both backslashes, the ERE then demands a literal backslash in the
+# command line, and a healthy terminal was invisible to the check.
+pgrep -f 'terminal64[.]exe' >/dev/null || fail "terminal64.exe is not running"
 [ -f "$MT5DIR/mt5.ini" ] || fail "mt5.ini is missing - MT5 was not started by the entrypoint"
 
 # HEX-BoomRider-heartbeat.txt is the EA's heartbeat, refreshed every
