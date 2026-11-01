@@ -130,12 +130,6 @@ jobs:
           ENABLE_VNC: ${{ vars.ENABLE_VNC }}
           TZ_NAME: ${{ vars.TZ }}
           MT4_DISTRO_URL: ${{ vars.MT4_DISTRO_URL }}
-          # One-shot account move for an existing volume (MT4_RECLAIM_VOLUME=1):
-          # set as a repository Variable, let exactly one deploy re-own the volume
-          # (the container log prints `WARN: re-claiming ...`), then DELETE the
-          # variable - left set, it keeps the volume guard switched off. Empty is
-          # the normal state and the guard stays at full strength.
-          MT4_RECLAIM_VOLUME: ${{ vars.MT4_RECLAIM_VOLUME }}
           MT4_IMAGE: ${{ env.IMAGE_NAME }}:${{ needs.meta.outputs.env_tag }}
         run: |
           set -euo pipefail
@@ -158,7 +152,6 @@ jobs:
             echo "VNC_PASSWORD=${VNC_PASSWORD}"
             echo "TZ=${TZ_NAME}"
             echo "MT4_DISTRO_URL=${MT4_DISTRO_URL}"
-            echo "MT4_RECLAIM_VOLUME=${MT4_RECLAIM_VOLUME}"
             echo "MT4_IMAGE=${MT4_IMAGE}"
           } > "$RUNNER_TEMP/dokploy.env"
 

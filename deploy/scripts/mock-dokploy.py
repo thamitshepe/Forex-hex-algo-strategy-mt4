@@ -79,7 +79,26 @@ class Handler(BaseHTTPRequestHandler):
                        "appName": body.get("appName")}
             STATE["projects"][0]["environments"][0]["compose"].append(compose)
             self._send(compose)
-        elif path in ("/api/compose.update", "/api/compose.saveEnvironment"):
+        elif path == "/api/compose.create":
+            compose = {"composeId": "comp-1", "name": body.get("name"),
+                       "appName": body.get("appName"), "env": body.get("env", "")}
+            STATE["projects"][0]["environments"][0]["compose"].append(compose)
+            self._send(compose)
+        elif path == "/api/compose.one":
+            for compose in STATE["projects"][0]["environments"][0]["compose"]:
+                if compose["composeId"] == body.get("composeId"):
+                    self._send(compose)
+                    return
+            self._send({"error": "not found"}, 404)
+        elif path == "/api/compose.update":
+            for compose in STATE["projects"][0]["environments"][0]["compose"]:
+                if compose["composeId"] == body.get("composeId"):
+                    compose["appName"] = body.get("appName", compose.get("appName"))
+            self._send({})
+        elif path == "/api/compose.saveEnvironment":
+            for compose in STATE["projects"][0]["environments"][0]["compose"]:
+                if compose["composeId"] == body.get("composeId"):
+                    compose["env"] = body.get("env", "")
             self._send({})
         elif path == "/api/compose.deploy":
             STATE["deploys"] += 1

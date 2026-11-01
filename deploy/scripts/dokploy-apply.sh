@@ -203,7 +203,49 @@ fi
 # part of provisioning rather than a later click. One env file feeds the service
 # in the compose file: instance 1 reads the plain names, instance 2 reads the "2"
 # copies, and the instance number never appears here at all.
+#
+# saveEnvironment REPLACES the app's stored environment. That is why a switch set
+# by hand in the app's Environment tab - MT4_RECLAIM_VOLUME, say - would silently
+# vanish on the next CI push, and the container would go back to refusing to boot
+# with nobody the wiser. So the stored environment is read back first and every
+# name CI does not itself send is carried over: CI forever owns its own names and
+# updates them (a password change must land), a hand-set extra survives every
+# deploy until it is removed in the same tab. The stored block is read out of the
+# `project.one` answer fetched above - when that projection carries no env, from
+# `compose.one`.
 if [ -n "$DOKPLOY_ENV" ]; then
+  stored=""
+  if [ "$DOKPLOY_DRY_RUN" != "1" ]; then
+    stored="$(printf '%s' "$detail" | jq -r --arg id "$compose_id" '
+      ([.environments[]?.compose[]? | select(.composeId == $id)][0].env // "")' \
+      2>/dev/null || true)"
+    if [ -z "$stored" ] && [ -n "$compose_id" ]; then
+      stored="$(api POST /api/compose.one \
+        "$(jq -nc --arg composeId "$compose_id" '{composeId: $composeId}')" \
+        | jq -r '.env // ""' 2>/dev/null || true)"
+    fi
+  fi
+  extra=""
+  kept=0
+  if [ -n "$stored" ]; then
+    while IFS= read -r line; do
+      case "$line" in ''|'#'*) continue ;; esac
+      key="${line%%=*}"
+      # A key name only: anything else is not an env line this script should
+      # carry (an encrypted-at-rest blob would fail this on purpose).
+      case "$key" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+      [ "${#key}" -le 64 ] || continue
+      printf '%s\n' "$DOKPLOY_ENV" | grep -qxE "${key}=.*|${key}" && continue
+      extra="${extra}${line}"$'\n'
+      kept=$((kept + 1))
+    done <<EOF_STORED
+${stored}
+EOF_STORED
+  fi
+  if [ "$kept" -gt 0 ]; then
+    DOKPLOY_ENV="${DOKPLOY_ENV%$'\n'}"$'\n'"${extra%$'\n'}"
+    log "kept ${kept} variable(s) that only the stored environment had - a hand-set switch survives this deploy"
+  fi
   api POST /api/compose.saveEnvironment "$(jq -nc \
     --arg composeId "$compose_id" --arg env "$DOKPLOY_ENV" \
     '{composeId: $composeId, env: $env}')" >/dev/null

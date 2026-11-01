@@ -809,15 +809,46 @@ EOF
       bad "run $run exited non-zero: $(tail -1 "$TMP/run$run.out")"
   done
 
+  # A switch set by hand in the app's Environment tab - the reclaim flag, say -
+  # must survive the next CI deploy: saveEnvironment replaces the whole stored
+  # block, so the provisioner has to carry over every name CI does not send.
+  cp "$TMP/dokploy.env" "$TMP/ui.env"
+  printf 'MT4_RECLAIM_VOLUME=1\n' >> "$TMP/ui.env"
+  curl -sf -X POST "http://127.0.0.1:$PORT/api/compose.saveEnvironment" \
+    -H 'Content-Type: application/json' -H 'x-api-key: k' \
+    -d "$(jq -nc --arg composeId comp-1 --rawfile env "$TMP/ui.env" \
+          '{composeId: $composeId, env: $env}')" >/dev/null
+  DOKPLOY_URL="http://127.0.0.1:$PORT" DOKPLOY_API_TOKEN=k \
+    DOKPLOY_ENV_FILE="$TMP/dokploy.env" "$DOKPLOY" >"$TMP/run3.out" 2>&1 || \
+    bad "run 3 exited non-zero: $(tail -1 "$TMP/run3.out")"
+
   count() { jq -r --arg p "$1" 'select(.path == $p) | .path' "$LOG" 2>/dev/null | wc -l | tr -d ' '; }
   check_eq "project created once, then found"   "1" "$(count /api/project.create)"
   check_eq "app created once, then found"       "1" "$(count /api/compose.create)"
-  check_eq "compose file pushed on both runs"   "2" "$(count /api/compose.update)"
-  check_eq "environment saved on both runs"     "2" "$(count /api/compose.saveEnvironment)"
-  check_eq "deployed on both runs"              "2" "$(count /api/compose.deploy)"
+  check_eq "compose file pushed on all runs"    "3" "$(count /api/compose.update)"
+  check_eq "environment saved on all runs (plus the UI save)" "4" "$(count /api/compose.saveEnvironment)"
+  check_eq "deployed on all runs"               "3" "$(count /api/compose.deploy)"
   # A real instance answers 401 to a call without the key.
   check_eq "x-api-key on every call" "0" \
     "$(jq -r 'select(.api_key != "k") | .path' "$LOG" 2>/dev/null | grep -c . || true)"
+
+  check_contains "a hand-set switch survives the next CI deploy" "kept 1 variable" \
+    "$(<"$TMP/run3.out")"
+  saved3="$(jq -s -r 'map(select(.path == "/api/compose.saveEnvironment"))[3].body.env' "$LOG")"
+  check_contains "the carried-over switch is in what CI saved" "MT4_RECLAIM_VOLUME=1" "$saved3"
+  check_eq "CI's eleven are still there after the merge" "12" \
+    "$(printf '%s\n' "$saved3" | grep -c '=')"
+  # ... and removal works the other way: the user deletes the switch in the
+  # Environment tab (an ordinary UI save), and CI does not resurrect it.
+  curl -sf -X POST "http://127.0.0.1:$PORT/api/compose.saveEnvironment" \
+    -H 'Content-Type: application/json' -H 'x-api-key: k' \
+    -d "$(jq -nc --arg composeId comp-1 --rawfile env "$TMP/dokploy.env" \
+          '{composeId: $composeId, env: $env}')" >/dev/null
+  DOKPLOY_URL="http://127.0.0.1:$PORT" DOKPLOY_API_TOKEN=k \
+    DOKPLOY_ENV_FILE="$TMP/dokploy.env" "$DOKPLOY" >"$TMP/run4.out" 2>&1 || true
+  saved5="$(jq -s -r 'map(select(.path == "/api/compose.saveEnvironment"))[5].body.env' "$LOG")"
+  check_eq "a switch removed in the UI stays removed" "0" \
+    "$(printf '%s\n' "$saved5" | grep -c MT4_RECLAIM_VOLUME || true)"
 
   # -s (slurp) so there is one input to index into; without it jq evaluates the
   # filter once per line and a multi-line value comes back glued together.
