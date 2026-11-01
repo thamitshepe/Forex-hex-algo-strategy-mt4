@@ -169,3 +169,5 @@ HEALTHCHECK --interval=5m --timeout=30s --start-period=10m --retries=3 CMD ["/op
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/opt/hex/entrypoint.sh"]
 
+
+# Rebuild trigger: MT5_DISTRO_URL repo variable now pins the frozen distro.
