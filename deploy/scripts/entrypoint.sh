@@ -26,6 +26,22 @@
 # this script's only trading opinion is which symbol is on the chart.
 set -euo pipefail
 
+# ---------------------------------------------------------------- gosu drop --
+# The Wine prefix and the volume belong to uid 1000 (trader), and wine refuses
+# to touch a prefix it does not own - "wine: '/home/trader/.wine' is not owned
+# by you". The image's ENTRYPOINT starts as root (tini), so the very first
+# thing this script does is re-exec itself as trader, once, before anything
+# else runs. Everything the container needs (credentials, URLs) is already in
+# the environment and survives the exec.
+if [ "$(id -u)" = "0" ] && command -v gosu >/dev/null 2>&1; then
+  exec gosu trader env \
+    HOME=/home/trader \
+    WINEPREFIX="${WINEPREFIX:-/home/trader/.wine}" \
+    DISPLAY="${DISPLAY:-:99}" \
+    HEX_BUILD="${HEX_BUILD:-local}" \
+    bash "$0" "$@"
+fi
+
 log()  { printf '%s [hex] %s\n'  "$(date -u +%H:%M:%S)" "$*"; }
 warn() { printf '%s [hex] WARN: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
@@ -164,6 +180,9 @@ Environment tab for ONE start, then unset it."
 # stamp are what healthcheck.sh reads. The entrypoint writes the first beat
 # before the terminal starts so an early crash is distinguishable from silence.
 write_lease() {
+  # rm first: an earlier root-owned run (before the gosu drop existed) may have
+  # left this file, and the directory is trader-writable so unlink works.
+  rm -f "$MT5DIR/.hex-heartbeat" 2>/dev/null || true
   date -u +%s > "$MT5DIR/.hex-heartbeat" 2>/dev/null || true
 }
 
@@ -531,11 +550,13 @@ main() {
   mkdir -p "$MT5DIR"
   claim_volume
   write_lease
+  # The desktop comes up BEFORE the terminal is sourced: the installer and the
+  # compiler are Windows GUI programs - Wine needs a display even for /auto.
+  start_desktop
   ensure_terminal
   sync_ea
   compile_ea
   write_mt5_ini
-  start_desktop
   launch_terminal
   wait_for_terminal
   report_isolation
