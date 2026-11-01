@@ -113,6 +113,9 @@ MT5_DISTRO_URL="$(shared_var MT5_DISTRO_URL)"
 # DOES run under Wine with /auto and leaves a complete terminal64 tree behind.
 # Tried after the distro; the compose file defaults it to MetaQuotes' URL.
 MT5_SETUP_URL="$(shared_var MT5_SETUP_URL)"
+# Minutes to keep the boot alive for a manual finish over noVNC when the
+# silent /auto install does not complete on its own (default 20).
+MT5_INSTALL_WAIT_MIN="$(shared_var MT5_INSTALL_WAIT_MIN 20)"
 MT5_FORCE_SEED="$(shared_var MT5_FORCE_SEED 0)"
 # One-shot account move for an existing volume (see claim_volume below).
 MT5_RECLAIM_VOLUME="$(shared_var MT5_RECLAIM_VOLUME)"
@@ -219,12 +222,38 @@ seed_distro_from_url() { # URL
   log "distro seeded (recorded in $MT5DIR/.seeded-from)"
 }
 
+# The installer is silent even when it fails, so after /auto we cannot tell a
+# hidden dialog from a genuine crash. Instead of quit-looping, poll for a
+# terminal64.exe under the prefix for a bounded window; whoever is watching
+# noVNC can finish the install manually (or read the error dialog's text).
+# The lease is refreshed every poll so the healthcheck does not harvest the
+# container mid-wait.
+wait_for_manual_install() {
+  local deadline=$(( $(date +%s) + MT5_INSTALL_WAIT_MIN * 60 )) n=0
+  log "no terminal64.exe yet. The setup window may be on the desktop: finish the install over noVNC (set VNC_PASSWORD if it is not up), or leave MT5_DISTRO_URL. Polling for ${MT5_INSTALL_WAIT_MIN} min ..."
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 15
+    write_lease
+    n=$((n + 1))
+    if find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null | grep -q .; then
+      sleep 20 # let the installer finish writing its tree
+      TERMINAL_SRC="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null || true)"
+      if [ -n "$TERMINAL_SRC" ]; then
+        log "terminal64.exe appeared - continuing the boot"
+        return 0
+      fi
+    fi
+    [ $((n % 4)) -eq 0 ] && log "still waiting for terminal64.exe (window: ${MT5_INSTALL_WAIT_MIN} min)"
+  done
+  return 1
+}
+
 # The MT5 full installer, run with /auto: it installs a complete portable tree
 # (terminal64.exe, metaeditor64.exe, its own servers.ini) under the Wine prefix
 # and we copy that into the volume. This is how Docker MT5 images bootstrap, and
 # unlike MT4's thin web stub it actually works under Wine.
 install_fresh_terminal() {
-  local setup="${TMPDIR:-/tmp}/mt5setup.exe" src
+  local setup="${TMPDIR:-/tmp}/mt5setup.exe"
   log "no terminal in $MT5DIR - running the installer at $MT5_SETUP_URL"
   command -v wine >/dev/null 2>&1 \
     || die "wine is not installed - cannot run the installer; supply MT5_DISTRO_URL (a prepared portable tarball) instead"
@@ -238,13 +267,31 @@ install_fresh_terminal() {
     sed 's/^/[setup] /' /tmp/mt5setup.out 2>/dev/null | tail -30 || true
   fi
   wineserver -w >/dev/null 2>&1 || true
-  src="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null)"
-  if [ -z "$src" ]; then
-    die "the installer produced no terminal64.exe under $WINEPREFIX/drive_c. Supply MT5_DISTRO_URL (a prepared portable tarball, deploy/scripts/prepare-distro.sh) instead."
+  TERMINAL_SRC="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null || true)"
+
+  if [ -z "$TERMINAL_SRC" ] && command -v winetricks >/dev/null 2>&1; then
+    # The common silent-fail cause: a fresh prefix has no Windows core fonts,
+    # and MetaQuotes' installer draws its UI before it installs anything.
+    log "retrying once after winetricks corefonts"
+    winetricks -q corefonts >/tmp/winetricks.out 2>&1 || true
+    sed 's/^/[setup] /' /tmp/winetricks.out 2>/dev/null | tail -5 || true
+    wine "$setup" /auto >>/tmp/mt5setup.out 2>&1 || true
+    wineserver -w >/dev/null 2>&1 || true
+    TERMINAL_SRC="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null || true)"
   fi
+
+  if [ -z "$TERMINAL_SRC" ]; then
+    # Diagnose before asking for human eyes: what did the installer leave?
+    log "wine $(wine --version 2>/dev/null || echo 'unknown'); what the installer left behind:"
+    ls -1 "$WINEPREFIX/drive_c" 2>/dev/null | sed 's/^/[setup]   /' || true
+    ls -1 "$WINEPREFIX/drive_c/Program Files" 2>/dev/null | sed 's/^/[setup]   /' || true
+    wait_for_manual_install \
+      || die "the installer left no terminal64.exe and no manual install appeared within ${MT5_INSTALL_WAIT_MIN} min. Supply MT5_DISTRO_URL (a prepared portable tarball, deploy/scripts/prepare-distro.sh) instead."
+  fi
+
   # Copy the whole installed tree: it brings metaeditor64.exe (so the EA
   # compiles at start) and the server list (so the broker's server is known).
-  cp -a "$(dirname "$src")"/. "$MT5DIR"/
+  cp -a "$(dirname "$TERMINAL_SRC")"/. "$MT5DIR"/
   log "terminal installed from $MT5_SETUP_URL"
 }
 
