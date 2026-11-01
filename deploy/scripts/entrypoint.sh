@@ -34,6 +34,12 @@ set -euo pipefail
 # else runs. Everything the container needs (credentials, URLs) is already in
 # the environment and survives the exec.
 if [ "$(id -u)" = "0" ] && command -v gosu >/dev/null 2>&1; then
+  # Repair volume ownership first: an earlier run that began as root (or a
+  # bind mount owned by another uid) leaves /data unwritable for trader, which
+  # shows up as "Permission denied" on the heartbeat and on every copy after
+  # it. Named volumes inherit the image's ownership when created empty, but
+  # boots before bugfixes already wrote root-owned files into them.
+  chown -R trader:trader /data 2>/dev/null || true
   exec gosu trader env \
     HOME=/home/trader \
     WINEPREFIX="${WINEPREFIX:-/home/trader/.wine}" \
@@ -225,12 +231,15 @@ install_fresh_terminal() {
   curl -fsSL --retry 3 --retry-delay 5 -o "$setup" "$MT5_SETUP_URL" \
     || die "download failed: $MT5_SETUP_URL"
   log "running the installer with /auto"
-  wine "$setup" /auto >/tmp/mt5setup.out 2>&1 \
-    || warn "the installer exited non-zero"
+  local rc=0
+  wine "$setup" /auto >/tmp/mt5setup.out 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    warn "the installer exited non-zero (rc=$rc) - its own output:"
+    sed 's/^/[setup] /' /tmp/mt5setup.out 2>/dev/null | tail -30 || true
+  fi
   wineserver -w >/dev/null 2>&1 || true
   src="$(find "$WINEPREFIX/drive_c" -maxdepth 5 -iname 'terminal64.exe' -print -quit 2>/dev/null)"
   if [ -z "$src" ]; then
-    sed 's/^/[setup] /' /tmp/mt5setup.out 2>/dev/null | tail -20 || true
     die "the installer produced no terminal64.exe under $WINEPREFIX/drive_c. Supply MT5_DISTRO_URL (a prepared portable tarball, deploy/scripts/prepare-distro.sh) instead."
   fi
   # Copy the whole installed tree: it brings metaeditor64.exe (so the EA
