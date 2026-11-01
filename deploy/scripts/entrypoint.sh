@@ -916,6 +916,14 @@ mirror_rejections() {
 # /data - which holds config/accounts.ini, so it logs in as the first account no
 # matter what its env says - and trades the second preset against the first
 # account's money. So the volume records which instance claimed it.
+#
+# Moving a volume to a new account is a real operation - a demo expired, a fresh
+# account was opened - and doing it by hand means exec'ing onto the server to
+# delete the marker while the container crash-loops underneath. So the move is
+# env-only too: with MT4_RECLAIM_VOLUME=1, a change of account on the SAME
+# instance number re-owns the volume instead of being refused, loudly. The bar
+# stays high on purpose: a wrong MT4_INSTANCE number is never reclaimable,
+# because its fix is an env value, not the volume.
 claim_volume() {
   local meta marker cur was_inst was_login was_sym
   meta="$(dirname "$MT4DIR")"
@@ -938,8 +946,12 @@ claim_volume() {
   fi
   # "?" is what an instance with no login yet writes; it proves nothing either way.
   if [ -n "$MT4_LOGIN" ] && [ -n "$was_login" ] && [ "$was_login" != "?" ] && [ "$was_login" != "$MT4_LOGIN" ]; then
-    die "this volume belongs to account $was_login and this container is instance $MT4_INSTANCE on account ${MT4_LOGIN}. One volume per instance: give this application its own volume at $meta, or - if you really mean to move this volume to the other account - delete $marker first."
-    return 1
+    if [ "${MT4_RECLAIM_VOLUME:-}" = "1" ]; then
+      warn "re-claiming $meta: its marker named account $was_login, this container is instance $MT4_INSTANCE on account ${MT4_LOGIN}. Deliberate account move (MT4_RECLAIM_VOLUME=1), so this volume - config/accounts.ini, profile, the EA's CSVs - now belongs to ${MT4_LOGIN}. Unset MT4_RECLAIM_VOLUME once this start succeeds: left on, the flag is this guard switched off."
+    else
+      die "this volume belongs to account $was_login and this container is instance $MT4_INSTANCE on account ${MT4_LOGIN}. One volume per instance: give this application its own volume at $meta, move it with MT4_RECLAIM_VOLUME=1 if this really is a change of account - or delete $marker first."
+      return 1
+    fi
   fi
   if [ -n "$was_sym" ] && [ "$was_sym" != "$MT4_SYMBOL" ]; then
     warn "volume: $meta was last used for $was_sym and is now asked for $MT4_SYMBOL - the profile's chart will be moved, the original is kept in $MT4DIR/.profile-orig"

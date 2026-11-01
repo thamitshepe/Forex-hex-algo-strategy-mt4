@@ -497,6 +497,29 @@ check_eq "a symbol change on the same volume is allowed (chart gets moved)" "0" 
 check_contains "the marker follows the symbol change" "symbol=EURUSD" \
   "$(cat "$vol/.hex-instance" 2>/dev/null)"
 
+# A change of account on the existing volume is legitimate - a demo expired, a
+# new account was opened - but only ever for the same instance number, because a
+# wrong instance number is an env bug with an env fix. The move is env-only
+# (MT4_RECLAIM_VOLUME=1) so it can be done from a deploy panel, where the
+# container is crash-looping and nothing can exec into it to delete the marker.
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=888 MT4_SYMBOL=EURUSD MT4_PRESET=100usd-demo
+  claim_volume ) >/dev/null 2>&1
+check_eq "a new account is refused without the reclaim flag" "1" "$?"
+check_contains "and the marker still names the old account" "login=111" \
+  "$(cat "$vol/.hex-instance" 2>/dev/null)"
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=888 MT4_SYMBOL=EURUSD MT4_PRESET=100usd-demo
+  MT4_RECLAIM_VOLUME=1 claim_volume ) >/dev/null 2>&1
+check_eq "a new account with the reclaim flag re-owns the volume" "0" "$?"
+check_contains "the marker now names the new account" "login=888" \
+  "$(cat "$vol/.hex-instance" 2>/dev/null)"
+check_contains "the re-claim is announced, not silent" "re-claiming" \
+  "$( ( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=777 MT4_SYMBOL=EURUSD MT4_PRESET=100usd-demo
+        MT4_RECLAIM_VOLUME=1 claim_volume ) 2>&1 )"
+# shellcheck disable=SC2030  # read by the extracted functions in subshells
+( MT4DIR="$vol/mt4" MT4_INSTANCE=1 MT4_LOGIN=111 MT4_SYMBOL=EURUSD MT4_PRESET=100usd-demo
+  claim_volume ) >/dev/null 2>&1
+check_eq "the old account is refused again once the flag is gone" "1" "$?"
+
 # The instance number is half of a volume's identity: instance 1 reads the plain
 # MT4_* names and instance 2 reads the "<n>" copies. An application running at the
 # wrong number therefore drives the *other* application's account and symbol while
@@ -516,6 +539,9 @@ check_contains "and the refusal says which MT4_INSTANCE to set" "MT4_INSTANCE=2"
 ( MT4DIR="$vol2/mt4" MT4_INSTANCE=2 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
   claim_volume ) >/dev/null 2>&1
 check_eq "its own instance number is allowed" "0" "$?"
+( MT4DIR="$vol2/mt4" MT4_INSTANCE=1 MT4_LOGIN=222 MT4_SYMBOL=DOGEUSD MT4_PRESET=doge-scalp
+  MT4_RECLAIM_VOLUME=1 claim_volume ) >/dev/null 2>&1
+check_eq "a wrong instance number stays refused even with the reclaim flag" "1" "$?"
 
 # Two Dokploy applications can be pointed at the SAME volume: a volume name is
 # server-wide, so the string that is right for one application is also accepted by

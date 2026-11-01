@@ -99,6 +99,11 @@ services:
       MT4_KEEP_SEED_LOGIN2: "${MT4_KEEP_SEED_LOGIN2:-0}"
       # A broker's own installer, run only when this volume has no terminal yet.
       MT4_SETUP_URL2: "${MT4_SETUP_URL2:-}"
+      # One-shot account move for an EXISTING volume: set to 1 through the app's
+      # environment when /data/.hex-instance names the old account and the login
+      # above is the new one. The next start re-owns the volume - and tells about
+      # it - after which this must be unset again, or the volume's guard is off.
+      MT4_RECLAIM_VOLUME: "${MT4_RECLAIM_VOLUME:-}"
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
     volumes:
       # Its own volume, because a shared one means a shared config/accounts.ini -
