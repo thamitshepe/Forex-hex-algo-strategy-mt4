@@ -58,7 +58,11 @@ services:
       MT5_PRESET: "${MT5_PRESET:-HEX-BoomRider}"
       # A portable MT5 terminal tarball prepared from a broker MT5 install
       # (deploy/scripts/prepare-distro.sh). Takes precedence when both are set.
-      MT5_DISTRO_URL: "${MT5_DISTRO_URL:-}"
+      # The frozen portable MT5 tree (release asset, 112MB, sha256-pinned notes).
+      # CI ALSO bakes a compiled HEX-BoomRider.ex5 from it into the image, so the
+      # runtime never has to compile anything - and never has to install from
+      # MetaQuotes' installer at all. Leave it; it is the guaranteed path.
+      MT5_DISTRO_URL: "${MT5_DISTRO_URL:-https://github.com/thamitshepe/Forex-hex-algo-strategy-mt4/releases/download/mt5-portable-distro/mt5-portable.tar.gz}"
       # The full MetaTrader 5 installer (verified live, 23.8MB): the container
       # runs it under Wine with /auto and copies the tree into the volume, so a
       # fresh volume needs no tarball at all. Note the tree carries MetaQuotes'
