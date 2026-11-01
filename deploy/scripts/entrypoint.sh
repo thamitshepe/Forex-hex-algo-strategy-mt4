@@ -354,9 +354,28 @@ compile_ea() {
   if [ -f "$exe" ]; then
     log "compiling ${MT5_EXPERT}.mq5 with metaeditor64.exe"
     # metaeditor64 /compile:<path> writes <name>.log next to the source unless
-    # /log:<path> is given. It is a GUI app but exits when told to compile.
-    (cd "$MT5DIR" && wine metaeditor64.exe "/compile:MQL5\\Experts\\${MT5_EXPERT}.mq5" "/log:MQL5\\Experts\\compile.log" >/dev/null 2>&1 || true)
+    # /log:<path> is given. GUI app, exits when told to compile. /portable makes
+    # it resolve #include inside this tree's MQL5/Include; without it the
+    # editor looks in the Wine roaming data folder, which is empty. The belt
+    # covers the case where /portable alone is not enough for this build:
+    # copy the tree's Include into the roaming Terminal folder re-found at
+    # runtime and compile again without the switch.
+    (cd "$MT5DIR" && wine metaeditor64.exe /portable "/compile:MQL5\\Experts\\${MT5_EXPERT}.mq5" "/log:MQL5\\Experts\\compile.log" >/dev/null 2>&1 || true)
     wineserver -w >/dev/null 2>&1 || true
+    if [ ! -f "$out" ]; then
+      local td h
+      td="$(find "$WINEPREFIX/drive_c/users" -maxdepth 7 -type d -name 'Terminal' -path '*MetaQuotes/Terminal' -print -quit 2>/dev/null || true)"
+      if [ -n "$td" ]; then
+        log "/portable compile miss - populating the roaming Include folder and retrying"
+        for h in "$td"/*/; do
+          [ -d "$h" ] || continue
+          mkdir -p "$h/MQL5"
+          cp -a "$MT5DIR/MQL5/Include" "$h/MQL5/" 2>/dev/null || true
+        done
+        (cd "$MT5DIR" && wine metaeditor64.exe "/compile:MQL5\\Experts\\${MT5_EXPERT}.mq5" "/log:MQL5\\Experts\\compile.log" >/dev/null 2>&1 || true)
+        wineserver -w >/dev/null 2>&1 || true
+      fi
+    fi
     if [ -f "$out" ]; then
       log "compiled OK: $(basename "$out") (log: MQL5/Experts/compile.log)"
       return 0

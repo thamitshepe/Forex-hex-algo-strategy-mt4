@@ -70,13 +70,28 @@ RUN set -eux; \
     cp /opt/ea/HEX-BoomRider.mq5 "$md/MQL5/Experts/"; \
     mkdir -p "$md/MQL5/Presets"; cp /opt/ea/presets/*.set "$md/MQL5/Presets/" 2>/dev/null || true; \
     rm -f "$md/MQL5/Experts/HEX-BoomRider.ex5"; \
-    # xvfb-run because Wine is a Windows GUI runtime even when the program it \
-    # runs is a command-line compile; /log captures the verdict to a file. \
+    # /portable: resolve includes inside the tree itself (MQL5\\Include); without \
+    # it metaeditor looks in the Wine roaming data folder, which is empty. Belt: \
+    # if the portable run still misses, copy the tree's Include into whatever \
+    # roaming Terminal hash folder the first run created and compile again. \
     cd "$md" \
-    && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
+    && xvfb-run -a wine metaeditor64.exe /portable "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
        > /tmp/metaeditor.out 2>&1 \
     || true; \
     wineserver -w || true; \
+    if [ ! -f "$md/MQL5/Experts/HEX-BoomRider.ex5" ]; then \
+      td="$(find /tmp/wine/drive_c/users -maxdepth 7 -type d -name 'Terminal' -path '*MetaQuotes/Terminal' -print -quit)"; \
+      for h in "$td"/*/; do \
+        [ -d "$h" ] || continue; \
+        mkdir -p "$h/MQL5"; \
+        cp -a "$md/MQL5/Include" "$h/MQL5/"; \
+      done; \
+      cd "$md" \
+      && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
+         > /tmp/metaeditor.out 2>&1 \
+      || true; \
+      wineserver -w || true; \
+    fi; \
     tail -c 2000 /tmp/metaeditor.out || true; \
     test -f "$md/MQL5/Experts/HEX-BoomRider.ex5" || { cat "$md/MQL5/Experts/compile.log" 2>/dev/null; exit 1; }; \
     cp "$md/MQL5/Experts/HEX-BoomRider.ex5" /opt/ea-built/; \
