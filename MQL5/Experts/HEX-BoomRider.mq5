@@ -30,6 +30,8 @@ input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider tha
 input long   InpMagic          = 400400;   // Magic number
 input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval
 input string InpLogDir         = "HEX-Logs";
+input string InpNotifyUrl      = "";       // Push target: ntfy URL, empty = MetaQuotes ID push only
+input bool   InpNotifyTest     = true;     // Send a hello at init so the pipe is proven early
 
 CTrade   trade;
 bool     blown         = false;
@@ -53,6 +55,11 @@ int OnInit()
    FolderCreate(InpLogDir);
    Log("INIT", StringFormat("baseline=%.2f risk=%.1f%% tp=%.2f%% sl=%.2f%% blown=%d",
        InpBaselineEquity, InpRiskPct, InpTakeProfitPct, InpStopLossPct, blown));
+   NotifyAnnounce();
+   if(InpNotifyTest)
+      Notify("HELLO", StringFormat("HEX-BoomRider online on %s, equity %.2f. "
+              "If you read this, notifications work.", _Symbol,
+              AccountInfoDouble(ACCOUNT_EQUITY)));
    WriteHeartbeat();
    return(INIT_SUCCEEDED);
 }
@@ -74,9 +81,8 @@ void OnTick()
       string msg = StringFormat("BOOM RIDER BLOWN: equity %.2f <= baseline %.2f. "
                                 "Account is done - RESET THE DEMO ACCOUNT.",
                                 equity, InpBaselineEquity);
-      Log("BLOWN", msg);
       Alert(msg);
-      SendNotification(msg);   // mobile push when MetaQuotes ID is set
+      Notify("BLOWN", msg);
       WriteBlownMarker(msg);
    }
    if(blown)
@@ -132,8 +138,45 @@ void OnTick()
           lots, ask, sl, tp, effective));
    }
    else
-      Log("ERROR", StringFormat("Buy failed: %d %s", trade.ResultRetcode(),
-          trade.ResultRetcodeDescription()));
+      Notify("ERROR", StringFormat("Buy failed: %d %s",
+             trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+}
+
+//+------------------------------------------------------------------+
+//| OPEN/CLOSE notifications from actual deals - catches TP/SL       |
+//| closes the EA did not issue itself.                              |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic)
+      return;
+   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   if(entry == DEAL_ENTRY_IN)
+      Notify("OPEN", StringFormat("opened %.2f lots at %.2f on %s (eff %.2f)",
+             HistoryDealGetDouble(trans.deal, DEAL_VOLUME),
+             HistoryDealGetDouble(trans.deal, DEAL_PRICE),
+             _Symbol,
+             AccountInfoDouble(ACCOUNT_EQUITY) - InpBaselineEquity));
+   else if(entry == DEAL_ENTRY_OUT)
+   {
+      long reason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+      string how = (reason == DEAL_REASON_TP) ? "TP hit"
+                 : (reason == DEAL_REASON_SL) ? "SL hit"
+                 : "closed";
+      Notify("CLOSE", StringFormat("%s - %.2f lots, P/L %.2f, equity %.2f",
+             how,
+             HistoryDealGetDouble(trans.deal, DEAL_VOLUME),
+             HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+               + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+               + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION),
+             AccountInfoDouble(ACCOUNT_EQUITY)));
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -189,6 +232,48 @@ void CloseEverything()
 {
    if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagic)
       trade.PositionClose(_Symbol);
+}
+
+//+------------------------------------------------------------------+
+//| Notifications: ntfy when InpNotifyUrl is set (plain-text POST),  |
+//| MetaQuotes ID push otherwise. One log line per attempt outcome;  |
+//| a failing push must never disturb trading.                       |
+//+------------------------------------------------------------------+
+void NotifyAnnounce()
+{
+   if(StringLen(InpNotifyUrl) > 0)
+      Print("[BoomRider] push -> ", InpNotifyUrl,
+            " (must be listed in Tools > Options > Expert Advisors > Allow WebRequest)");
+   else
+      Print("[BoomRider] push -> MetaQuotes ID (set it in Tools > Options > Expert Advisors; ",
+            "no InpNotifyUrl given, so ntfy is off)");
+}
+
+void Notify(string event, string msg)
+{
+   Log(event, msg);
+   if(StringLen(InpNotifyUrl) == 0)
+   {
+      SendNotification(msg);   // MetaQuotes ID mobile push (silently no-ops if unset)
+      return;
+   }
+   char post[];                // WebRequest needs non-const arrays
+   char result[];
+   StringToCharArray(msg, post, 0, StringLen(msg));   // body = the message, no NUL
+   string headers = "Content-Type: text/plain\r\n" +
+                    "Title: HEX-BoomRider " + event + "\r\n" +
+                    "Tags: chart_with_upwards_trend\r\n";
+   string url = InpNotifyUrl;
+   ResetLastError();
+   int status = WebRequest("POST", url, headers, 5000, post, result, headers);
+   if(status == -1)
+      Print("[BoomRider] NOTIFY-FAIL ", event, ": WebRequest blocked - add the URL's ",
+            "origin to Tools > Options > Expert Advisors > Allow WebRequest (err ",
+            GetLastError(), ")");
+   else if(status < 200 || status >= 300)
+      Print("[BoomRider] NOTIFY-FAIL ", event, ": HTTP ", status);
+   else
+      Print("[BoomRider] NOTIFY-OK ", event, ": sent");
 }
 
 //+------------------------------------------------------------------+

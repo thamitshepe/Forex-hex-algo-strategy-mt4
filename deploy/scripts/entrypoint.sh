@@ -336,6 +336,11 @@ sync_ea() {
   log "synced $(basename "$EA_SRC") into the volume"
   if compgen -G "/opt/ea/presets/${MT5_PRESET}.set" >/dev/null; then
     cp -f "/opt/ea/presets/${MT5_PRESET}.set" "$dest_set/"
+    if [ -n "${MT5_NOTIFY_URL:-}" ]; then
+      sed -i "s|^InpNotifyUrl=.*|InpNotifyUrl=${MT5_NOTIFY_URL}|" \
+        "$dest_set/${MT5_PRESET}.set" 2>/dev/null || true
+      log "notify target injected into ${MT5_PRESET}.set from MT5_NOTIFY_URL"
+    fi
     log "synced preset ${MT5_PRESET}.set into the volume"
   else
     warn "preset /opt/ea/presets/${MT5_PRESET}.set does not exist - the EA will run on its input defaults"

@@ -70,6 +70,11 @@ services:
       # File -> Open an Account on the VNC desktop.
       MT5_SETUP_URL: "${MT5_SETUP_URL:-https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe}"
       MT5_FORCE_SEED: "${MT5_FORCE_SEED:-0}"
+      # Where the EA's phone pushes go: an ntfy URL (install the ntfy app and
+      # subscribe to the same topic). Empty = MetaQuotes-ID push only. The EA
+      # announces the target in the Experts log at every boot and sends a test
+      # push (HELLO) if InpNotifyTest is on.
+      MT5_NOTIFY_URL: "${MT5_NOTIFY_URL:-}"
       # One-shot account move for an EXISTING volume: set to 1 in the app's
       # Environment tab when /data/.hex-instance names the old account and the
       # login above is the new one. Unset again after the next start.

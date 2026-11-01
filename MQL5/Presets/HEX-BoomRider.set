@@ -9,3 +9,5 @@ InpMaxSpreadPct=0.03
 InpMagic=400400
 InpHeartbeatSec=60
 InpLogDir=HEX-Logs
+InpNotifyUrl=https://ntfy.sh/hex-boomrider-change-me
+InpNotifyTest=true
