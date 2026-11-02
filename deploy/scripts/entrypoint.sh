@@ -633,7 +633,7 @@ ea_watchdog() { # DIR
   # removed" line, whose reason is written only to the MQL5 log. Restart the
   # terminal for either. The offset lives in memory, so no counter on disk can
   # go stale and re-fire the same restart every few seconds.
-  local dir="$1" cur="" off_file="" off=0 n f line tries=0
+  local dir="$1" cur="" off_file="" off=0 n f line tries=0 last=0 now
   set +e
   set +o pipefail
   while :; do
@@ -658,6 +658,12 @@ ea_watchdog() { # DIR
       while IFS= read -r line; do
         case "$line" in
           *'symbol synchronization timeout'*|*'expert '*removed*)
+            now=$(date +%s)
+            # The restart budget belongs to an incident, not to the container:
+            # after ten quiet minutes a fresh removal gets a fresh set of tries
+            # instead of going straight to "needs you".
+            [ "$last" -gt 0 ] && [ $((now - last)) -gt 600 ] && tries=0
+            last="$now"
             tries=$((tries + 1))
             log "WATCHDOG: the EA left the chart (attempt $tries/6): $line"
             if [ "$tries" -le 6 ]; then
