@@ -336,11 +336,6 @@ sync_ea() {
   log "synced $(basename "$EA_SRC") into the volume"
   if compgen -G "/opt/ea/presets/${MT5_PRESET}.set" >/dev/null; then
     cp -f "/opt/ea/presets/${MT5_PRESET}.set" "$dest_set/"
-    if [ -n "${MT5_NOTIFY_URL:-}" ]; then
-      sed -i "s|^InpNotifyUrl=.*|InpNotifyUrl=${MT5_NOTIFY_URL}|" \
-        "$dest_set/${MT5_PRESET}.set" 2>/dev/null || true
-      log "notify target injected into ${MT5_PRESET}.set from MT5_NOTIFY_URL"
-    fi
     log "synced preset ${MT5_PRESET}.set into the volume"
   else
     warn "preset /opt/ea/presets/${MT5_PRESET}.set does not exist - the EA will run on its input defaults"
@@ -641,10 +636,12 @@ ea_watchdog() { # DIR
           tries=$((tries + 1))
           if [ "$tries" -le 6 ]; then
             log "WATCHDOG: the EA died waiting for $MT5_SYMBOL to synchronize (attempt $tries/6) - restarting terminal64.exe so it re-attaches"
+            hex_push "EA-RESTART" "The EA was removed (symbol synchronization timeout on $MT5_SYMBOL). Restarting the terminal, attempt $tries/6."
             sleep 3
             kill "$TERMINAL_PID" 2>/dev/null || true
           else
             log "WATCHDOG: 6 symbol-sync restarts did not stick. Finish it on the desktop: Market Watch (Ctrl+M) -> find '$MT5_SYMBOL' -> double-click it so its price ticks -> make sure the chart draws candles -> Ctrl+E is auto-trading on. After that the chart state is saved on the volume and survives reboots."
+            hex_push "NEEDS-YOU" "6 automatic restarts did not get the EA attached to $MT5_SYMBOL. Open the VNC desktop: Ctrl+M, double-click the symbol, confirm the chart ticks, Ctrl+E."
             sleep 900
           fi
         fi
@@ -678,6 +675,98 @@ desktop_keeper() {
       WEBSOCKIFY_PID=$!
     fi
     sleep 20
+  done
+}
+
+# ---------------------------------------------------------------- pushes ---
+# Notifications are sent from the CONTAINER, not from MQL5. MT5's WebRequest
+# refuses any URL that is not whitelisted in Tools > Options > Expert Advisors,
+# and that whitelist can only be filled by clicking in the GUI - exactly what a
+# headless box must not depend on. curl has no such gate.
+hex_push() { # TITLE BODY
+  [ -n "${MT5_NOTIFY_URL:-}" ] || return 0
+  local title="$1" body="$2" code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -H "Title: HEX-BoomRider $title" \
+    -H "Content-Type: text/plain" \
+    -H "Tags: chart_with_upwards_trend" \
+    --data-binary "$body" "$MT5_NOTIFY_URL" 2>/dev/null) || code=000
+  case "$code" in
+    2*) log "push sent ($title)" ;;
+    *)  warn "push FAILED ($title): HTTP $code from $MT5_NOTIFY_URL" ;;
+  esac
+}
+
+# Turn the EA's own CSV rows into phone pushes. The EA writes one row per
+# event (BUY / BLOWN / SKIP / ERROR / INIT); only the ones worth a buzz are
+# forwarded, so a quiet market does not spam the phone.
+push_watcher() {
+  local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
+  local state="${TMPDIR:-/tmp}/hex-push" f n p line
+  set +e
+  set +o pipefail
+  [ -n "${MT5_NOTIFY_URL:-}" ] || return 0
+  mkdir -p "$state" 2>/dev/null || true
+  # Start from the current end of file: no replay of yesterday's trades.
+  for f in "$ea_dir"/*.csv; do
+    [ -f "$f" ] || continue
+    n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
+    printf '%s\n' "$n" > "$state/$(basename "$f").seen" 2>/dev/null || true
+  done
+  while :; do
+    for f in "$ea_dir"/*.csv; do
+      [ -f "$f" ] || continue
+      local s="$state/$(basename "$f").seen"
+      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]'); p=${p:-0}
+      case "$p" in ''|*[!0-9]*) p=0 ;; esac
+      [ "$n" -lt "$p" ] && p=0
+      if [ "$n" -gt "$p" ]; then
+        while IFS= read -r line; do
+          case "$line" in
+            *,BUY,*)    hex_push "BUY"   "$line" ;;
+            *,CLOSE,*)  hex_push "CLOSE" "$line" ;;
+            *,BLOWN,*)  hex_push "BLOWN" "$line" ;;
+            *,ERROR,*)  hex_push "ERROR" "$line" ;;
+          esac
+        done < <(tail -n "+$((p + 1))" "$f" 2>/dev/null)
+        printf '%s\n' "$n" > "$s" 2>/dev/null || true
+      fi
+    done
+    sleep 5
+  done
+}
+
+# "Trader enabled" and "robot running" are not the same thing - last night
+# proved it: the EA had been removed hours earlier and the only outward sign
+# was an Experts tab with nothing in it. The EA rewrites its heartbeat file
+# every InpHeartbeatSec; if that file stops moving, the EA is not on the chart
+# no matter what the AutoTrading button says. Buzz once, then every 6h.
+silence_watcher() {
+  local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+  local limit="${HEX_SILENCE_MIN:-20}" age now mtime warned=0 last=0
+  set +e
+  while :; do
+    sleep 300
+    now=$(date +%s)
+    if [ -f "$hb" ]; then
+      mtime=$(stat -c %Y "$hb" 2>/dev/null || echo 0)
+      age=$(( (now - mtime) / 60 ))
+    else
+      age=9999
+    fi
+    if [ "$age" -ge "$limit" ]; then
+      if [ "$warned" -eq 0 ] || [ $(( now - last )) -ge 21600 ]; then
+        warned=1; last=$now
+        log "SILENCE: the EA has not written a heartbeat for ${age}m - it is NOT running on the chart (an enabled AutoTrading button does not mean the robot is attached)"
+        hex_push "NOT-RUNNING" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}. The robot is not attached to the chart - nothing is trading. Check the container logs / VNC desktop."
+      fi
+    elif [ "$warned" -eq 1 ]; then
+      warned=0
+      log "SILENCE: heartbeat is back (${age}m old) - the EA is running again"
+      hex_push "RUNNING" "EA heartbeat is back on ${MT5_SYMBOL} - the robot is trading again."
+    fi
   done
 }
 
@@ -728,6 +817,9 @@ main() {
   journal_hints "$MT5DIR/logs" &
   ea_watchdog "$MT5DIR/logs" &
   desktop_keeper &
+  push_watcher &
+  silence_watcher &
+  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ERROR and BLOWN."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   set +e

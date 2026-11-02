@@ -9,5 +9,8 @@ InpMaxSpreadPct=0.03
 InpMagic=400400
 InpHeartbeatSec=60
 InpLogDir=HEX-Logs
-InpNotifyUrl=https://ntfy.sh/hex-boomrider-change-me
-InpNotifyTest=true
+; Pushes are sent by the CONTAINER (curl -> MT5_NOTIFY_URL), not by the EA:
+; MQL5's WebRequest only accepts URLs whitelisted by hand in the terminal GUI,
+; which a headless box must not depend on. Leave these two alone.
+InpNotifyUrl=
+InpNotifyTest=false
