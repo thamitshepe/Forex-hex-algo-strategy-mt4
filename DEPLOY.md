@@ -55,22 +55,26 @@
 > 5. First boot: watch the noVNC desktop once to confirm the login and that
 >    Volatility Boom 400 Index is ticking; the chart, EA and autotrading all come from
 >    `mt5.ini` now, so there is nothing else to click.
-> 6. **The blow rule:** when the phone alert says the account is blown
->    (equity ≤ 9990 — the $10 of headroom is gone), reset the demo account in
->    Deriv's portal, delete
->    `/data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt` (via the desktop or
->    a fresh volume), and it trades again. The halt survives restarts by design.
-> 7. **Sizing, and the skip that is not a fault.** Risk is 20% of the $10 of
->    headroom, but this broker's minimum lot is 0.10 and *one* of those risks
->    ~$5.97 against the 0.40% stop — 59.7% of the bankroll. `InpMaxRiskPct` is 60
->    in the preset for exactly that reason: at 50 no legal trade can satisfy the
->    cap, so `CalcLots` logs `min lot 0.10 would risk ... > cap ...` on every tick
->    and the EA never enters (the forever-loop of 2026-11-02). At 60 it takes one
->    minimum lot per signal, and two losses reach the halt at 9990 — that is the
->    design of a $10 bankroll, not a misconfiguration. Raising `InpRiskPct` does
->    not help: the risk-sized size (20% = $2.00) is below the lot floor either
->    way, and `Tools/boom_backtest.py` already floors to `min_lot`, so it always
->    assumed the minimum lot was the trade.
+> 6. **The blow rule, and the weekly $20.** The halt is `equity ≤ 9980` — the $20
+>    of headroom is gone. That $20 is the unit of risk: four losses of ~$4.54
+>    (the 0.30% stop on a 0.10 lot) fit inside it, and the survivors are meant to
+>    compound. When the phone says BLOWN: reset the demo account in Deriv's
+>    portal (or deposit $20 more), delete
+>    `/data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt` (via the desktop or a
+>    fresh volume), and it trades again. The halt survives restarts by design, so
+>    a blown run cannot quietly resume on the next reboot.
+> 7. **Sizing, and the skip that is not a fault.** Risk is 20% of the headroom,
+>    but this broker's minimum lot is 0.10 and the headroom starts at $20, so the
+>    first trades are the *minimum lot* at ~22.7% of the headroom ($4.54 against
+>    the 0.30% stop). That is the price of the lot step, not a misconfiguration:
+>    once the run profits, sizing scales with the headroom (0.20 lots at ~$45 of
+>    headroom, 0.30 at ~$68) because `CalcLots` sizes off equity and floors to the
+>    0.10 step. `InpMaxRiskPct` is 50 (=$10), which admits the minimum lot with
+>    2.2x of headroom margin; at a smaller cap the EA logs
+>    `min lot 0.10 would risk ... > cap ...` and refuses every entry forever (the
+>    loop of 2026-11-02), and that refusal now names the bankroll it would need.
+>    `Tools/boom_backtest.py` floors to `min_lot` too, so it always assumed the
+>    minimum lot was the trade.
 
 
 The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**

@@ -237,21 +237,41 @@ check_contains "a SKIP is pushed once per reason, not on every tick" \
 
 echo "the EA carries the bankroll rule"
 EA="$HERE/../../MQL5/Experts/HEX-BoomRider.mq5"
+SET="$HERE/../../MQL5/Presets/HEX-BoomRider.set"
 if [ -f "$EA" ]; then
-  check_contains "blow line defaults to 9990" "InpBaselineEquity = 9990.0" "$(cat "$EA")"
+  check_contains "blow line defaults to 9980 (\$20 of headroom)" \
+    "InpBaselineEquity = 9980.0" "$(cat "$EA")"
   check_contains "effective bankroll is equity - baseline" "equity - InpBaselineEquity" "$(cat "$EA")"
   check_contains "the blow alert pushes to the phone" "SendNotification" "$(cat "$EA")"
   check_contains "and writes a marker so the halt survives restarts" "BlownMarkerExists" "$(cat "$EA")"
   check_contains "no entry is priced off a one-sided or missing quote" \
     "ask <= 0.0 || bid <= 0.0" "$(cat "$EA")"
-  # 0.10 lots risk ~$5.97 = 59.7% of the $10 bankroll, so a 50% cap rejected every
-  # entry forever: the cap has to admit the broker's minimum lot or nothing trades.
-  check_contains "the min-lot cap admits the broker's 0.10 minimum" \
-    "InpMaxRiskPct     = 60.0" "$(cat "$EA")"
+  # The $20 unit of risk is what the bracket was chosen against: a 0.30% stop on
+  # a 0.10 lot costs ~$4.54, so four losses fit the headroom, and the 50% cap
+  # ($10) admits that minimum lot with 2.2x of margin. A cap the minimum lot
+  # cannot satisfy refuses every entry forever (the loop of 2026-11-02).
+  check_contains "the min-lot cap admits the broker's 0.10 minimum with margin" \
+    "InpMaxRiskPct     = 50.0" "$(cat "$EA")"
+  check_contains "and the bracket breaks even below 60%" \
+    "InpTakeProfitPct  = 0.25" "$(cat "$EA")"
+  check_contains "with a stop four losses can absorb" \
+    "InpStopLossPct    = 0.30" "$(cat "$EA")"
+  # A 0.30% stop is ~45 points; the broker can refuse anything tighter than its
+  # stops level, and this EA has never placed an order yet, so log the floor and
+  # widen rather than fail the first entry.
+  check_contains "the broker's own stops level is logged at init" \
+    "SYMBOL_TRADE_STOPS_LEVEL" "$(cat "$EA")"
+  check_contains "and a bracket tighter than it is widened, not failed" \
+    "double stopsDist = (double)SymbolInfoInteger" "$(cat "$EA")"
   check_eq "preset exists beside it" "1" \
-    "$([ -f "$HERE/../../MQL5/Presets/HEX-BoomRider.set" ] && echo 1)"
-  check_contains "and the preset carries the same cap" "InpMaxRiskPct=60.0" \
-    "$(cat "$HERE/../../MQL5/Presets/HEX-BoomRider.set")"
+    "$([ -f "$SET" ] && echo 1)"
+  # EA default and preset have to agree, or the preset silently wins.
+  for kv in "InpBaselineEquity=9980.0" "InpRiskPct=20.0" "InpMaxRiskPct=50.0" \
+            "InpTakeProfitPct=0.25" "InpStopLossPct=0.30"; do
+    check_contains "preset carries $kv" "$kv" "$(cat "$SET")"
+  done
+  check_contains "and the preset is honest about which lot is traded at \$20" \
+    "FOUR losses fit in \$20" "$(cat "$SET")"
   # A SKIP repeated twice a second for hours is how "nothing is trading" stayed
   # invisible for a night; and a refusal has to name what would fix it.
   check_contains "repeated SKIPs are throttled to one per reason per minute" \

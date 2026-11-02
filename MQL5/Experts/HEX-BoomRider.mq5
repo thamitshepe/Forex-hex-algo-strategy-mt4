@@ -21,17 +21,18 @@
 
 #include <Trade/Trade.mqh>
 
-input double InpBaselineEquity = 9990.0;   // Blow line: equity at/below this = blown
+input double InpBaselineEquity = 9980.0;   // Blow line: equity at/below this = blown ($20 of headroom)
 input double InpRiskPct        = 20.0;     // Risk % of effective bankroll per trade
-input double InpMaxRiskPct     = 60.0;     // Never risk more than this % of the bankroll (min-lot guard)
-// Why 60 and not 50: this account's broker minimum is 0.10 lots, and one of them
-// risks ~$5.97 against the $10 bankroll - 59.7%. A 50% cap could therefore never
-// be met by any legal trade and CalcLots refused every entry, forever (the
-// "min lot 0.10 would risk 5.9748 > cap 50.00% of 10.00" loop of 2026-11-02).
-// 60% admits exactly that one minimum lot; the shortfall between the risk-sized
-// size (20% = $2.00) and the floor is the price of the broker's lot step.
-input double InpTakeProfitPct  = 0.15;     // TP: % above entry
-input double InpStopLossPct    = 0.40;     // SL: % below entry
+input double InpMaxRiskPct     = 50.0;     // Never risk more than this % of the bankroll (min-lot guard)
+// Why this bracket and this cap - measured, not guessed (Tools/boom_backtest.py,
+// 200k ticks x 4 model calibrations, 0.10 lots at an ask of ~15122):
+//   SL 0.30% -> a loss costs $4.54 = 22.7% of the $20 headroom, so FOUR losses
+//   fit before the halt (0.40% cost $6.05: only three fit) and the 50% cap ($10)
+//   still admits one minimum lot after the index rises ~2.2x.
+//   TP 0.25% -> break-even win rate 54.5%, against 72.7% for the 0.15/0.40
+//   bracket the first preset used (which paid $2.27 a win for a $6.05 loss).
+input double InpTakeProfitPct  = 0.25;     // TP: % above entry
+input double InpStopLossPct    = 0.30;     // SL: % below entry
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %
 input long   InpMagic          = 400400;   // Magic number
 input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval
@@ -64,6 +65,19 @@ int OnInit()
    FolderCreate(InpLogDir);
    Log("INIT", StringFormat("baseline=%.2f risk=%.1f%% tp=%.2f%% sl=%.2f%% blown=%d",
        InpBaselineEquity, InpRiskPct, InpTakeProfitPct, InpStopLossPct, blown));
+   // The broker's own floor on this symbol, logged once: a bracket tighter than
+   // the stops level is refused with "Invalid stops", and until now this EA had
+   // never placed an order, so we had no idea what the floor was.
+   Log("INIT", StringFormat("broker: stops=%d freeze=%d points, vol min=%.2f max=%.2f step=%.2f, "
+       "tick value=%s size=%s, digits=%d",
+       (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL),
+       (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL),
+       SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
+       SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX),
+       SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
+       DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), 5),
+       DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), 5),
+       (int)_Digits));
    NotifyAnnounce();
    if(InpNotifyTest)
       Notify("HELLO", StringFormat("HEX-BoomRider online on %s, equity %.2f. "
@@ -133,6 +147,17 @@ void OnTick()
 
    double slDist = ask * InpStopLossPct  / 100.0;
    double tpDist = ask * InpTakeProfitPct / 100.0;
+   // A bracket tighter than the broker's stops level is refused outright
+   // ("Invalid stops"), so widen to the floor instead of failing the entry - and
+   // wide the stop means the risk below is sized off the widened distance.
+   double stopsDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(stopsDist > 0.0)
+   {
+      if(slDist < stopsDist)
+         slDist = stopsDist;
+      if(tpDist < stopsDist)
+         tpDist = stopsDist;
+   }
    double sl = NormalizeDouble(ask - slDist, _Digits);
    double tp = NormalizeDouble(ask + tpDist, _Digits);
 
