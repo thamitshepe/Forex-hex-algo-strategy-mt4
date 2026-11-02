@@ -67,6 +67,15 @@ RUN set -eux; \
     md="$(find /tmp/distro -maxdepth 4 -iname terminal64.exe -printf '%h\n' -quit)"; \
     echo "[ea-check] compiling with the terminal at: ${md:-<none>}"; \
     test -n "$md"; \
+    # A distro without the standard include tree makes metaeditor report
+    # "file 'Include\Trade\Trade.mqh' not found" against the EA's own #include,
+    # which reads like a source error and is not one. Say which it is, up front.
+    if [ ! -f "$md/MQL5/Include/Trade/Trade.mqh" ]; then \
+      echo "[ea-check] the distro has no MQL5/Include/Trade/Trade.mqh; found:"; \
+      find /tmp/distro -name 'Trade.mqh' -o -name 'Include' -maxdepth 5 | head -5 || true; \
+      echo "[ea-check] refusing to blame the EA for a distro problem"; \
+      exit 1; \
+    fi; \
     cp /opt/ea/HEX-BoomRider.mq5 "$md/MQL5/Experts/"; \
     mkdir -p "$md/MQL5/Presets"; cp /opt/ea/presets/*.set "$md/MQL5/Presets/" 2>/dev/null || true; \
     rm -f "$md/MQL5/Experts/HEX-BoomRider.ex5"; \
@@ -84,7 +93,7 @@ RUN set -eux; \
       for h in "$td"/*/; do \
         [ -d "$h" ] || continue; \
         mkdir -p "$h/MQL5"; \
-        cp -a "$md/MQL5/Include" "$h/MQL5/"; \
+        cp -a "$md/MQL5/Include" "$h/MQL5/" || true; \
       done; \
       cd "$md" \
       && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
@@ -92,8 +101,14 @@ RUN set -eux; \
       || true; \
       wineserver -w || true; \
     fi; \
-    tail -c 2000 /tmp/metaeditor.out || true; \
-    test -f "$md/MQL5/Experts/HEX-BoomRider.ex5" || { cat "$md/MQL5/Experts/compile.log" 2>/dev/null; exit 1; }; \
+    tail -c 4000 /tmp/metaeditor.out | tr -d '\000' || true; \
+    # metaeditor writes compile.log in UTF-16; cat alone prints NULs and CI greps
+    # for "error" find nothing, which is how a compile error once looked like a
+    # mystery failure. Decode it before anyone has to read it.
+    test -f "$md/MQL5/Experts/HEX-BoomRider.ex5" || { \
+      tr -d '\000' < "$md/MQL5/Experts/compile.log" 2>/dev/null | tail -40 || true; \
+      exit 1; \
+    }; \
     cp "$md/MQL5/Experts/HEX-BoomRider.ex5" /opt/ea-built/; \
     cp "$md/MQL5/Experts/compile.log" /opt/ea-built/; \
     echo "[ea-check] HEX-BoomRider.ex5 compiled clean"

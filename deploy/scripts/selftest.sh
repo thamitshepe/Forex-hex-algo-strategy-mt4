@@ -318,6 +318,15 @@ else
 fi
 check_eq "backtest still compiles" "0" \
   "$(python3 -m py_compile "$HERE/../../Tools/boom_backtest.py" >/dev/null 2>&1 && echo 0 || echo 1)"
+# The EA compile check lives in the image build. metaeditor writes its log in
+# UTF-16, so reading it with plain cat prints NULs and a real compile error looks
+# like a mystery failure; and a distro missing MQL5/Include reports the EA's own
+# #include as "not found", which is not the EA's fault either.
+DOCKERFILE="$HERE/../Dockerfile"
+check_contains "the EA compile log is decoded before it is read" \
+  "tr -d '\\000' < " "$(cat "$DOCKERFILE")"
+check_contains "a distro without the include tree is named as such" \
+  "refusing to blame the EA for a distro problem" "$(cat "$DOCKERFILE")"
 
 
 echo "dokploy-apply"
