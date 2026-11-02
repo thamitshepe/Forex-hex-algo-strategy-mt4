@@ -730,10 +730,12 @@ hex_push() { # TITLE BODY
 }
 
 # Turn the EA's own CSV rows into phone pushes. The EA writes one row per
-# event (INIT / BUY / CLOSE / BLOWN / SKIP / ERROR): BUY, CLOSE, BLOWN and ERROR
-# are forwarded every time, and the first SKIP of each distinct reason once per
-# run - so a quiet market does not spam the phone, but "nothing is trading" is
-# never silent either.
+# event (INIT / BUY / CLOSE / ADD / LOCKIN / TRAIL / EPISODE / BLOWN / SKIP /
+# ERROR): BUY, CLOSE, ADD, BLOWN and ERROR are forwarded every time, and the
+# first SKIP of each distinct reason once per run - so a quiet market does not
+# spam the phone, but "nothing is trading" is never silent either. ADD is the
+# one to watch for: it is the EA putting a second (third, fourth) leg on a trade
+# that is already in profit, i.e. a spike being multiplied.
 push_watcher() {
   local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
   local followed=" " f n line
@@ -755,6 +757,7 @@ push_watcher() {
           case "$line" in
             *,BUY,*)    hex_push "BUY"   "$line" ;;
             *,CLOSE,*)  hex_push "CLOSE" "$line" ;;
+            *,ADD,*)    hex_push "ADD"   "$line (profit leg added - the spike is being multiplied)" ;;
             *,BLOWN,*)  hex_push "BLOWN" "$line" ;;
             *,ERROR,*)  hex_push "ERROR" "$line" ;;
             *,SKIP,*)
@@ -883,7 +886,7 @@ main() {
   desktop_keeper &
   push_watcher &
   silence_watcher &
-  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ERROR and BLOWN - plus the first SKIP of each reason if the EA cannot size a trade."
+  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ADD, ERROR and BLOWN - ADD means the EA just put another leg on a trade that is already in profit - plus the first SKIP of each reason if the EA cannot size a trade."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   set +e

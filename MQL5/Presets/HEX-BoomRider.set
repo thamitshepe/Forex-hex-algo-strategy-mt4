@@ -13,6 +13,27 @@ InpRiskPct=20.0
 InpMaxRiskPct=50.0
 InpTakeProfitPct=0.25
 InpStopLossPct=0.30
+; --- management: bank the measured target, then let the spike pay more ------
+; A spike on Boom 400 is a single-tick JUMP, so an early break-even or a
+; mid-target partial has nothing to act on (measured identical), and cutting a
+; bleeding trade early loses 32% of the profit rate. What pays is the opposite:
+; keep the 0.25% target on the base leg, and add legs while the spike is
+; happening, funded only out of profit already made, all sharing one stop that
+; steps up to entry+0.05% and then trails 0.30% behind the price.
+; Measured, 100k ticks x 4 seeds, $20 headroom, worst calibration:
+;   base only                                        $14.18/h, best trade $5
+;   + this ladder (cap 30% of headroom)              $39.06/h, best trade $335
+;   average loss $6.60 -> $3.20, 6 episodes at 10x a base win, 0/4 blown.
+; The 30% ladder cap is what keeps one bad episode inside the 3-loss budget.
+InpLockInPct=0.05
+InpBackstopTPPct=1.00
+InpTrailPct=0.30
+InpTrailStartPct=0.40
+InpMaxAdds=3
+InpAddAtPct=0.20
+InpAddRiskPct=100.0
+InpMaxLadderLots=0.40
+InpMaxLadderRiskPct=30.0
 InpMaxSpreadPct=0.03
 InpMagic=400400
 InpHeartbeatSec=60

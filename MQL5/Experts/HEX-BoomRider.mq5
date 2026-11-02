@@ -31,8 +31,27 @@ input double InpMaxRiskPct     = 50.0;     // Never risk more than this % of the
 //   still admits one minimum lot after the index rises ~2.2x.
 //   TP 0.25% -> break-even win rate 54.5%, against 72.7% for the 0.15/0.40
 //   bracket the first preset used (which paid $2.27 a win for a $6.05 loss).
-input double InpTakeProfitPct  = 0.25;     // TP: % above entry
+input double InpTakeProfitPct  = 0.25;     // TP: % above entry (measured target, base leg only)
 input double InpStopLossPct    = 0.30;     // SL: % below entry
+// Management. On Boom 400 a spike is a single-tick JUMP: the price never rests
+// between the entry and the target, so an "early break-even at +0.08%" or a
+// "partial at +0.12%" has nothing to act on (measured: identical results with
+// and without), and cutting a bleeding trade early loses money (a bleeding trade
+// is only waiting for its spike: -32% $/h). What does pay is the opposite: keep
+// the base target, and give the spike somewhere to go - add legs while it is
+// happening, funded strictly out of profit, all sharing one stop that only ever
+// moves up. 100k ticks x 4 seeds, $20 headroom, worst calibration:
+//   base only                                    $11.81/h, best trade $5
+//   + adds x3 from +0.20%, shared stop + trail   $42.81/h, best trade $328, 0 blown
+input double InpLockInPct      = 0.05;     // Once up this %, the shared stop sits this % ABOVE entry
+input double InpBackstopTPPct  = 1.00;     // Distant broker TP, so a position is never target-less
+input double InpTrailPct       = 0.30;     // Trail the shared stop this % behind the price
+input double InpTrailStartPct  = 0.40;     // ... once the trade is this % in profit
+input int    InpMaxAdds        = 3;        // Pyramid: max adds per trade
+input double InpAddAtPct       = 0.20;     // Pyramid: first add at this % in profit, then every...
+input double InpAddRiskPct     = 100.0;    // ... risking at most this % of the profit already made
+input double InpMaxLadderLots  = 0.40;     // Hard cap on ladder exposure
+input double InpMaxLadderRiskPct = 30.0;   // ... and its total stop risk, % of headroom (3-loss budget)
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %
 input long   InpMagic          = 400400;   // Magic number
 input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval
@@ -51,6 +70,14 @@ double   riskToday     = 0.0;
 string   lastSkipKey   = "";
 datetime lastSkipAt    = 0;
 
+// --- the current episode: one base trade plus the adds it has earned -------
+double   episodeBase    = 0.0;    // base entry: the reference for every % below
+double   episodeBaseLots = 0.0;   // volume of the base leg (what the target banks)
+double   episodeBooked  = 0.0;    // money this episode has already banked
+bool     episodeBanked  = false;  // the base leg has taken its target
+int      episodeAdds    = 0;      // adds placed so far this episode
+double   ladderStopLast = 0.0;    // last stop we pushed (log a move only once)
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -65,6 +92,10 @@ int OnInit()
    FolderCreate(InpLogDir);
    Log("INIT", StringFormat("baseline=%.2f risk=%.1f%% tp=%.2f%% sl=%.2f%% blown=%d",
        InpBaselineEquity, InpRiskPct, InpTakeProfitPct, InpStopLossPct, blown));
+   Log("INIT", StringFormat("manage: lock-in=%.2f%% trail=%.2f%% from %.2f%%, adds<=%d every "
+       "%.2f%% risking %.0f%% of profit, ladder<=%.2f lots / %.0f%% of headroom",
+       InpLockInPct, InpTrailPct, InpTrailStartPct, InpMaxAdds, InpAddAtPct,
+       InpAddRiskPct, InpMaxLadderLots, InpMaxLadderRiskPct));
    // The broker's own floor on this symbol, logged once: a bracket tighter than
    // the stops level is refused with "Invalid stops", and until now this EA had
    // never placed an order, so we had no idea what the floor was.
@@ -127,7 +158,10 @@ void OnTick()
    if(effective <= 0.0)
       return;
 
-   // --- one position at a time; enter long when flat ---
+   // --- manage what is open before deciding anything: bank, protect, trail, pyramid
+   ManageLadder(effective);
+
+   // --- one episode at a time; enter long only when flat
    if(HasOpenPosition())
       return;
 
@@ -146,7 +180,10 @@ void OnTick()
    }
 
    double slDist = ask * InpStopLossPct  / 100.0;
-   double tpDist = ask * InpTakeProfitPct / 100.0;
+   // The base leg's *target* is taken by the EA (BankBaseLeg) so that the legs
+   // the ladder adds can keep running past it; the broker TP is only a distant
+   // backstop so a position is never target-less if this terminal dies.
+   double tpDist = ask * InpBackstopTPPct / 100.0;
    // A bracket tighter than the broker's stops level is refused outright
    // ("Invalid stops"), so widen to the floor instead of failing the entry - and
    // wide the stop means the risk below is sized off the widened distance.
@@ -173,7 +210,14 @@ void OnTick()
    {
       tradesToday++;
       riskToday += effective * InpRiskPct / 100.0;
-      Log("BUY", StringFormat("lots=%.2f entry~%.2f sl=%.2f tp=%.2f eff=%.2f",
+      // the fill is the reference for every % the management reasons about
+      episodeBase     = trade.ResultPrice() > 0.0 ? trade.ResultPrice() : ask;
+      episodeBaseLots = lots;
+      episodeBooked   = 0.0;
+      episodeBanked   = false;
+      episodeAdds     = 0;
+      ladderStopLast  = 0.0;
+      Log("BUY", StringFormat("lots=%.2f entry~%.2f sl=%.2f backstop-tp=%.2f eff=%.2f",
           lots, ask, sl, tp, effective));
    }
    else
@@ -208,12 +252,15 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       string how = (reason == DEAL_REASON_TP) ? "TP hit"
                  : (reason == DEAL_REASON_SL) ? "SL hit"
                  : "closed";
+      double closed = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
+                    + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
+                    + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
+      // money this episode has actually booked: it is what funds the next add
+      episodeBooked += closed;
       Notify("CLOSE", StringFormat("%s - %.2f lots, P/L %.2f, equity %.2f",
              how,
              HistoryDealGetDouble(trans.deal, DEAL_VOLUME),
-             HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
-               + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
-               + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION),
+             closed,
              AccountInfoDouble(ACCOUNT_EQUITY)));
    }
 }
@@ -265,22 +312,316 @@ double CalcLots(double effective, double slDist)
 }
 
 //+------------------------------------------------------------------+
-bool HasOpenPosition()
+//| The ladder. Every position this EA owns on this symbol: a netting  |
+//| account holds one aggregate position, a hedging account holds one  |
+//| per add, and looping tickets is correct for both.                  |
+//+------------------------------------------------------------------+
+bool LadderSelect(const int i)
 {
-   if(!PositionSelect(_Symbol))
+   ulong t = PositionGetTicket(i);
+   if(t == 0 || !PositionSelectByTicket(t))
+      return false;
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol)
       return false;
    return (PositionGetInteger(POSITION_MAGIC) == InpMagic);
+}
+
+int LadderCount()
+{
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(LadderSelect(i))
+         n++;
+   return n;
+}
+
+double LadderLots()
+{
+   double lots = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(LadderSelect(i))
+         lots += PositionGetDouble(POSITION_VOLUME);
+   return lots;
+}
+
+double LadderFloat()          // unrealised P/L of the whole ladder
+{
+   double pl = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(LadderSelect(i))
+         pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   return pl;
+}
+
+double LadderStop()           // the highest stop on the ladder = the shared one
+{
+   double stop = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(LadderSelect(i))
+         stop = MathMax(stop, PositionGetDouble(POSITION_SL));
+   return stop;
+}
+
+double LadderLowestEntry()
+{
+   double entry = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!LadderSelect(i))
+         continue;
+      double p = PositionGetDouble(POSITION_PRICE_OPEN);
+      entry = (entry <= 0.0) ? p : MathMin(entry, p);
+   }
+   return entry;
+}
+
+// one episode at a time: flat means the base trade is still to be opened
+bool HasOpenPosition()
+{
+   return (LadderCount() > 0);
 }
 
 //+------------------------------------------------------------------+
 void CloseEverything()
 {
-   if(PositionSelect(_Symbol) && PositionGetInteger(POSITION_MAGIC) == InpMagic)
-      trade.PositionClose(_Symbol);
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!LadderSelect(i))
+         continue;
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      if(trade.PositionClose(ticket))
+         Log("CLOSE", StringFormat("halt: closed #%I64u %.2f lots",
+             ticket, PositionGetDouble(POSITION_VOLUME)));
+   }
 }
 
 //+------------------------------------------------------------------+
-//| Notifications: ntfy when InpNotifyUrl is set (plain-text POST),  |
+//| Money lost by one lot over a given price distance, from the       |
+//| symbol's own tick value (the same arithmetic CalcLots uses).      |
+//+------------------------------------------------------------------+
+double MoneyPerLot(double dist)
+{
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tickValue <= 0.0 || tickSize <= 0.0 || dist <= 0.0)
+      return 0.0;
+   return dist / tickSize * tickValue;
+}
+
+//+------------------------------------------------------------------+
+//| What the ladder loses if every position stops where it is set.    |
+//| A position whose stop is above its entry contributes nothing.     |
+//+------------------------------------------------------------------+
+double LadderStopRisk()
+{
+   double risk = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!LadderSelect(i))
+         continue;
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double stop  = PositionGetDouble(POSITION_SL);
+      double lots  = PositionGetDouble(POSITION_VOLUME);
+      if(stop > 0.0 && entry > stop)
+         risk += MoneyPerLot(entry - stop) * lots;
+   }
+   return risk;
+}
+
+//+------------------------------------------------------------------+
+//| Push the shared stop up. It only ever tightens, a broker refusal  |
+//| (stops level, freeze) is logged rather than swallowed, and each   |
+//| level is logged once instead of once per tick.                    |
+//+------------------------------------------------------------------+
+int ApplyLadderStop(double stop, string why)
+{
+   if(stop <= 0.0 || !MathIsValidNumber(stop))
+      return 0;
+   double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double floorDist = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double newSl = NormalizeDouble(stop, _Digits);
+   if(bid > 0.0 && floorDist > 0.0 && bid - newSl < floorDist)
+      newSl = NormalizeDouble(bid - floorDist, _Digits);
+   int moved = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!LadderSelect(i))
+         continue;
+      if(newSl <= PositionGetDouble(POSITION_SL) + _Point / 2.0)
+         continue;                     // never loosen a stop
+      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      if(trade.PositionModify(ticket, newSl, PositionGetDouble(POSITION_TP)))
+         moved++;
+      else
+         Log("ERROR", StringFormat("stop move #%I64u -> %.2f refused: %d %s",
+             ticket, newSl, trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+   }
+   if(moved > 0 && (ladderStopLast <= 0.0 || MathAbs(newSl - ladderStopLast) > _Point / 2.0))
+   {
+      ladderStopLast = newSl;
+      double pct = (episodeBase > 0.0) ? (newSl - episodeBase) / episodeBase * 100.0 : 0.0;
+      Log(why, StringFormat("%d position(s) stop -> %.2f (%+.3f%% vs entry %.2f)",
+          moved, newSl, pct, episodeBase));
+   }
+   return moved;
+}
+
+//+------------------------------------------------------------------+
+//| Take the measured target on the BASE leg and leave the rest of the |
+//| ladder running. Closing exactly the base volume, oldest ticket      |
+//| first, does the same thing on a netting account (a partial close of |
+//| the aggregate) and on a hedging account (the base ticket), which is |
+//| what the backtest models. A broker TP could not: on netting it      |
+//| would close the whole ladder at the target and kill the ride.       |
+//+------------------------------------------------------------------+
+void BankBaseLeg()
+{
+   if(episodeBanked || InpTakeProfitPct <= 0.0 || episodeBaseLots <= 0.0)
+      return;
+   episodeBanked = true;                 // one look per episode, whatever happens
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0.0)
+      step = 0.01;
+   double want = MathFloor(episodeBaseLots / step) * step;
+   double have = LadderLots();
+   if(want > have)
+      want = MathFloor(have / step) * step;
+   if(want < minLot || want <= 0.0)
+      return;
+   ulong ticket = 0;
+   datetime oldest = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      if(!LadderSelect(i))
+         continue;
+      datetime t = (datetime)PositionGetInteger(POSITION_TIME);
+      if(oldest == 0 || t < oldest)
+      {
+         oldest = t;
+         ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      }
+   }
+   if(ticket == 0)
+      return;
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(trade.PositionClosePartial(ticket, NormalizeDouble(want, 2)))
+      Notify("BANK", StringFormat("banked the base %.2f lots at %.2f (%+.3f%%), "
+             "%.2f lots still riding on the shared stop",
+             want, bid, (bid - episodeBase) / episodeBase * 100.0, LadderLots()));
+   else
+      Log("ERROR", StringFormat("bank %.2f lots refused: %d %s", want,
+          trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+}
+
+//+------------------------------------------------------------------+
+//| The one stop the whole ladder shares: never below where it already |
+//| is, never below the lock-in floor once the trade has paid, and      |
+//| trailing the peak once the trail is armed. It only ever moves up.   |
+//+------------------------------------------------------------------+
+double SharedStop(double bid, double pct)
+{
+   double stop = LadderStop();
+   if(InpLockInPct > 0.0 && episodeBase > 0.0 && pct >= InpLockInPct)
+      stop = MathMax(stop, episodeBase * (1.0 + InpLockInPct / 100.0));
+   if(InpTrailPct > 0.0 && pct >= InpTrailStartPct)
+      stop = MathMax(stop, bid * (1.0 - InpTrailPct / 100.0));
+   return stop;
+}
+
+//+------------------------------------------------------------------+
+//| Pyramid: add only out of money this episode has already made, at  |
+//| the shared stop, never past the ladder caps, and never risking     |
+//| more than the same headroom the base trade obeys.                  |
+//+------------------------------------------------------------------+
+void MaybeAdd(double effective, double bid, double pct, double stop)
+{
+   if(InpMaxAdds <= 0 || episodeAdds >= InpMaxAdds || InpAddRiskPct <= 0.0)
+      return;
+   if(pct < InpAddAtPct * (episodeAdds + 1))
+      return;
+   double dist        = bid - stop;
+   double moneyPerLot = MoneyPerLot(dist);
+   if(stop <= 0.0 || moneyPerLot <= 0.0)
+      return;
+
+   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0.0)
+      step = 0.01;
+   double budget = (episodeBooked + LadderFloat()) * InpAddRiskPct / 100.0;
+   double lots = MathFloor((budget / moneyPerLot) / step) * step;
+   lots = MathMin(lots, InpMaxLadderLots - LadderLots());
+   if(lots < minLot)
+      return;      // the episode has not made enough to pay for another leg
+
+   double cap = effective * InpMaxLadderRiskPct / 100.0;
+   if(LadderStopRisk() + lots * moneyPerLot > cap)
+   {
+      LogSkip("add", StringFormat("ladder risk %.2f + %.2f > cap %.2f",
+              LadderStopRisk(), lots * moneyPerLot, cap));
+      return;
+   }
+
+   if(!trade.Buy(lots, _Symbol, 0.0, NormalizeDouble(stop, _Digits), 0.0, "BoomRider add"))
+   {
+      Log("ERROR", StringFormat("add %.2f lots refused: %d %s",
+          lots, trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+      return;
+   }
+   episodeAdds++;
+   Notify("ADD", StringFormat("added %.2f lots at %.2f (%+.3f%%), ladder now %.2f lots, "
+          "stop %.2f, booked %.2f", lots, bid, pct, LadderLots(), stop, episodeBooked));
+}
+
+//+------------------------------------------------------------------+
+//| Every tick, before any entry decision: bank at the target, protect |
+//| the shared stop, trail it, then pyramid out of profit.             |
+//+------------------------------------------------------------------+
+void ManageLadder(double effective)
+{
+   if(LadderCount() == 0)
+   {
+      if(episodeBase > 0.0)
+         Log("EPISODE", StringFormat("flat again: %d add(s), booked %.2f this episode",
+             episodeAdds, episodeBooked));
+      episodeBase     = 0.0;
+      episodeBaseLots = 0.0;
+      episodeBooked   = 0.0;
+      episodeBanked   = false;
+      episodeAdds     = 0;
+      ladderStopLast  = 0.0;
+      return;
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0.0 || !MathIsValidNumber(bid))
+      return;
+   if(episodeBase <= 0.0)
+      episodeBase = LadderLowestEntry();      // rebuild the reference after a restart
+   if(episodeBase <= 0.0)
+      return;
+   double pct = (bid - episodeBase) / episodeBase * 100.0;
+
+   // 1. the base leg takes the measured target; the added legs keep running
+   if(pct >= InpTakeProfitPct)
+   {
+      BankBaseLeg();
+      if(LadderCount() == 0)
+         return;
+   }
+
+   // 2. the shared stop: lock-in floor once paid, then trail the peak. Every
+   //    position in the ladder gets it, so no add can ever give profit back.
+   double stop = SharedStop(bid, pct);
+   if(stop > LadderStop())
+      ApplyLadderStop(stop, pct >= InpTrailStartPct ? "TRAIL" : "LOCKIN");
+
+   // 3. pyramid, funded only by profit this episode has made
+   MaybeAdd(effective, bid, pct, stop);
+}
+
+
 //| MetaQuotes ID push otherwise. One log line per attempt outcome;  |
 //| a failing push must never disturb trading.                       |
 //+------------------------------------------------------------------+

@@ -280,6 +280,39 @@ if [ -f "$EA" ]; then
     "void LogSkip(string key, string detail)" "$(cat "$EA")"
   check_contains "and a refused size names the bankroll it would need" \
     "needs a bankroll of >= " "$(cat "$EA")"
+  # Position management. On this symbol a spike is a single-tick jump, so an
+  # early break-even / mid-target partial measures identical (nothing acts on it)
+  # and an early cut loses 32% of the profit rate; what pays is keeping the base
+  # target and adding legs out of profit behind a shared stop that only rises.
+  # The base leg's target is taken by the EA, not the broker: a broker TP on a
+  # netting account would close the whole ladder at the target and kill the ride.
+  check_contains "the base leg banks its target in the EA, not at the broker" \
+    "void BankBaseLeg()" "$(cat "$EA")"
+  check_contains "closing the partial by ticket works on netting and hedging" \
+    "trade.PositionClosePartial(ticket" "$(cat "$EA")"
+  check_contains "a distant broker TP still exists as a backstop" \
+    "InpBackstopTPPct  = 1.00" "$(cat "$EA")"
+  check_contains "the ladder stop can only ever tighten" \
+    "never loosen a stop" "$(cat "$EA")"
+  check_contains "one shared stop for every leg of the ladder" \
+    "double SharedStop(double bid, double pct)" "$(cat "$EA")"
+  check_contains "a break-even floor sits ABOVE entry, not at it" \
+    "episodeBase * (1.0 + InpLockInPct / 100.0)" "$(cat "$EA")"
+  check_contains "adds are sized from profit already made" \
+    "(episodeBooked + LadderFloat()) * InpAddRiskPct / 100.0" "$(cat "$EA")"
+  check_contains "an add that the trade cannot pay for is skipped, not forced" \
+    "the episode has not made enough to pay for another leg" "$(cat "$EA")"
+  check_contains "the ladder has a hard lot cap" \
+    "InpMaxLadderLots - LadderLots()" "$(cat "$EA")"
+  check_contains "and a risk cap inside the 3-loss budget" \
+    "InpMaxLadderRiskPct" "$(cat "$EA")"
+  check_contains "positions are found by magic, so netting and hedging both work" \
+    "if(PositionGetString(POSITION_SYMBOL) != _Symbol)" "$(cat "$EA")"
+  for kv in "InpLockInPct=0.05" "InpTrailPct=0.30" "InpTrailStartPct=0.40" \
+            "InpMaxAdds=3" "InpAddAtPct=0.20" "InpAddRiskPct=100.0" \
+            "InpMaxLadderLots=0.40" "InpMaxLadderRiskPct=30.0"; do
+    check_contains "preset carries $kv" "$kv" "$(cat "$SET")"
+  done
 else
   bad "EA exists at MQL5/Experts/HEX-BoomRider.mq5"
 fi

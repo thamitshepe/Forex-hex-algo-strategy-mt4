@@ -75,6 +75,44 @@
 >    loop of 2026-11-02), and that refusal now names the bankroll it would need.
 >    `Tools/boom_backtest.py` floors to `min_lot` too, so it always assumed the
 >    minimum lot was the trade.
+> 8. **Compounding a winner instead of just taking it.** The base trade keeps
+>    the 0.25% target, so it banks ~$3.78 the moment a spike reaches it. A spike
+>    on Boom 400 is a single-tick *jump*, though, so anything beyond the target
+>    used to be lost. The EA now adds legs while it is happening:
+>    - the base leg still takes the 0.25% target, but the **EA** takes it
+>      (closing exactly the base volume, oldest ticket first) instead of a broker
+>      TP: on a netting account a broker TP would close the whole ladder at the
+>      target and kill the ride. A distant `InpBackstopTPPct=1.00` remains, so no
+>      position is ever target-less if the terminal dies;
+>    - at +0.20% (before the target: the spike is still in progress) it may add
+>      one leg, then one more every further +0.20%, up to `InpMaxAdds=3`, i.e.
+>      0.10 → 0.20 → 0.30 → 0.40 lots;
+>    - every leg is sized from profit the episode has *already* made
+>      (`InpAddRiskPct=100` of booked + floating profit divided by the distance to
+>      the shared stop), so an add the trade cannot pay for is skipped, never
+>      forced: at a sustained 50% risk fraction no add ever reaches the 0.10 lot
+>      step, which is why the preset says 100;
+>    - all legs share **one** stop, which never loosens: at +0.05% it moves to
+>      entry **+0.05%** (a winner can no longer lose), and from +0.40% it trails
+>      0.30% behind the price. `LOCKIN`/`TRAIL` rows in the CSV show every move,
+>      `ADD` rows (and phone pushes) show every leg;
+>    - the ladder is capped twice: `InpMaxLadderLots=0.40` and
+>      `InpMaxLadderRiskPct=30` (=$6 of stop risk at $20 of headroom), so one bad
+>      episode stays inside the same 3-loss budget as one base stop-out.
+>    Measured by `Tools/boom_backtest.py` (100k ticks × 4 seeds, $20 headroom):
+>    base only `$14.18/h`, avg loss `$6.60`; with the ladder `$39.06/h`, avg loss
+>    `$3.20`, six episodes worth ≥10× a base win, best single trade `$335`, no
+>    run blown. Under the *pessimistic* calibration (spikes 0.15% mean instead of
+>    0.25%) the ladder can be a net negative, which is what the caps and the
+>    `InpMaxAdds=0` kill switch are for: set it to 0 and the EA is exactly the
+>    base strategy again.
+> 9. **What was measured and rejected.** An early break-even at +0.08%, a partial
+>    at +0.12%, and a time-stop that cuts a bleeding trade all look sensible and
+>    are all wrong on this symbol: the price *jumps*, so it never rests between
+>    the entry and the target, and break-even and mid-target partials change
+>    nothing at all (bit-identical results), while cutting a trade early throws
+>    away the spike it was waiting for (−32% $/h). Do not "improve" the EA by
+>    adding them back.
 
 
 The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**
