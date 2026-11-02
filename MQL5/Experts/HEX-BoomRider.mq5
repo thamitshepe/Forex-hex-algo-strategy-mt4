@@ -388,10 +388,10 @@ void CloseEverything()
    {
       if(!LadderSelect(i))
          continue;
-      ulong ticket = PositionGetInteger(POSITION_TICKET);
+      ulong  ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      double lots   = PositionGetDouble(POSITION_VOLUME);
       if(trade.PositionClose(ticket))
-         Log("CLOSE", StringFormat("halt: closed #%I64u %.2f lots",
-             ticket, PositionGetDouble(POSITION_VOLUME)));
+         Log("CLOSE", StringFormat("halt: closed #%I64u %.2f lots", ticket, lots));
    }
 }
 
@@ -438,7 +438,7 @@ int ApplyLadderStop(double stop, string why)
    if(stop <= 0.0 || !MathIsValidNumber(stop))
       return 0;
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double floorDist = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double floorDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
    double newSl = NormalizeDouble(stop, _Digits);
    if(bid > 0.0 && floorDist > 0.0 && bid - newSl < floorDist)
       newSl = NormalizeDouble(bid - floorDist, _Digits);
