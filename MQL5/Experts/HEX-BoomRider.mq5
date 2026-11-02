@@ -110,8 +110,13 @@ void OnTick()
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   // No quotes yet - right after a login, or while the terminal re-scans access
+   // points - and an entry priced off a zero ask would send a stop and a target
+   // to nowhere. Wait for a real two-sided quote; never divide before checking.
+   if(ask <= 0.0 || bid <= 0.0 || !MathIsValidNumber(ask) || !MathIsValidNumber(bid))
+      return;
    double spreadPct = (ask - bid) / ask * 100.0;
-   if(spreadPct > InpMaxSpreadPct)
+   if(!MathIsValidNumber(spreadPct) || spreadPct > InpMaxSpreadPct)
    {
       Log("SKIP", StringFormat("spread %.4f%% > max %.4f%%", spreadPct, InpMaxSpreadPct));
       return;

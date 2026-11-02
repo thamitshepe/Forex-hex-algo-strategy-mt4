@@ -507,7 +507,7 @@ wait_for_terminal() {
 # successfully" that read like a double expert load). Bash 3.2 safe: the
 # follow list is one string - no associative arrays, nothing on disk.
 mirror_dir() {
-  local tag="$1" dir="$2" ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
+  local tag="$1" dir="$2" csv="${3:-yes}" ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
   set +e
   set +o pipefail
   # Anything already in the folder when this starts belongs to a previous run:
@@ -544,6 +544,7 @@ mirror_dir() {
       tail -n "+$((n + 1))" -F "$f" 2>/dev/null | $sedu "s/^/[$tag] /" &
       followed="$followed$(basename "$f") "
     done
+    if [ "$csv" = "yes" ]; then
     for ef in "$ea_dir"/*.csv "$ea_dir"/*.txt; do
       [ -f "$ef" ] || continue
       case "$followed" in *" $(basename "$ef") "*) continue ;; esac
@@ -552,6 +553,7 @@ mirror_dir() {
       tail -n "+$((en + 1))" -F "$ef" 2>/dev/null | $sedu "s/^/[EA] /" &
       followed="$followed$(basename "$ef") "
     done
+    fi
     sleep 20
   done
 }
@@ -614,37 +616,64 @@ journal_hints() { # DIR
 # the volume, so attempt 2 or 3 usually sticks. Bounded: after N fails the
 # desktop itself is the tool - open Market Watch, find the symbol, make its
 # price move, then Ctrl+E the expert back on.
+mql_tail() {
+  local d="$MT5DIR/MQL5/Logs" f last=""
+  for f in "$d"/*.log; do
+    [ -f "$f" ] || continue
+    last="$f"
+  done
+  [ -n "$last" ] || { printf '%s' "no MQL5 log yet"; return 0; }
+  tail -n 3 "$last" 2>/dev/null | tr -d '\r' | tr '\n' ' '
+}
+
 ea_watchdog() { # DIR
-  local dir="$1" state="${TMPDIR:-/tmp}/hex-ea-watchdog" f n p tries=0
+  # Two ways the EA leaves the chart, and both are silent in every other signal:
+  # the symbol never synchronizes ("symbol synchronization timeout"), or the
+  # terminal unloads the program after a critical error - the bare "expert ...
+  # removed" line, whose reason is written only to the MQL5 log. Restart the
+  # terminal for either. The offset lives in memory, so no counter on disk can
+  # go stale and re-fire the same restart every few seconds.
+  local dir="$1" cur="" off_file="" off=0 n f line tries=0
   set +e
   set +o pipefail
-  mkdir -p "$state" 2>/dev/null || true
   while :; do
+    cur=""
     for f in "$dir"/*.log; do
       [ -f "$f" ] || continue
-      local s="$state/$(basename "$f").seen"
-      n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
-      case "$n" in ''|*[!0-9]*) n=0 ;; esac
-      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]'); p=${p:-0}
-      case "$p" in ''|*[!0-9]*) p=0 ;; esac
-      [ "$n" -lt "$p" ] && p=0
-      if [ "$n" -gt "$p" ]; then
-        if tail -n "+$((p + 1))" "$f" 2>/dev/null | grep -q 'symbol synchronization timeout'; then
-          tries=$((tries + 1))
-          if [ "$tries" -le 6 ]; then
-            log "WATCHDOG: the EA died waiting for $MT5_SYMBOL to synchronize (attempt $tries/6) - restarting terminal64.exe so it re-attaches"
-            hex_push "EA-RESTART" "The EA was removed (symbol synchronization timeout on $MT5_SYMBOL). Restarting the terminal, attempt $tries/6."
-            sleep 3
-            kill "$TERMINAL_PID" 2>/dev/null || true
-          else
-            log "WATCHDOG: 6 symbol-sync restarts did not stick. Finish it on the desktop: Market Watch (Ctrl+M) -> find '$MT5_SYMBOL' -> double-click it so its price ticks -> make sure the chart draws candles -> Ctrl+E is auto-trading on. After that the chart state is saved on the volume and survives reboots."
-            hex_push "NEEDS-YOU" "6 automatic restarts did not get the EA attached to $MT5_SYMBOL. Open the VNC desktop: Ctrl+M, double-click the symbol, confirm the chart ticks, Ctrl+E."
-            sleep 900
-          fi
-        fi
-      fi
-      printf '%s\n' "$n" > "$s" 2>/dev/null || true
+      cur="$f"          # the glob is sorted, so the last match is the newest day
     done
+    if [ -z "$cur" ]; then
+      sleep 5
+      continue
+    fi
+    if [ "$cur" != "$off_file" ]; then
+      off_file="$cur"
+      off=$(wc -l < "$cur" 2>/dev/null | tr -d '[:space:]'); off=${off:-0}
+      case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    fi
+    n=$(wc -l < "$cur" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    [ "$n" -lt "$off" ] && off=0
+    if [ "$n" -gt "$off" ]; then
+      while IFS= read -r line; do
+        case "$line" in
+          *'symbol synchronization timeout'*|*'expert '*removed*)
+            tries=$((tries + 1))
+            log "WATCHDOG: the EA left the chart (attempt $tries/6): $line"
+            if [ "$tries" -le 6 ]; then
+              hex_push "EA-RESTART" "The EA was removed on $MT5_SYMBOL (attempt $tries/6 to put it back). Terminal is being restarted. MQL5 log: $(mql_tail)"
+              sleep 3
+              kill "$TERMINAL_PID" 2>/dev/null || true
+            else
+              log "WATCHDOG: 6 automatic EA restarts did not stick. Last MQL5 log: $(mql_tail)"
+              hex_push "NEEDS-YOU" "6 automatic restarts did not keep the EA on $MT5_SYMBOL. MQL5 log: $(mql_tail) Open the VNC desktop if this keeps happening."
+              sleep 900
+            fi
+            ;;
+        esac
+      done < <(tail -n "+$((off + 1))" "$cur" 2>/dev/null)
+      off="$n"
+    fi
     sleep 5
   done
 }
@@ -824,6 +853,10 @@ main() {
   report_isolation
   lease_keeper &
   mirror_dir "MT5" "$MT5DIR/logs" &
+  # The Experts tab: this is where the terminal writes WHY it unloaded the EA
+  # ("array out of range in ...", "zero divide in ..."), and it was the one log
+  # nothing showed.
+  mirror_dir "MQL5" "$MT5DIR/MQL5/Logs" nocsv &
   journal_hints "$MT5DIR/logs" &
   ea_watchdog "$MT5DIR/logs" &
   desktop_keeper &
