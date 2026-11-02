@@ -92,17 +92,26 @@
 >      the shared stop), so an add the trade cannot pay for is skipped, never
 >      forced: at a sustained 50% risk fraction no add ever reaches the 0.10 lot
 >      step, which is why the preset says 100;
->    - all legs share **one** stop, which never loosens: at +0.05% it moves to
->      entry **+0.05%** (a winner can no longer lose), and from +0.40% it trails
->      0.30% behind the price. `LOCKIN`/`TRAIL` rows in the CSV show every move,
->      `ADD` rows (and phone pushes) show every leg;
+>    - all legs share **one** stop, which never loosens: **after** the base leg has
+>      banked its target it moves to entry **+0.05%** (a winner can no longer
+>      lose), and from +0.40% it trails 0.30% behind the price. Never earlier:
+>      armed before the bank, that floor sits *on* the price and becomes a +0.05%
+>      take-profit - the live failure of 2026-11-02 (see below).
+>      `InpMinStopGapPct=0.15` is a second floor under every move, so no stop can
+>      ever be placed inside 0.15% of the price. `LOCKIN`/`TRAIL` rows in the CSV
+>      show every move and how far below the price it landed; `ADD` rows (and
+>      phone pushes) show every leg, and an add the profit cannot afford logs
+>      `add-small` instead of failing silently;
 >    - the ladder is capped twice: `InpMaxLadderLots=0.40` and
 >      `InpMaxLadderRiskPct=30` (=$6 of stop risk at $20 of headroom), so one bad
 >      episode stays inside the same 3-loss budget as one base stop-out.
->    Measured by `Tools/boom_backtest.py` (100k ticks × 4 seeds, $20 headroom):
->    base only `$14.18/h`, avg loss `$6.60`; with the ladder `$39.06/h`, avg loss
->    `$3.20`, six episodes worth ≥10× a base win, best single trade `$335`, no
->    run blown. Under the *pessimistic* calibration (spikes 0.15% mean instead of
+>    Measured by `Tools/boom_backtest.py` (100k ticks × 4 seeds, $20 headroom, and
+>    per-tick volatility now calibrated to the live tape of 2026-11-02): the base
+>    engine (bank 0.25%, no adds) runs `$15.93/h`, WR `0.776`, PF `2.79`, median
+>    win exactly `+0.250%` - the target - and no run blown. The ladder itself does
+>    nothing at $20: one add at the 0.10 minimum lot needs ~`$4.50` of the
+>    episode's profit in hand, which the base lot only generates around `$68` of
+>    headroom. Under the *pessimistic* calibration (spikes 0.15% mean instead of
 >    0.25%) the ladder can be a net negative, which is what the caps and the
 >    `InpMaxAdds=0` kill switch are for: set it to 0 and the EA is exactly the
 >    base strategy again.
@@ -1248,6 +1257,9 @@ shows the EA's prints, and a rebuild is a `git push`.
 | `MT4_INSTANCE must be a number` | `MT4_INSTANCE` holds something other than `1`, `2`, `3` … | it is an instance *number*, not a name |
 | no trades on a small account, and `SIZE` in `rejections.csv` ("margin: only … lots affordable, broker minimum 0.01") | `RiskPercent` of a small balance cannot buy the broker's minimum lot — `doge-scalp` needs roughly $100 for that, and `CalcLots` blocks the trade rather than over-risk it | use the `doge-10` preset for a $10 account (§6, "Sizing follows the account"), or fund the account past the minimum-lot threshold |
 | every entry push says `R:R 0.00` | a build older than 2026-10-30: the planned-R:R arithmetic divided a price distance by a point count, so every push and every `signals.csv` row showed 0.00 | redeploy; the fixed build prints the real planned R:R (e.g. `R:R 2.00`), and never places a target closer than 1R |
+| **more losses than wins**, and every winner closed at exactly `+0.05%` (0.73 on 0.10 lots) while every loser paid `-0.30%` (`-4.5`), with no `BANK` and no `ADD` row in the CSV | a build before 2026-11-03. `InpLockInPct=0.05` armed the shared stop at `entry + 0.05%`, which is *at the price* the moment it armed, so the "break-even floor" was really a 0.05% take-profit: no winner ever reached the 0.25% target and no add was ever reachable. Measured live: 4 wins / 4 losses, `-$14.59` in 75 minutes | redeploy the fixed build. The floor now arms only after the base leg has **banked** its target (`episodeBanked`), and `InpMinStopGapPct=0.15` refuses any stop inside 0.15% of the price. Every `LOCKIN`/`TRAIL` row now ends with the distance it landed below the price, so an at-the-money stop is visible by inspection |
+| no trades at all, and `SKIP minlot-cap` in `HEX-Logs/HEX-BoomRider-<date>.csv`, with equity just above the blow line (e.g. `9985` against `InpBaselineEquity=9980`) | the EA is **not** halted and nothing is broken: `$5` of headroom cannot buy the broker's 0.10 minimum lot at the 0.30% stop (`$4.54`), and `InpMaxRiskPct=50` caps it at `$2.71`, so every entry is refused by design. The SKIP line names the equity it would need | reset the demo balance in the Deriv portal (or deposit `$20` more) to restore the `$20` headroom — the same gesture as a blown run. The blow *hard* stop is the file `HEX-BoomRider-BLOWN.txt`; this is not that |
+| the ladder never places an add (`add-small` SKIP rows, no `ADD` rows) | at `$20` of headroom one add at the 0.10 minimum lot needs about `$4.50` of *this episode's* profit already in hand (0.10 lots × the distance to the shared stop), and a 0.10-lot base leg only generates that around `$68` of headroom. Below that the add is unaffordable, not broken | nothing — this is the base engine working. The ladder turns on by itself as the headroom compounds through `~$68`; `InpMaxAdds=0` makes the choice explicit either way |
 
 ---
 

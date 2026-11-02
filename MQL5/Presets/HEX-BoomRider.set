@@ -14,18 +14,27 @@ InpMaxRiskPct=50.0
 InpTakeProfitPct=0.25
 InpStopLossPct=0.30
 ; --- management: bank the measured target, then let the spike pay more ------
-; A spike on Boom 400 is a single-tick JUMP, so an early break-even or a
-; mid-target partial has nothing to act on (measured identical), and cutting a
-; bleeding trade early loses 32% of the profit rate. What pays is the opposite:
-; keep the 0.25% target on the base leg, and add legs while the spike is
-; happening, funded only out of profit already made, all sharing one stop that
-; steps up to entry+0.05% and then trails 0.30% behind the price.
-; Measured, 100k ticks x 4 seeds, $20 headroom, worst calibration:
-;   base only                                        $14.18/h, best trade $5
-;   + this ladder (cap 30% of headroom)              $39.06/h, best trade $335
-;   average loss $6.60 -> $3.20, 6 episodes at 10x a base win, 0/4 blown.
+; A stop placed BETWEEN the entry and the target is not a stop, it is a
+; take-profit: the target is only ever reached by a SPIKE (a single-tick jump),
+; while any intermediate level is reached by ordinary drift - and the drift
+; between spikes pulls DOWN, so it gets there first.
+; LIVE, 2026-11-02, the previous build proved it: the +0.05% break-even floor sat
+; AT the price the moment it armed, so every winner exited at +0.05%, no winner
+; ever reached the 0.25% target, not one add fired, and 75 minutes read 4 wins /
+; 4 losses, -$14.59 (a 0.05% win against a 0.30% loss is break-even BEFORE the
+; spread). Two rules fixed it: the floor may only arm after the target has been
+; banked, and no stop may sit closer than InpMinStopGapPct to the price.
+; Re-measured on the live-calibrated model (100k ticks x 4 seeds, $20 headroom,
+; 0.10 lots; the model's per-tick sigma now comes from that live tape):
+;   base engine, banks 0.25%, no adds    $15.93/h   WR .776  PF 2.79  0/4 blown
+;   median win +0.250% (the target)      avg win $4.38   avg loss $5.46
+;   PRE-FIX floor at +0.05%              median win +0.050% - the live clip
+; The ladder itself does nothing at $20: an add at the 0.10 minimum lot needs
+; ~$4.50 of this episode's profit in hand, which arrives when the base lot
+; reaches 0.30 - i.e. at roughly $68 of headroom. It logs "add-small" until then.
 ; The 30% ladder cap is what keeps one bad episode inside the 3-loss budget.
 InpLockInPct=0.05
+InpMinStopGapPct=0.15
 InpBackstopTPPct=1.00
 InpTrailPct=0.30
 InpTrailStartPct=0.40

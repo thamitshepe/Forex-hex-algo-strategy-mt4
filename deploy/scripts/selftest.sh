@@ -298,6 +298,20 @@ if [ -f "$EA" ]; then
     "double SharedStop(double bid, double pct)" "$(cat "$EA")"
   check_contains "a break-even floor sits ABOVE entry, not at it" \
     "episodeBase * (1.0 + InpLockInPct / 100.0)" "$(cat "$EA")"
+  # ...but that alone WAS the 2026-11-02 bug: armed before the target is banked,
+  # the floor sits on the price and stops the trade out at +0.05% instead of
+  # letting the spike reach 0.25%. Every winner left at +0.05%, no winner ever
+  # reached the target, no add ever fired. The gate and the minimum gap are the fix.
+  check_contains "the floor arms only once the target has been banked" \
+    "episodeBanked && pct >= InpLockInPct" "$(cat "$EA")"
+  check_contains "no stop is ever placed inside the minimum gap of the price" \
+    "bid * InpMinStopGapPct / 100.0" "$(cat "$EA")"
+  check_contains "and that gap floors every stop the ladder moves" \
+    "if(gapDist > floorDist)" "$(cat "$EA")"
+  check_contains "a stop move reports how far below the price it landed" \
+    "%% below the price" "$(cat "$EA")"
+  check_contains "an add the profit cannot afford is logged, not silenced" \
+    "add-small" "$(cat "$EA")"
   check_contains "adds are sized from profit already made" \
     "(episodeBooked + LadderFloat()) * InpAddRiskPct / 100.0" "$(cat "$EA")"
   check_contains "an add that the trade cannot pay for is skipped, not forced" \
@@ -308,9 +322,10 @@ if [ -f "$EA" ]; then
     "InpMaxLadderRiskPct" "$(cat "$EA")"
   check_contains "positions are found by magic, so netting and hedging both work" \
     "if(PositionGetString(POSITION_SYMBOL) != _Symbol)" "$(cat "$EA")"
-  for kv in "InpLockInPct=0.05" "InpTrailPct=0.30" "InpTrailStartPct=0.40" \
-            "InpMaxAdds=3" "InpAddAtPct=0.20" "InpAddRiskPct=100.0" \
-            "InpMaxLadderLots=0.40" "InpMaxLadderRiskPct=30.0"; do
+  for kv in "InpLockInPct=0.05" "InpMinStopGapPct=0.15" "InpTrailPct=0.30" \
+            "InpTrailStartPct=0.40" "InpMaxAdds=3" "InpAddAtPct=0.20" \
+            "InpAddRiskPct=100.0" "InpMaxLadderLots=0.40" \
+            "InpMaxLadderRiskPct=30.0"; do
     check_contains "preset carries $kv" "$kv" "$(cat "$SET")"
   done
 else
@@ -318,6 +333,17 @@ else
 fi
 check_eq "backtest still compiles" "0" \
   "$(python3 -m py_compile "$HERE/../../Tools/boom_backtest.py" >/dev/null 2>&1 && echo 0 || echo 1)"
+# 2026-11-02 again: the harness reported the broken rule as the MOST profitable
+# configuration in its table ($56/h) while the live book lost money on it, because
+# it only ever reported $/h, WR and PF. Where the wins actually exit is asserted
+# now, and the pre-fix rule is kept in the harness to prove it can see the bug.
+BK="$HERE/../../Tools/boom_backtest.py"
+check_contains "the harness asserts the win payload, not just \$/h" \
+  "def payload_checks()" "$(cat "$BK")"
+check_contains "and still runs the pre-fix rule it must be able to catch" \
+  "floor_after_bank=False" "$(cat "$BK")"
+check_contains "the tape's per-tick volatility comes from the live book" \
+  "SIGMA_QUIET" "$(cat "$BK")"
 # DEPLOY.md once told people the GHCR package was public when it was not, and
 # walked the deploy through forex-hex-mt4 after the workflow moved to mt5. Both
 # are a deploy that fails at the pull with nothing to explain it, so the doc is

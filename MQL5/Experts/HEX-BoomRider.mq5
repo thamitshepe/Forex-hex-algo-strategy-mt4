@@ -33,17 +33,30 @@ input double InpMaxRiskPct     = 50.0;     // Never risk more than this % of the
 //   bracket the first preset used (which paid $2.27 a win for a $6.05 loss).
 input double InpTakeProfitPct  = 0.25;     // TP: % above entry (measured target, base leg only)
 input double InpStopLossPct    = 0.30;     // SL: % below entry
-// Management. On Boom 400 a spike is a single-tick JUMP: the price never rests
-// between the entry and the target, so an "early break-even at +0.08%" or a
-// "partial at +0.12%" has nothing to act on (measured: identical results with
-// and without), and cutting a bleeding trade early loses money (a bleeding trade
-// is only waiting for its spike: -32% $/h). What does pay is the opposite: keep
-// the base target, and give the spike somewhere to go - add legs while it is
-// happening, funded strictly out of profit, all sharing one stop that only ever
-// moves up. 100k ticks x 4 seeds, $20 headroom, worst calibration:
-//   base only                                    $11.81/h, best trade $5
-//   + adds x3 from +0.20%, shared stop + trail   $42.81/h, best trade $328, 0 blown
-input double InpLockInPct      = 0.05;     // Once up this %, the shared stop sits this % ABOVE entry
+// Management. A stop placed BETWEEN the entry and the target is not a stop, it
+// is a take-profit: on this symbol the target is only ever reached by a SPIKE
+// (a single-tick jump), while any intermediate level is reached by ordinary
+// drift - and the drift between spikes pulls DOWN, so it gets there first.
+// Live, 2026-11-02, the shipped build proved it: the +0.05% break-even floor
+// sat AT the price the moment it armed, so every winner exited at +0.05%,
+// no winner ever reached the 0.25% target, not one add fired, and the day read
+// 4 wins / 4 losses, -$14.59 in 75 minutes. A 0.05% win against a 0.30% loss
+// is zero EV before spread, so it can only bleed. Two rules came out of it:
+//   * the break-even floor may only arm AFTER the target has been banked
+//     (episodeBanked), so it can never pre-empt the target it guards; and
+//   * no submitted stop may ever sit closer than InpMinStopGapPct to the price,
+//     enforced in ApplyLadderStop for every caller.
+// With those, what pays is the opposite of an early stop: keep the base target,
+// and give the spike somewhere to go - add legs while it is happening, funded
+// strictly out of profit, all sharing one stop that only ever moves up.
+// Harness, 100k ticks x 4 seeds, live-calibrated model, $20 headroom: the base
+// engine (bank 0.25% / SL 0.30%) runs $15.93/h, WR 0.776, PF 2.79, median win
+// exactly +0.25% (the target), 0/4 blown. The ladder cannot do anything at $20
+// of headroom: one add at the 0.10 minimum lot needs ~$4.50 of this episode's
+// profit already in hand, which the base lot only generates around $68 of
+// headroom. Until then the add is skipped, and it now says so in the log.
+input double InpLockInPct      = 0.05;     // Once the target is BANKED, the stop sits this % above entry
+input double InpMinStopGapPct  = 0.15;     // Never place the shared stop closer than this % to the price
 input double InpBackstopTPPct  = 1.00;     // Distant broker TP, so a position is never target-less
 input double InpTrailPct       = 0.30;     // Trail the shared stop this % behind the price
 input double InpTrailStartPct  = 0.40;     // ... once the trade is this % in profit
@@ -92,10 +105,11 @@ int OnInit()
    FolderCreate(InpLogDir);
    Log("INIT", StringFormat("baseline=%.2f risk=%.1f%% tp=%.2f%% sl=%.2f%% blown=%d",
        InpBaselineEquity, InpRiskPct, InpTakeProfitPct, InpStopLossPct, blown));
-   Log("INIT", StringFormat("manage: lock-in=%.2f%% trail=%.2f%% from %.2f%%, adds<=%d every "
-       "%.2f%% risking %.0f%% of profit, ladder<=%.2f lots / %.0f%% of headroom",
-       InpLockInPct, InpTrailPct, InpTrailStartPct, InpMaxAdds, InpAddAtPct,
-       InpAddRiskPct, InpMaxLadderLots, InpMaxLadderRiskPct));
+   Log("INIT", StringFormat("manage: bank %.2f%%; floor %+.2f%% ONLY after the bank; min stop "
+       "gap %.2f%% of price; trail=%.2f%% from %.2f%%; adds<=%d every %.2f%% risking %.0f%% "
+       "of profit; ladder<=%.2f lots / %.0f%% of headroom",
+       InpTakeProfitPct, InpLockInPct, InpMinStopGapPct, InpTrailPct, InpTrailStartPct,
+       InpMaxAdds, InpAddAtPct, InpAddRiskPct, InpMaxLadderLots, InpMaxLadderRiskPct));
    // The broker's own floor on this symbol, logged once: a bracket tighter than
    // the stops level is refused with "Invalid stops", and until now this EA had
    // never placed an order, so we had no idea what the floor was.
@@ -438,7 +452,14 @@ int ApplyLadderStop(double stop, string why)
    if(stop <= 0.0 || !MathIsValidNumber(stop))
       return 0;
    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   // Two floors under our feet: the broker's stops level, and our own minimum
+   // distance. This symbol reports a stops level of 0, so the broker's floor
+   // alone let a stop land ON the price - where the next tick takes it out.
+   // That is how the 2026-11-02 run turned every winner into a +0.05% exit.
    double floorDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   double gapDist   = bid * InpMinStopGapPct / 100.0;
+   if(gapDist > floorDist)
+      floorDist = gapDist;
    double newSl = NormalizeDouble(stop, _Digits);
    if(bid > 0.0 && floorDist > 0.0 && bid - newSl < floorDist)
       newSl = NormalizeDouble(bid - floorDist, _Digits);
@@ -460,8 +481,11 @@ int ApplyLadderStop(double stop, string why)
    {
       ladderStopLast = newSl;
       double pct = (episodeBase > 0.0) ? (newSl - episodeBase) / episodeBase * 100.0 : 0.0;
-      Log(why, StringFormat("%d position(s) stop -> %.2f (%+.3f%% vs entry %.2f)",
-          moved, newSl, pct, episodeBase));
+      // The distance to the price is in every line on purpose: a stop sitting on
+      // the price (0.000% below it) is the exact failure this log must expose.
+      Log(why, StringFormat("%d position(s) stop -> %.2f (%+.3f%% vs entry %.2f, "
+          "%.3f%% below the price)",
+          moved, newSl, pct, episodeBase, bid > 0.0 ? (bid - newSl) / bid * 100.0 : 0.0));
    }
    return moved;
 }
@@ -516,13 +540,20 @@ void BankBaseLeg()
 
 //+------------------------------------------------------------------+
 //| The one stop the whole ladder shares: never below where it already |
-//| is, never below the lock-in floor once the trade has paid, and      |
-//| trailing the peak once the trail is armed. It only ever moves up.   |
+//| is, never below the lock-in floor once the target has been BANKED, |
+//| and trailing the peak once the trail is armed. Only ever moves up, |
+//| and never closer to the price than InpMinStopGapPct (ApplyLadder-   |
+//| Stop enforces that: a stop on the price is a stop hit next tick).   |
 //+------------------------------------------------------------------+
 double SharedStop(double bid, double pct)
 {
    double stop = LadderStop();
-   if(InpLockInPct > 0.0 && episodeBase > 0.0 && pct >= InpLockInPct)
+   // The floor arms only once the base leg has BANKED its target. Armed any
+   // earlier it is not a floor, it is an at-the-money take-profit at
+   // InpLockInPct - which is exactly what killed the live run of 2026-11-02
+   // (every winner left at +0.05%, no winner ever reached the 0.25% target,
+   // and not one add fired: 4 wins / 4 losses, -$14.59 in 75 minutes).
+   if(InpLockInPct > 0.0 && episodeBase > 0.0 && episodeBanked && pct >= InpLockInPct)
       stop = MathMax(stop, episodeBase * (1.0 + InpLockInPct / 100.0));
    if(InpTrailPct > 0.0 && pct >= InpTrailStartPct)
       stop = MathMax(stop, bid * (1.0 - InpTrailPct / 100.0));
@@ -553,7 +584,16 @@ void MaybeAdd(double effective, double bid, double pct, double stop)
    double lots = MathFloor((budget / moneyPerLot) / step) * step;
    lots = MathMin(lots, InpMaxLadderLots - LadderLots());
    if(lots < minLot)
+   {
+      // Say it out loud, throttled: on 2026-11-02 the ladder never fired and the
+      // log said nothing, so a ladder that was never affordable looked exactly
+      // like a ladder that was broken.
+      LogSkip("add-small", StringFormat("add at %+.3f%% would be %.2f lots (broker min %.2f): "
+              "this episode has %.2f in hand, one min lot with %.0f points to its stop "
+              "needs %.2f", pct, lots, minLot, episodeBooked + LadderFloat(), dist / _Point,
+              minLot * moneyPerLot));
       return;      // the episode has not made enough to pay for another leg
+   }
 
    double cap = effective * InpMaxLadderRiskPct / 100.0;
    if(LadderStopRisk() + lots * moneyPerLot > cap)

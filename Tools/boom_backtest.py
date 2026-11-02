@@ -31,8 +31,21 @@ PRICE0 = 14000.0          # index level, mid-14000s on the live chart
 TICKS_PER_SPIKE = 400.0   # "on average 1 spike every 400 ticks"
 VOL_ANNUAL = 0.20         # "volatility of 20%"
 
-# One tick per second. Per-tick sigma from the annual vol (24/7 market):
-# sigma_tick = price * VOL_ANNUAL / sqrt(365*24*3600) ~ price * 3.4e-6.
+# One tick per second. Calibrated to the LIVE tape, not to the annual-vol
+# headline: the headline (20% annualised) gives sigma_tick = price * 3.4e-6,
+# which the 2026-11-02 book refutes. Trades that bled to the -0.30% stop took
+# 511 / 601 / 750 / 1004 s (implied sigma_tick 0.0095-0.0163% of price), while
+# trades that only got to +0.05% took 290-411 s (0.0025-0.0030%). One sigma
+# cannot fit both - the real tape clusters - so volatility is two-state here.
+# This matters: with the headline sigma, reaching +0.05% by drift alone took
+# ~2000 ticks, so the ONLY path to an intermediate stop was a spike, and a spike
+# overshoots to the target in the same tick. That is precisely why this harness
+# could not see the live bug where every winner left at +0.05%.
+SIGMA_QUIET = 0.000028   # per-tick sigma, fraction of price (live +0.05% path)
+SIGMA_BURST = 0.000150   # per-tick sigma, fraction of price (live stop-run path)
+P_QUIET_TO_BURST = 1.0 / 400.0   # steady state spends ~27% of ticks in a burst
+P_BURST_TO_QUIET = 1.0 / 150.0
+
 # Inter-spike drift: Boom indices bleed down between spikes. Calibrated so the
 # drift across one average spike interval (400 ticks) is a fraction of the
 # mean spike - the net long-run drift of a Boom index is mildly positive.
@@ -43,16 +56,19 @@ SPREAD_PCT = 0.00012       # ~1.7 points round trip on 14400 (Market Watch ~1-3)
 SLIP = 0.0008              # a spike that gaps through the stop fills 0.08% worse
 SPIKE_PROB = 1.0 / TICKS_PER_SPIKE
 
-SIGMA_TICK = PRICE0 * VOL_ANNUAL / math.sqrt(365 * 24 * 3600)  # ~0.0032
+VOL_ANNUAL = 0.20          # the symbol's stated headline; see the note above
 
 
 class Boom400:
-    """Tick generator: down-drift with upward spikes, memoryless in time."""
+    """Tick generator: down-drift with upward spikes, memoryless in time, and
+    two-state volatility calibrated to the live tape."""
 
     def __init__(self, price=PRICE0, rng=None):
         self.price = price
         self.rng = rng or random.Random()
         self.last_spike_high = price
+        self.last_spike = False
+        self.burst = False
 
     def tick(self):
         p = self.price
@@ -60,9 +76,15 @@ class Boom400:
             jump = p * max(0.0002, self.rng.gauss(SPIKE_MEAN, SPIKE_STD))
             p += jump
             self.last_spike_high = p
+            self.last_spike = True
         else:
+            self.last_spike = False
+            switch = P_BURST_TO_QUIET if self.burst else P_QUIET_TO_BURST
+            if self.rng.random() < switch:
+                self.burst = not self.burst
             p -= DRIFT_PER_CYCLE * p / TICKS_PER_SPIKE  # downward bleed
-            p += self.rng.gauss(0.0, SIGMA_TICK)
+            sigma = SIGMA_BURST if self.burst else SIGMA_QUIET
+            p += self.rng.gauss(0.0, p * sigma)
         self.price = p
         return p
 
@@ -92,10 +114,13 @@ def run_backtest(mode, ticks=400_000, bankroll=20.0, risk_pct=0.20,
     pos = None  # (dir, entry, sl, tp, lots)
     spike_high = mkt.price
     spread = SPREAD_PCT * mkt.price
-    slip = SLIP * mkt.price
 
     for i in range(ticks):
         price = mkt.tick()
+        # The 0.08% gap-through only applies when a SPIKE gapped the stop; on an
+        # ordinary tick the fill is at the stop level. Live 2026-11-02 confirms
+        # it: a -0.30% stop cost -$4.48 on 0.10 lots (at the level), not -$5.70.
+        slip = SLIP * price if mkt.last_spike else 0.0
         if mkt.last_spike_high > spike_high:
             spike_high = mkt.last_spike_high
 
@@ -206,24 +231,33 @@ def grid():
 def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
                tp_pct=0.0025, sl_pct=0.0030,
                be_at=0.0008, be_buf=0.0002,
-               bank_at=0.0, bank_frac=0.5,
+               bank_at=0.0, bank_frac=0.5, bank_lots=0.1, backstop_tp=0.0100,
                add_at=0.0010, max_adds=3, add_gap=0.0010, add_risk=0.5,
                max_lots=0.4, trail=0.0, trail_start=0.0, max_risk=0.0, gate_k=0,
-               point_value=0.01):
-    """The managed long: break-even, then a pyramided ladder funded by profit.
+               min_gap=0.0015, floor_after_bank=True, point_value=0.01):
+    """The managed long, mirroring HEX-BoomRider.mq5 exactly.
 
     Applied on every tick, in this order:
-      1. base trade: the tested bracket, the only exposure that can lose at all;
-      2. at +be_at the ladder stop moves to entry + be_buf, so from there on the
-         episode is flat-to-up minus stop slippage;
-      3. every +add_at of further gain, up to max_adds, one more base_lots is
+      1. base trade: the tested bracket, the only exposure that can lose at all.
+         Its broker target is the distant backstop_tp (the EA's backstop TP);
+         the measured target at +bank_at is banked by rule 2 instead;
+      2. at +bank_at the base leg's OWN volume is banked, exactly as
+         BankBaseLeg() closes episodeBaseLots by ticket; the rest keeps running;
+      3. ONLY after that bank does the floor arm, at entry + be_buf - the EA's
+         `episodeBanked` gate. floor_after_bank=False reproduces the pre-fix rule
+         (armed at +be_at whatever happens): with it the floor sits ON the price
+         the moment it arms and the whole book becomes +0.05% wins against
+         -0.30% losses, which is the live bug of 2026-11-02;
+      4. every +add_at of further gain, up to max_adds, one more base_lots is
          added and the *shared* ladder stop steps up to bid - add_gap, i.e. each
          add raises the floor for the whole ladder and locks profit in;
-      4. the add is sized so its risk is add_risk of what the episode has already
+      5. the add is sized so its risk is add_risk of what the episode has already
          booked, so adds can only spend money the trade itself made;
-      5. max_lots caps total exposure;
-      6. a trail (if set) replaces step 3's stop with bid - trail past
-         trail_start, letting a big spike run.
+      6. max_lots caps total exposure;
+      7. a trail (if set) replaces step 4's stop with bid - trail past
+         trail_start, letting a big spike run;
+      8. no stop this function sets is ever closer than min_gap to the price
+         (the EA's InpMinStopGapPct) - a stop on the price is hit next tick.
     Fills are the model's: entry at ask, stops slipped through on a spike.
     """
     rng = random.Random(seed)
@@ -242,6 +276,8 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
     blown_at = None
 
     base_win_dollars = tp_pct * 15122.0 * base_lots
+    win_pcts = []                 # every booked win, as a % of its own entry
+    banks = 0                     # episodes whose base leg took the target
 
     def book(entry, exit_px, lots):
         nonlocal pl, episode, wins, losses, gross_win, gross_loss
@@ -251,18 +287,27 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
         if pnl >= 0:
             wins += 1
             gross_win += pnl
+            win_pcts.append((exit_px - entry) / entry)
         else:
             losses += 1
             gross_loss += -pnl
 
+    def bott(level):
+        """Nothing this harness sets as a stop may sit closer than min_gap to the
+        price: a stop sitting on the price is a stop the next tick takes out."""
+        if min_gap <= 0.0 or bid <= 0.0:
+            return level
+        return min(level, bid - bid * min_gap)
+
     for i in range(ticks):
         price = mkt.tick()
-        slip = SLIP * price
+        slip = SLIP * price if mkt.last_spike else 0.0
         bid = price - SPREAD_PCT * price / 2.0
 
         keep = []
         for entry, stop, target, lots in pos:
-            if stop > 0 and price <= stop:
+            # a long's stop triggers on the BID, as the broker does - not the mid
+            if stop > 0 and bid <= stop:
                 book(entry, stop - slip if price < stop else stop, lots)
             elif target > 0 and price >= target:
                 book(entry, target, lots)
@@ -283,14 +328,21 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
             break
 
         if pos and base_entry is not None:
-            pct = (price - base_entry) / base_entry
+            # the EA measures every percentage off the BID, not the mid
+            pct = (bid - base_entry) / base_entry
 
             # 2. bank part of the trade at the validated target level, and let the
             #    remainder ride: the routine spike pays out, the tail stays open.
             #    (Banking at an arbitrary TP1 below the target is dead code here:
             #    spikes jump, so the price never rests in between.)
             if bank_at > 0.0 and not bank_done and pct >= bank_at:
-                left = math.floor((sum(p[3] for p in pos) * bank_frac) / 0.10) * 0.10
+                # BankBaseLeg(): the base leg's own volume, oldest ticket first.
+                # bank_frac scales it for the parameter sweep; bank_lots is the
+                # ceiling (the EA banks exactly episodeBaseLots = base_lots).
+                want = min(bank_lots, sum(p[3] for p in pos) * bank_frac)
+                left = math.floor(want / 0.10) * 0.10
+                if left >= 0.10:
+                    banks += 1
                 new = []
                 for entry, stop, target, lots in pos:
                     take = min(lots, left)
@@ -305,23 +357,28 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
                 bank_done = True
                 if pos:
                     for p in pos:
-                        p[1] = max(p[1], base_entry * (1 + be_buf))
+                        p[1] = max(p[1], bott(base_entry * (1 + be_buf)))
                     be_done = True
                 if not pos:
                     continue
 
-            if be_at > 0.0 and not be_done and pct >= be_at:    # 2. protect
+            # 3. the floor - and ONLY once the bank has happened, unless the
+            #    pre-fix rule is being reproduced on purpose. Armed without the
+            #    bank, this is an at-the-money take-profit at be_at rather than a
+            #    floor: the bug the live book exposed on 2026-11-02.
+            if (be_at > 0.0 and (bank_done or not floor_after_bank)
+                    and not be_done and pct >= be_at):
                 for p in pos:
-                    p[1] = max(p[1], base_entry + base_entry * be_buf)
+                    p[1] = max(p[1], bott(base_entry * (1 + be_buf)))
                 be_done = True
 
-            if trail > 0.0 and pct >= trail_start:           # 6. let it run
+            if trail > 0.0 and pct >= trail_start:           # 7. let it run
                 for p in pos:
-                    p[1] = max(p[1], bid - price * trail)
+                    p[1] = max(p[1], bott(bid - price * trail))
 
-            if adds < max_adds and pct >= add_at * (adds + 1):   # 3./4./5.
+            if adds < max_adds and pct >= add_at * (adds + 1):   # 4./5./6.
                 paying = (gate_k <= 0 or sum(episodes[-gate_k:]) > 0.0)
-                stop = max(max(p[1] for p in pos), bid - price * add_gap)
+                stop = max(max(p[1] for p in pos), bott(bid - price * add_gap))
                 if paying and stop < bid:
                     float_pl = sum((bid - e) * l * money for e, s, t, l in pos)
                     budget = add_risk * max(episode + float_pl, 0.0)
@@ -341,7 +398,13 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
 
         if not pos:
             entry = price + SPREAD_PCT * price / 2.0
-            pos = [[entry, entry - entry * sl_pct, entry + entry * tp_pct, base_lots]]
+            # The base leg's *broker* target is the distant backstop, not the
+            # measured target: the 0.25% is taken by the EA's BankBaseLeg(), and
+            # the adds carry no target at all (MaybeAdd buys with tp=0.0). Giving
+            # the base leg a broker TP at 0.25% here made the harness close it
+            # before the bank could ever fire, so the bank, the floor and the
+            # adds were all dead code - which is why every row looked identical.
+            pos = [[entry, entry - entry * sl_pct, entry + entry * backstop_tp, base_lots]]
             base_entry, base_tick = entry, i
 
     return {
@@ -354,6 +417,11 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
         "blown": blown_at,
         "eps": len(episodes),
         "adds": total_adds,
+        "banks": banks,
+        # Where the wins actually exit, as a % of their own entry. This is the
+        # metric that would have caught 2026-11-02 from the harness alone: the
+        # live winners all exited at +0.05% while the losses paid -0.30%.
+        "med_win_pct": round(100.0 * statistics.median(win_pcts), 3) if win_pcts else 0.0,
         "x2": sum(1 for e in episodes if e >= 2 * base_win_dollars),
         "x3": sum(1 for e in episodes if e >= 3 * base_win_dollars),
         "x4": sum(1 for e in episodes if e >= 4 * base_win_dollars),
@@ -365,46 +433,88 @@ def run_ladder(seed=1, ticks=100_000, bankroll=20.0, base_lots=0.1,
 
 
 def ladder():
-    """Base vs managed ladder, same ticks. The parameters shipped in
-    MQL5/Presets/HEX-BoomRider.set come from this table: the ladder that spends
-    only booked profit, shares one stop, and stays inside max_lots."""
+    """Base vs managed ladder, same ticks, on the live-calibrated model.
+
+    The PRE-FIX row re-runs the shipped build of 2026-11-02 exactly (floor armed
+    at +0.05% before any bank, no minimum stop gap). It is kept on purpose: a
+    harness that cannot reproduce the bug is not evidence that the fix works.
+    """
     print()
     print("management comparison (100k ticks x 4 seeds, $20 bankroll, 0.10 lots):")
-    print(f"{'config':>34} {'$/h':>7} {'WR':>5} {'avgW':>6} {'avgL':>6} {'PF':>6} "
-          f"{'x2':>4} {'x3':>4} {'x4':>4} {'x10':>4} {'best':>7} {'blown':>6}")
+    print(f"{'config':>36} {'$/h':>7} {'WR':>5} {'avgW':>6} {'avgL':>6} {'PF':>6} "
+          f"{'adds':>4} {'bank':>4} {'medW%':>6} {'x10':>4} {'blown':>6}")
+    prefix = dict(be_at=0.0005, be_buf=0.0005, trail=0.0030, trail_start=0.0040,
+                  add_at=0.0020, add_gap=0.0060, add_risk=1.0, max_adds=3,
+                  max_lots=0.4, max_risk=6.0, min_gap=0.0, floor_after_bank=False)
+    shipped = dict(be_at=0.0005, be_buf=0.0005, trail=0.0030, trail_start=0.0040,
+                   add_at=0.0020, add_gap=0.0060, add_risk=1.0, max_adds=3,
+                   max_lots=0.4, max_risk=6.0, bank_at=0.0025, bank_frac=1.0,
+                   bank_lots=0.1, min_gap=0.0015)
     cases = {
-        "base only (TP 0.25 / SL 0.30)": dict(be_at=0.0, max_adds=0),
-        "ladder, no risk cap": dict(be_at=0.0005, be_buf=0.0005, trail=0.0030,
-                                    trail_start=0.0040, add_at=0.0020, add_gap=0.0060,
-                                    add_risk=1.0, max_adds=3, max_lots=0.4),
-        "ladder + 30% risk cap (SHIPPED)": dict(be_at=0.0005, be_buf=0.0005, trail=0.0030,
-                                                trail_start=0.0040, add_at=0.0020,
-                                                add_gap=0.0060, add_risk=1.0, max_adds=3,
-                                                max_lots=0.4, max_risk=6.0),
-        "ladder + 20% risk cap": dict(be_at=0.0005, be_buf=0.0005, trail=0.0030,
-                                      trail_start=0.0040, add_at=0.0020, add_gap=0.0060,
-                                      add_risk=1.0, max_adds=3, max_lots=0.4, max_risk=4.0),
-        "half the add risk (never fires)": dict(be_at=0.0005, be_buf=0.0005, trail=0.0030,
-                                                trail_start=0.0040, add_at=0.0020,
-                                                add_gap=0.0060, add_risk=0.5, max_adds=3,
-                                                max_lots=0.4, max_risk=6.0),
-        "shipped + regime gate on 3 eps": dict(be_at=0.0005, be_buf=0.0005, trail=0.0030,
-                                               trail_start=0.0040, add_at=0.0020,
-                                               add_gap=0.0060, add_risk=1.0, max_adds=3,
-                                               max_lots=0.4, max_risk=6.0, gate_k=3),
+        "base engine: bank 0.25, no adds": dict(shipped, max_adds=0),
+        "no bank, ride to the 1.0% backstop": dict(shipped, bank_at=0.0, max_adds=0),
+        "PRE-FIX: floor +0.05% before the bank": prefix,
+        "SHIPPED: bank, then floor, min gap": shipped,
+        "shipped without the trail": dict(shipped, trail=0.0, trail_start=0.0),
+        "shipped + regime gate on 3 eps": dict(shipped, gate_k=3),
     }
     for name, kw in cases.items():
         res = [run_ladder(seed=s, **kw) for s in range(4)]
         mean = lambda k: sum(r[k] for r in res) / len(res)
         blown = sum(1 for r in res if r["blown"] is not None)
-        print(f"{name:>34} {mean('per_h'):7.2f} {mean('wr'):5.3f} {mean('avg_win'):6.2f} "
-              f"{mean('avg_loss'):6.2f} {mean('pf'):6.2f} {mean('x2'):4.0f} {mean('x3'):4.0f} "
-              f"{mean('x4'):4.0f} {mean('x10'):4.0f} {mean('best'):7.2f} {blown:4d}/4")
+        print(f"{name:>36} {mean('per_h'):7.2f} {mean('wr'):5.3f} {mean('avg_win'):6.2f} "
+              f"{mean('avg_loss'):6.2f} {mean('pf'):6.2f} {mean('adds'):4.0f} "
+              f"{mean('banks'):4.0f} {mean('med_win_pct'):+6.3f} {mean('x10'):4.0f} "
+              f"{blown:4d}/4")
+
+
+def payload_checks():
+    """Would a backtest that only reports $/h and win rate have caught 2026-11-02?
+
+    No. That book read 4 wins / 4 losses with every winner at +0.05% and every
+    loser at -0.30% - a payload that pays nothing after spread - and the WR and
+    PF columns said nothing about it. So the payload itself is asserted now: the
+    median win has to land near the target and the base leg has to bank. The
+    PRE-FIX rule is run alongside to prove the harness can still see the bug.
+    """
+    target = 0.25
+    print()
+    print(f"win-payload regression (median win as a % of entry; target {target:.2f}%):")
+    prefix = dict(be_at=0.0005, be_buf=0.0005, trail=0.0030, trail_start=0.0040,
+                  add_at=0.0020, add_gap=0.0060, add_risk=1.0, max_adds=3,
+                  max_lots=0.4, max_risk=6.0, min_gap=0.0, floor_after_bank=False)
+    fixed = dict(prefix, bank_at=0.0025, bank_frac=1.0, bank_lots=0.1,
+                 min_gap=0.0015, floor_after_bank=True)
+    fixed_no_adds = dict(fixed, max_adds=0)
+    ok = True
+    for name, kw in (("PRE-FIX (must reproduce the live clip)", prefix),
+                     ("FIXED (bank, post-bank floor, min gap)", fixed),
+                     ("FIXED, ladder off (max_adds=0)", fixed_no_adds)):
+        res = [run_ladder(seed=s, **kw) for s in range(4)]
+        med = sum(r["med_win_pct"] for r in res) / len(res)
+        banks = sum(r["banks"] for r in res) / len(res)
+        adds = sum(r["adds"] for r in res) / len(res)
+        per_h = sum(r["per_h"] for r in res) / len(res)
+        print(f"  {name:>40}: median win {med:+.3f}%, banks {banks:5.1f}, "
+              f"adds {adds:5.1f}, ${per_h:6.2f}/h")
+        if name.startswith("PRE-FIX"):
+            if med >= 0.5 * target:
+                print("      NOTE: the model did not reproduce the live clip this run")
+        else:
+            if med < 0.8 * target:
+                print(f"      FAIL: wins still clipped ({med:+.3f}% < {0.8 * target:.3f}%)")
+                ok = False
+            if banks < 1.0:
+                print("      FAIL: the base leg never banked its target")
+                ok = False
+    print("  payload regression:", "PASS" if ok else "FAIL")
+    return ok
 
 
 if __name__ == "__main__":
     sweep()
     grid()
     ladder()
+    payload_checks()
 
 
