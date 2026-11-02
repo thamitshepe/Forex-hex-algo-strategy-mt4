@@ -766,10 +766,10 @@ silence_watcher() {
 # the same result without the amnesia. No-clobber, so a base the terminal has
 # already refreshed on this volume wins.
 repair_symbol_bases() {
-  local seed="/opt/mt5-distro/Bases"
+  local seed="${HEX_DISTRO_SEED:-/opt/mt5-distro}/Bases"
   [ -d "$seed/Deriv-Demo" ] || return 0
   mkdir -p "$MT5DIR/Bases" 2>/dev/null || true
-  if [ -d "$MT5DIR/Bases/Deriv-Demo/history" ]; then
+  if [ -d "$MT5DIR/Bases/Deriv-Demo/history/$MT5_SYMBOL" ]; then
     return 0
   fi
   log "the volume has no symbol history - copying Bases/Deriv-Demo out of the image so $MT5_SYMBOL synchronizes at once"
