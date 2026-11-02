@@ -77,7 +77,6 @@ COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT" -C "$MD" \
   --exclude='Bases/Deriv-Demo/mail' \
   --exclude='Bases/Deriv-Demo/news' \
   --exclude='Bases/Deriv-Demo/subscriptions' \
-  --exclude='history' \
   --exclude='logs' \
   --exclude='Tester' \
   --exclude='_autobackup_*' \
@@ -115,7 +114,7 @@ cat <<EOF
 
 Next, ship it and point the container at it:
   1. gh release create mt5-portable-distro dist/mt5-portable.tar.gz \\
-       --title "MT5 portable distro" --notes "Complete MT5 tree, Bases excluded"
+       --title "MT5 portable distro" --notes "Complete MT5 tree; Bases/Deriv-Demo (symbol history + Market Watch) included, other brokers' bases excluded"
   2. in Dokploy (Environment tab), add:
        MT5_DISTRO_URL=https://github.com/thamitshepe/Forex-hex-algo-strategy-mt4/releases/download/mt5-portable-distro/mt5-portable.tar.gz
   3. Redeploy, and watch for "distro seeded (recorded in /data/mt5/.seeded-from)".
