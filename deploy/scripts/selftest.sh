@@ -222,6 +222,17 @@ check_not_contains "workflow assigns no account password" "MT5_PASSWORD=" "$(cat
 check_not_contains "workflow references no password secret" "secrets.MT5" "$(cat "$wf")"
 check_not_contains "workflow assigns no account login" "MT5_LOGIN=" "$(cat "$wf")"
 
+echo "an EA that vanishes is seen, explained and put back"
+# The 2026-11-02 removal left no trace in the journal beyond one bare line - the
+# reason lives in the Experts (MQL5) log, which nothing mirrored.
+check_contains "the Experts (MQL5) log is mirrored, not just the journal" \
+  'mirror_dir "MQL5" "$MT5DIR/MQL5/Logs" nocsv' "$(cat "$ENTRYPOINT")"
+check_contains "the watchdog knows a bare removal, not only a sync timeout" \
+  "'expert '*removed*" "$(cat "$ENTRYPOINT")"
+check_contains "and the push carries the MQL5 line that caused it" \
+  "MQL5 log:" "$(cat "$ENTRYPOINT")"
+
+
 echo "the EA carries the bankroll rule"
 EA="$HERE/../../MQL5/Experts/HEX-BoomRider.mq5"
 if [ -f "$EA" ]; then
@@ -229,6 +240,8 @@ if [ -f "$EA" ]; then
   check_contains "effective bankroll is equity - baseline" "equity - InpBaselineEquity" "$(cat "$EA")"
   check_contains "the blow alert pushes to the phone" "SendNotification" "$(cat "$EA")"
   check_contains "and writes a marker so the halt survives restarts" "BlownMarkerExists" "$(cat "$EA")"
+  check_contains "no entry is priced off a one-sided or missing quote" \
+    "ask <= 0.0 || bid <= 0.0" "$(cat "$EA")"
   check_eq "preset exists beside it" "1" \
     "$([ -f "$HERE/../../MQL5/Presets/HEX-BoomRider.set" ] && echo 1)"
 else
