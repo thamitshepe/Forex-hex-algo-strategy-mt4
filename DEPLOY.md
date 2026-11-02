@@ -15,7 +15,7 @@
 > | | MT4 (retired) | MT5 (current) |
 > |---|---|---|
 > | EA | HEX-FVG-Breaker | HEX-BoomRider (long-only spike rider) |
-> | Symbol | XAUUSD / DOGEUSD | **Boom 400 Index** (note the spaces), M15 |
+> | Symbol | XAUUSD / DOGEUSD | **Volatility Boom 400 Index** (the exact broker name), M15 |
 > | Terminal | `terminal.exe` /portable `startup.ini` | `terminal64.exe` /portable `/config:mt5.ini` |
 > | First login | manual on the VNC desktop | **automated** — `[Common] Login/Password/Server` autologins |
 > | Chart + EA attach | profile templates | `[StartUp]` in mt5.ini (one chart, EA + preset) |
@@ -53,7 +53,7 @@
 >    Deriv MT5 install) still works and wins when both are set — it is also what
 >    lets CI's `ea-check` stage compile `HEX-BoomRider.mq5` at build time.
 > 5. First boot: watch the noVNC desktop once to confirm the login and that
->    Boom 400 Index is ticking; the chart, EA and autotrading all come from
+>    Volatility Boom 400 Index is ticking; the chart, EA and autotrading all come from
 >    `mt5.ini` now, so there is nothing else to click.
 > 6. **The blow rule:** when the phone alert says the account is blown
 >    (equity ≤ 9990 — the $10 of headroom is gone), reset the demo account in

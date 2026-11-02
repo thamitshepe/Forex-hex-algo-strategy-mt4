@@ -8,7 +8,7 @@
 #
 #   service    instance   account               symbol          hostname
 #   ---------  ---------  --------------------- --------------  ------------------
-#   mt5-boom   1          MT5_LOGIN (Deriv)     Boom 400 Index  boom.thami.dev
+#   mt5-boom   1          MT5_LOGIN (Deriv)     Volatility Boom 400 Index  boom.thami.dev
 #
 # CI pushes this file: deploy/scripts/dokploy-apply.sh creates the Dokploy app,
 # sends this YAML to it as a raw compose file, sets the environment and deploys -
@@ -51,8 +51,12 @@ services:
       MT5_LOGIN: "${MT5_LOGIN:-}"
       MT5_PASSWORD: "${MT5_PASSWORD:-}"
       MT5_SERVER: "${MT5_SERVER:-Deriv-Demo}"
-      # Deriv's Boom indices are named with spaces: "Boom 400 Index".
-      MT5_SYMBOL: "${MT5_SYMBOL:-Boom 400 Index}"
+      # Deriv's Boom indices carry the Volatility prefix: the exact symbol name
+      # on the account is "Volatility Boom 400 Index". It has to match the
+      # broker's symbol to the character - a name that does not exist opens a
+      # chart that never synchronizes, and MT5 then deletes the expert after
+      # five minutes without ever running it.
+      MT5_SYMBOL: "${MT5_SYMBOL:-Volatility Boom 400 Index}"
       MT5_PERIOD: "${MT5_PERIOD:-M15}"
       MT5_EXPERT: "${MT5_EXPERT:-HEX-BoomRider}"
       MT5_PRESET: "${MT5_PRESET:-HEX-BoomRider}"

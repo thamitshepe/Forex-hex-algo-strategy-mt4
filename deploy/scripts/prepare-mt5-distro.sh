@@ -52,14 +52,31 @@ echo "config      : $(ls "$MD/config" 2>/dev/null | wc -l | tr -d ' ') files (se
 
 mkdir -p "$OUTDIR"
 echo
-echo "archiving (Bases, history, logs, tester, sounds are left out; all re-download) ..."
+echo "archiving (logs, tester, sounds and the other brokers' bases are left out) ..."
+# Bases/Deriv-Demo keeps THIS account's symbol history and the Market Watch
+# selection. Leaving it out was a bug with a 5-minute cost: the container then
+# opened a chart whose symbol had no data at all, the terminal waited for the
+# symbol to synchronize, gave up and DELETED the expert before OnInit ever ran
+# ("initializing of HEX-BoomRider failed with code 0 (symbol synchronization
+# timeout)" and then "expert ... removed" - with an empty Experts tab and no
+# trading). The other brokers' bases (and ticks/trades/mail/news, which the
+# server re-fetches) stay out: they are the bulk and change nothing.
 # --no-mac-metadata / --no-xattrs: without them every file gains an AppleDouble
 # twin (._name) or a LIBARCHIVE.xattr header, MetaEditor batch-compiles the
 # twins on the server and GNU tar warns per header. macOS tar -t HIDES the
 # ._members afterwards, which is why the count below uses python's tarfile -
 # what Linux tar will see, not what macOS reports.
 COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf "$OUT" -C "$MD" \
-  --exclude='Bases' \
+  --exclude='Bases/Custom' \
+  --exclude='Bases/Default' \
+  --exclude='Bases/MetaQuotes-Demo' \
+  --exclude='Bases/MetaQuotes-Demo.app' \
+  --exclude='Bases/signals' \
+  --exclude='Bases/Deriv-Demo/ticks' \
+  --exclude='Bases/Deriv-Demo/trades' \
+  --exclude='Bases/Deriv-Demo/mail' \
+  --exclude='Bases/Deriv-Demo/news' \
+  --exclude='Bases/Deriv-Demo/subscriptions' \
   --exclude='history' \
   --exclude='logs' \
   --exclude='Tester' \

@@ -99,8 +99,12 @@ MT5DIR="$(shared_var MT5DIR /data/mt5)"
 MT5_LOGIN="$(inst_var MT5_LOGIN)"
 MT5_PASSWORD="$(inst_var MT5_PASSWORD)"
 MT5_SERVER="$(inst_var MT5_SERVER)"
-# Deriv's Boom indices are named with spaces: "Boom 400 Index". Default M15.
-MT5_SYMBOL="$(inst_var MT5_SYMBOL "Boom 400 Index")"
+# Deriv's Boom indices carry the Volatility prefix: the account's own symbol
+# history folder is "Volatility Boom 400 Index". The name in a [StartUp] Symbol=
+# line has to match the broker's symbol exactly - a name that does not exist
+# opens a chart that never synchronizes, and the terminal then deletes the
+# expert after five minutes without ever calling OnInit. Default M15.
+MT5_SYMBOL="$(inst_var MT5_SYMBOL "Volatility Boom 400 Index")"
 MT5_PERIOD="$(inst_var MT5_PERIOD "M15")"
 MT5_EXPERT="$(inst_var MT5_EXPERT "HEX-BoomRider")"
 MT5_PRESET="$(inst_var MT5_PRESET "$MT5_EXPERT")"
@@ -770,6 +774,26 @@ silence_watcher() {
   done
 }
 
+# The image bakes the terminal (and, since the symbol-name bug, that account's
+# Bases/Deriv-Demo: the symbol history plus the Market Watch selection). An
+# existing volume predates that, and MT5_FORCE_SEED would wipe the volume - the
+# account, the presets, the logs - to get it. Copying the missing base in is
+# the same result without the amnesia. No-clobber, so a base the terminal has
+# already refreshed on this volume wins.
+repair_symbol_bases() {
+  local seed="/opt/mt5-distro/Bases"
+  [ -d "$seed/Deriv-Demo" ] || return 0
+  mkdir -p "$MT5DIR/Bases" 2>/dev/null || true
+  if [ -d "$MT5DIR/Bases/Deriv-Demo/history" ]; then
+    return 0
+  fi
+  log "the volume has no symbol history - copying Bases/Deriv-Demo out of the image so $MT5_SYMBOL synchronizes at once"
+  cp -an "$seed/Deriv-Demo" "$MT5DIR/Bases/" 2>/dev/null || true
+  cp -an "$seed"/*.dat "$MT5DIR/Bases/" 2>/dev/null || true
+  chown -R trader:trader "$MT5DIR/Bases" 2>/dev/null || true
+  log "copied $(du -sh "$MT5DIR/Bases/Deriv-Demo" 2>/dev/null | cut -f1) of symbol history into the volume"
+}
+
 # Keep the lease fresh so healthcheck's "container alive" evidence is ours too.
 lease_keeper() {
   while :; do
@@ -806,6 +830,7 @@ main() {
   # compiler are Windows GUI programs - Wine needs a display even for /auto.
   start_desktop
   ensure_terminal
+  repair_symbol_bases
   sync_ea
   compile_ea
   write_mt5_ini

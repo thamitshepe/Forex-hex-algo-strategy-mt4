@@ -58,7 +58,7 @@ die()  { echo "die: $*" >&2; exit 1; }
 echo "mt5.ini"
 # shellcheck disable=SC2034  # read by the extracted function
 MT5DIR="$TMP/mt5"; MT5_LOGIN=41311895; MT5_PASSWORD=secret
-MT5_SERVER=Deriv-Demo; MT5_SYMBOL="Boom 400 Index"; MT5_PERIOD=M15
+MT5_SERVER=Deriv-Demo; MT5_SYMBOL="Volatility Boom 400 Index"; MT5_PERIOD=M15
 MT5_EXPERT=HEX-BoomRider; MT5_PRESET=HEX-BoomRider; MT5_INSTANCE=1
 mkdir -p "$MT5DIR"   # main() creates this in the real container
 load_fn "$ENTRYPOINT" write_mt5_ini >/dev/null
@@ -74,7 +74,7 @@ if [ -f "$ini" ]; then
   check_contains "expert section"           "[StartUp]"           "$(cat "$ini")"
   check_contains "expert"    "Expert=HEX-BoomRider"                 "$(cat "$ini")"
   check_contains "preset"    "ExpertParameters=HEX-BoomRider.set"   "$(cat "$ini")"
-  check_contains "symbol with spaces" "Symbol=Boom 400 Index"       "$(cat "$ini")"
+  check_contains "symbol with spaces" "Symbol=Volatility Boom 400 Index" "$(cat "$ini")"
   check_contains "period"    "Period=M15"              "$(cat "$ini")"
   check_eq "no unexpanded \${}" "0" "$(grep -c '\\${' "$ini")"
   check_eq "password is 600" "600" "$(stat -c %a "$ini" 2>/dev/null || stat -f %Lp "$ini")"
@@ -203,7 +203,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   check_contains "the service is mt5-boom" "mt5-boom" "$out"
   check_contains "on its own fresh volume" "hex-mt5-boom-data" "$out"
   check_not_contains "no MT4 variable reaches the container" "MT4_" "$out"
-  check_contains "Deriv's Boom 400 is the default symbol" "Boom 400 Index" "$out"
+  check_contains "the account's Boom symbol is the default" "Volatility Boom 400 Index" "$out"
   check_contains "the EA the image ships is attached" "HEX-BoomRider" "$out"
   check_contains "the port a domain proxies to" '6080' "$out"
 else
