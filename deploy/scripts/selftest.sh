@@ -349,6 +349,14 @@ echo "dokploy-apply"
 # the instance. It is run twice: the second run has to find what the first made
 # rather than create a second app, and that is what makes it safe on every push.
 DOKPLOY="$HERE/dokploy-apply.sh"
+# A shell resolves a function when it is called, not when the file is read, so a
+# helper used above its own definition prints "die: command not found" exactly in
+# the case the message exists for (a mistyped --env file). Compare the line
+# numbers rather than trusting the order by eye.
+die_line="$(grep -n '^die() {' "$DOKPLOY" 2>/dev/null | head -1 | cut -d: -f1)"
+use_line="$(grep -n 'die \"env file not found' "$DOKPLOY" 2>/dev/null | head -1 | cut -d: -f1)"
+check_eq "the provisioner defines its failure helper before the first use of it" "1" \
+  "$([ -n "$die_line" ] && [ -n "$use_line" ] && [ "$die_line" -lt "$use_line" ] && echo 1 || echo 0)"
 if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && [ -x "$DOKPLOY" ]; then
   PORT=$((18000 + RANDOM % 2000))
   LOG="$TMP/requests.jsonl"

@@ -69,14 +69,17 @@ case "$COMPOSE_FILE" in /*) ;; *) COMPOSE_FILE="$REPO/$COMPOSE_FILE" ;; esac
 
 # The environment is what the YAML interpolates. Either pass it inline, or name the
 # file holding it - CI writes one so that a password never appears in the process
-# table of a `sh -c` line.
+# table of a `sh -c` line. (These two helpers come first: the branch below reports a
+# missing file through `die`, and a shell resolves a function at call time, so
+# defining them after this point makes a typo print "die: command not found"
+# instead of the sentence that explains it.)
+log() { printf '[dokploy] %s\n' "$*"; }
+die() { printf '[dokploy] FATAL: %s\n' "$*" >&2; exit 1; }
+
 if [ -n "$DOKPLOY_ENV_FILE" ]; then
   [ -f "$DOKPLOY_ENV_FILE" ] || die "env file not found: ${DOKPLOY_ENV_FILE}"
   DOKPLOY_ENV="$(cat "$DOKPLOY_ENV_FILE")"
 fi
-
-log() { printf '[dokploy] %s\n' "$*"; }
-die() { printf '[dokploy] FATAL: %s\n' "$*" >&2; exit 1; }
 
 [ -n "$DOKPLOY_URL" ] || die "DOKPLOY_URL is empty. Point it at the instance, e.g. https://dokploy.example.com (no trailing slash)."
 [ -n "$DOKPLOY_API_TOKEN" ] || die "DOKPLOY_API_TOKEN is empty. Dokploy -> Settings -> API Keys, then keep it in a secret."
