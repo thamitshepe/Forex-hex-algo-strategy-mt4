@@ -504,62 +504,55 @@ wait_for_terminal() {
 # folders and re-prints new lines, surviving a day rollover and a truncated
 # file. Anything already in the folder when this starts belongs to a previous
 # run and is not replayed (a restart that reprinted it showed a second "loaded
-# successfully" that read like a double expert load). Bash 3.2 safe: per-file
-# counters on disk, no associative arrays.
+# successfully" that read like a double expert load). Bash 3.2 safe: the
+# follow list is one string - no associative arrays, nothing on disk.
 mirror_dir() {
-  local tag="$1" dir="$2"
+  local tag="$1" dir="$2" ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
   set +e
   set +o pipefail
-  local state="${TMPDIR:-/tmp}/hex-mirror$(printf '%s' "$dir" | tr -c 'A-Za-z0-9' '_')" f n seen
-  mkdir -p "$state" 2>/dev/null || true
-  seen=0
+  # Anything already in the folder when this starts belongs to a previous run:
+  # report it, never replay it. Then follow the files instead of re-counting them
+  # every few seconds. The old per-file .seen counters lived in files: when one
+  # could not be written the count stayed at 0 and the whole journal was printed
+  # again on every pass - the 3-second echo loop that buried the log on
+  # 2026-11-02, reading the volume to do it. tail -F starts at the same offset,
+  # never replays, survives a rotated file, and needs no state at all.
+  local seen=0 f n ef en sedu="sed"
+  # Line-buffered sed, so a sparse journal line shows up in docker logs at once
+  # instead of sitting in a 4K block buffer. GNU sed only; macOS sed has no -u
+  # and does not need it (nothing there pipes into a log collector).
+  sed -u '' /dev/null >/dev/null 2>&1 && sedu="sed -u"
   for f in "$dir"/*.log; do
     [ -f "$f" ] || continue
     n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
     case "$n" in ''|*[!0-9]*) n=0 ;; esac
-    printf '%s\n' "$n" > "$state/$(basename "$f").seen" 2>/dev/null || true
     seen=$((seen + n))
   done
   if [ "$seen" -gt 0 ]; then
-    printf '%s %s line(s) from the previous run are already in %s - not replayed, the file is on the volume\\n' \
+    printf '%s %s line(s) from the previous run are already in %s - not replayed, the file is on the volume\n' \
       "$tag" "$seen" "$dir"
   fi
-  # Also mirror the EA's own CSV folder, so trades are visible in docker logs.
-  local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs" ef en
-  local ea_state="$state/ea"
-  mkdir -p "$ea_state" 2>/dev/null || true
-  for ef in "$ea_dir"/*.csv "$ea_dir"/*.txt; do
-    [ -f "$ef" ] || continue
-    en=$(wc -l < "$ef" 2>/dev/null | tr -d '[:space:]'); en=${en:-0}
-    case "$en" in ''|*[!0-9]*) en=0 ;; esac
-    printf '%s\\n' "$en" > "$ea_state/$(basename "$ef").seen" 2>/dev/null || true
-  done
+  # Follow, don't re-count. New files - the journal rotates at midnight, the EA
+  # writes a fresh CSV - are picked up by the loop below.
+  local followed=" "
   while :; do
     for f in "$dir"/*.log; do
       [ -f "$f" ] || continue
+      case "$followed" in *" $(basename "$f") "*) continue ;; esac
       n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
       case "$n" in ''|*[!0-9]*) n=0 ;; esac
-      p=$(cat "$state/$(basename "$f").seen" 2>/dev/null | tr -d '[:space:]')
-      case "$p" in ''|*[!0-9]*) p=0 ;; esac
-      [ "$n" -lt "$p" ] && p=0
-      if [ "$n" -gt "$p" ]; then
-        tail -n "+$((p + 1))" "$f" 2>/dev/null | sed "s/^/[$tag] /"
-        printf '%s\\n' "$n" > "$state/$(basename "$f").seen" 2>/dev/null || true
-      fi
+      tail -n "+$((n + 1))" -F "$f" 2>/dev/null | $sedu "s/^/[$tag] /" &
+      followed="$followed$(basename "$f") "
     done
     for ef in "$ea_dir"/*.csv "$ea_dir"/*.txt; do
       [ -f "$ef" ] || continue
+      case "$followed" in *" $(basename "$ef") "*) continue ;; esac
       en=$(wc -l < "$ef" 2>/dev/null | tr -d '[:space:]'); en=${en:-0}
       case "$en" in ''|*[!0-9]*) en=0 ;; esac
-      p=$(cat "$ea_state/$(basename "$ef").seen" 2>/dev/null | tr -d '[:space:]')
-      case "$p" in ''|*[!0-9]*) p=0 ;; esac
-      [ "$en" -lt "$p" ] && p=0
-      if [ "$en" -gt "$p" ]; then
-        tail -n "+$((p + 1))" "$ef" 2>/dev/null | sed "s/^/[EA] /"
-        printf '%s\\n' "$en" > "$ea_state/$(basename "$ef").seen" 2>/dev/null || true
-      fi
+      tail -n "+$((en + 1))" -F "$ef" 2>/dev/null | $sedu "s/^/[EA] /" &
+      followed="$followed$(basename "$ef") "
     done
-    sleep 3
+    sleep 20
   done
 }
 
@@ -706,39 +699,31 @@ hex_push() { # TITLE BODY
 # forwarded, so a quiet market does not spam the phone.
 push_watcher() {
   local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
-  local state="${TMPDIR:-/tmp}/hex-push" f n p line
+  local followed=" " f n line
   set +e
   set +o pipefail
   [ -n "${MT5_NOTIFY_URL:-}" ] || return 0
-  mkdir -p "$state" 2>/dev/null || true
-  # Start from the current end of file: no replay of yesterday's trades.
-  for f in "$ea_dir"/*.csv; do
-    [ -f "$f" ] || continue
-    n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
-    printf '%s\n' "$n" > "$state/$(basename "$f").seen" 2>/dev/null || true
-  done
+  # tail -F starts at the end of the file, so yesterday is not replayed
+  # and no .seen counter has to be writable.
   while :; do
     for f in "$ea_dir"/*.csv; do
       [ -f "$f" ] || continue
-      local s="$state/$(basename "$f").seen"
+      case "$followed" in *" $(basename "$f") "*) continue ;; esac
       n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]'); n=${n:-0}
       case "$n" in ''|*[!0-9]*) n=0 ;; esac
-      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]'); p=${p:-0}
-      case "$p" in ''|*[!0-9]*) p=0 ;; esac
-      [ "$n" -lt "$p" ] && p=0
-      if [ "$n" -gt "$p" ]; then
-        while IFS= read -r line; do
+      followed="$followed$(basename "$f") "
+      (
+        tail -n "+$((n + 1))" -F "$f" 2>/dev/null | while IFS= read -r line; do
           case "$line" in
             *,BUY,*)    hex_push "BUY"   "$line" ;;
             *,CLOSE,*)  hex_push "CLOSE" "$line" ;;
             *,BLOWN,*)  hex_push "BLOWN" "$line" ;;
             *,ERROR,*)  hex_push "ERROR" "$line" ;;
           esac
-        done < <(tail -n "+$((p + 1))" "$f" 2>/dev/null)
-        printf '%s\n' "$n" > "$s" 2>/dev/null || true
-      fi
+        done
+      ) &
     done
-    sleep 5
+    sleep 20
   done
 }
 
