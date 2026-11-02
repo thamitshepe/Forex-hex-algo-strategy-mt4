@@ -23,7 +23,13 @@
 
 input double InpBaselineEquity = 9990.0;   // Blow line: equity at/below this = blown
 input double InpRiskPct        = 20.0;     // Risk % of effective bankroll per trade
-input double InpMaxRiskPct     = 50.0;     // Never risk more than this % (min-lot guard)
+input double InpMaxRiskPct     = 60.0;     // Never risk more than this % of the bankroll (min-lot guard)
+// Why 60 and not 50: this account's broker minimum is 0.10 lots, and one of them
+// risks ~$5.97 against the $10 bankroll - 59.7%. A 50% cap could therefore never
+// be met by any legal trade and CalcLots refused every entry, forever (the
+// "min lot 0.10 would risk 5.9748 > cap 50.00% of 10.00" loop of 2026-11-02).
+// 60% admits exactly that one minimum lot; the shortfall between the risk-sized
+// size (20% = $2.00) and the floor is the price of the broker's lot step.
 input double InpTakeProfitPct  = 0.15;     // TP: % above entry
 input double InpStopLossPct    = 0.40;     // SL: % below entry
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %

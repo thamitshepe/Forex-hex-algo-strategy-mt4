@@ -242,8 +242,14 @@ if [ -f "$EA" ]; then
   check_contains "and writes a marker so the halt survives restarts" "BlownMarkerExists" "$(cat "$EA")"
   check_contains "no entry is priced off a one-sided or missing quote" \
     "ask <= 0.0 || bid <= 0.0" "$(cat "$EA")"
+  # 0.10 lots risk ~$5.97 = 59.7% of the $10 bankroll, so a 50% cap rejected every
+  # entry forever: the cap has to admit the broker's minimum lot or nothing trades.
+  check_contains "the min-lot cap admits the broker's 0.10 minimum" \
+    "InpMaxRiskPct     = 60.0" "$(cat "$EA")"
   check_eq "preset exists beside it" "1" \
     "$([ -f "$HERE/../../MQL5/Presets/HEX-BoomRider.set" ] && echo 1)"
+  check_contains "and the preset carries the same cap" "InpMaxRiskPct=60.0" \
+    "$(cat "$HERE/../../MQL5/Presets/HEX-BoomRider.set")"
 else
   bad "EA exists at MQL5/Experts/HEX-BoomRider.mq5"
 fi

@@ -60,6 +60,18 @@
 >    Deriv's portal, delete
 >    `/data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt` (via the desktop or
 >    a fresh volume), and it trades again. The halt survives restarts by design.
+> 7. **Sizing, and the skip that is not a fault.** Risk is 20% of the $10 of
+>    headroom, but this broker's minimum lot is 0.10 and *one* of those risks
+>    ~$5.97 against the 0.40% stop — 59.7% of the bankroll. `InpMaxRiskPct` is 60
+>    in the preset for exactly that reason: at 50 no legal trade can satisfy the
+>    cap, so `CalcLots` logs `min lot 0.10 would risk ... > cap ...` on every tick
+>    and the EA never enters (the forever-loop of 2026-11-02). At 60 it takes one
+>    minimum lot per signal, and two losses reach the halt at 9990 — that is the
+>    design of a $10 bankroll, not a misconfiguration. Raising `InpRiskPct` does
+>    not help: the risk-sized size (20% = $2.00) is below the lot floor either
+>    way, and `Tools/boom_backtest.py` already floors to `min_lot`, so it always
+>    assumed the minimum lot was the trade.
+
 
 The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**
 machine off, asleep, or in a bag. Everything here is a container that builds and

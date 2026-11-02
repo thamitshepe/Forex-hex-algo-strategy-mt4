@@ -1,8 +1,12 @@
 ; HEX-BoomRider preset - Volatility Boom 400, $10 effective bankroll on a 10k demo
 ; Blow line: equity <= 9990 -> alert + halt (reset the demo to resume)
+; InpMaxRiskPct is 60, not 50, on purpose: the broker minimum is 0.10 lots and
+; one risks ~$5.97 = 59.7% of this $10 bankroll, so a 50% cap rejected every
+; entry forever ("min lot 0.10 would risk 5.9748 > cap 50.00% of 10.00"). 60%
+; admits exactly one minimum lot - i.e. two consecutive losses reach the halt.
 InpBaselineEquity=9990.0
 InpRiskPct=20.0
-InpMaxRiskPct=50.0
+InpMaxRiskPct=60.0
 InpTakeProfitPct=0.15
 InpStopLossPct=0.40
 InpMaxSpreadPct=0.03
