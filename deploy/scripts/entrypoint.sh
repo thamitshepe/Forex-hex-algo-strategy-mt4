@@ -730,8 +730,10 @@ hex_push() { # TITLE BODY
 }
 
 # Turn the EA's own CSV rows into phone pushes. The EA writes one row per
-# event (BUY / BLOWN / SKIP / ERROR / INIT); only the ones worth a buzz are
-# forwarded, so a quiet market does not spam the phone.
+# event (INIT / BUY / CLOSE / BLOWN / SKIP / ERROR): BUY, CLOSE, BLOWN and ERROR
+# are forwarded every time, and the first SKIP of each distinct reason once per
+# run - so a quiet market does not spam the phone, but "nothing is trading" is
+# never silent either.
 push_watcher() {
   local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
   local followed=" " f n line
@@ -881,7 +883,7 @@ main() {
   desktop_keeper &
   push_watcher &
   silence_watcher &
-  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ERROR and BLOWN."
+  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ERROR and BLOWN - plus the first SKIP of each reason if the EA cannot size a trade."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   set +e
