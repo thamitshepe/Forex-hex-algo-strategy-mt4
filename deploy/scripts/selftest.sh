@@ -318,6 +318,20 @@ else
 fi
 check_eq "backtest still compiles" "0" \
   "$(python3 -m py_compile "$HERE/../../Tools/boom_backtest.py" >/dev/null 2>&1 && echo 0 || echo 1)"
+# DEPLOY.md once told people the GHCR package was public when it was not, and
+# walked the deploy through forex-hex-mt4 after the workflow moved to mt5. Both
+# are a deploy that fails at the pull with nothing to explain it, so the doc is
+# checked against the image name the workflow actually builds.
+DOC="$HERE/../../DEPLOY.md"
+WF="$HERE/../../.github/workflows/deploy.yml"
+if [ -f "$DOC" ] && [ -f "$WF" ]; then
+  IMG="$(sed -n 's/^  IMAGE_NAME: .*\/\([a-z0-9._-]*\)$/\1/p' "$WF" | head -1)"
+  [ -n "$IMG" ] || IMG="forex-hex-mt5"
+  check_contains "the docs name the image the workflow actually builds" \
+    "ghcr.io/thamitshepe/$IMG" "$(cat "$DOC")"
+  check_contains "and they do not promise a public package without checking" \
+    "verified 2026-11-02" "$(cat "$DOC")"
+fi
 # The EA compile check lives in the image build. metaeditor writes its log in
 # UTF-16, so reading it with plain cat prints NULs and a real compile error looks
 # like a mystery failure; and a distro missing MQL5/Include reports the EA's own

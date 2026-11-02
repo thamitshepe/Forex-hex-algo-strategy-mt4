@@ -20,8 +20,8 @@
 > | First login | manual on the VNC desktop | **automated** — `[Common] Login/Password/Server` autologins |
 > | Chart + EA attach | profile templates | `[StartUp]` in mt5.ini (one chart, EA + preset) |
 > | AutoTrading at start | startup.ini key | `[Experts] Enabled=1` |
-> | Bankroll rule | — | effective bankroll = **Equity − 9990**; risk 20%/trade of it |
-> | Blow guard | — | equity ≤ **9990** → Alert + phone push + marker file + permanent halt |
+> | Bankroll rule | — | effective bankroll = **Equity − 9980** ($20 of headroom); risk 20%/trade of it |
+> | Blow guard | — | equity ≤ **9980** → Alert + phone push + marker file + permanent halt |
 > | Data dir | `/data/mt4` | `/data/mt5` (fresh volume) |
 > | Logs | `/data/mt4/MQL4/Files/Common/HEX-Logs` | `/data/mt5/MQL5/Files/HEX-Logs` |
 >
@@ -113,6 +113,42 @@
 >    nothing at all (bit-identical results), while cutting a trade early throws
 >    away the spike it was waiting for (−32% $/h). Do not "improve" the EA by
 >    adding them back.
+> ### Where a deploy stands today (verified 2026-11-02)
+>
+> The pipeline is `git push` → Actions builds `deploy/Dockerfile` (compiling the EA
+> against a real MetaEditor on the way) → GHCR → Dokploy pulls and recreates the
+> container. Two things gate the last hop, and both live *outside* the repo:
+>
+> | | state now | what it takes |
+> |---|---|---|
+> | which remote gets the push | `origin` = `thamitshepe/Forex-hex-algo-strategy-mt4`; the read-only `Manged3/...` is kept as `upstream` | nothing — `git push` is the whole gesture |
+> | repo **variables** | only `MT5_DISTRO_URL` is set | `DOKPLOY_URL` (the instance URL, no trailing slash); optionally `ENABLE_VNC`, `TZ` |
+> | repo **secret** | **`DOKPLOY_API_TOKEN` is not set** | add it from Dokploy → *Settings → API Keys* |
+> | GHCR package `forex-hex-mt5` | **private** — an anonymous pull answers `401` | flip it Public, or give Dokploy a `read:packages` credential |
+>
+> Without those two Dokploy values the deploy job does not fail: it prints
+> `DOKPLOY_URL or DOKPLOY_API_TOKEN is unset - image published, nothing deployed`
+> and exits **green**. So a push can look fully successful while the server keeps
+> running the previous build. That notice is the line to look for when a deploy
+> "worked" and the EA on the chart did not change.
+>
+> **Nothing has to be copied.** `deploy/scripts/dokploy-apply.sh` sends
+> `deploy/docker-compose.yml` into the Dokploy app as a raw compose file on every
+> push, sets the environment and recreates the container — the server runs exactly
+> the file in the commit, and nothing is built on the server. There is no compose
+> file to paste and no `.env` to keep in sync. The only Dokploy-side values that
+> can go stale are the account credentials in the app's *Environment* tab
+> (`MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`), which CI deliberately never touches
+> — and the registry credential, if the package stays private.
+>
+> **Naming, after the MT5 port.** The live names are `forex-hex-mt5` (image and
+> project) and `hex-mt5` (the Compose app). Where this document still says
+> `MT4_*` or `forex-hex-mt4` — the §4 distro, the §5/§6 tables, the troubleshooting
+> rows — read `MT5_*` and `forex-hex-mt5`: the workflow sends the MT5 names and
+> `deploy/docker-compose.yml` interpolates them. `dokploy-apply.sh` defaults to
+> the MT5 pair, so leaving `DOKPLOY_PROJECT` / `DOKPLOY_APP` unset is correct.
+
+
 
 
 The point of this file: `HEX-FVG-Breaker` trading on XAUUSD M15 with **your**
@@ -468,30 +504,41 @@ the Mac copy: two terminals on one account is two robots, and the preset's
 `deploy/Dockerfile`, push to GHCR, tag `:live` for `main` plus the commit SHA.
 
 ```
-ghcr.io/thamitshepe/forex-hex-mt4:live      <- what Dokploy runs
-ghcr.io/thamitshepe/forex-hex-mt4:<sha>     <- the rollback tag
+ghcr.io/thamitshepe/forex-hex-mt5:live      <- what Dokploy runs
+ghcr.io/thamitshepe/forex-hex-mt5:<sha>     <- the rollback tag
 ```
 
 Four things worth knowing, all of them checked rather than assumed:
 
 - **The owner is whoever owns the repo the workflow runs in.** `Manged3/...` is
   read-only for the current token, so the workflow runs from the fork
-  (`thamitshepe/Forex-hex-algo-strategy-mt4`, wired up as the `fork` remote) and
-  the image lands under that account's namespace. If you publish somewhere else,
-  change `image:` in `deploy/docker-compose.yml` to match. The workflow itself
-  needs no edit: it uses `${{ github.repository_owner }}`.
-- **The package is public, so Dokploy needs no registry credential.**
-  `GET https://ghcr.io/v2/thamitshepe/forex-hex-mt4/tags/list` answers `200` to an
-  anonymous pull-scoped token and lists `live` and the commit SHA. If you would
-  rather have it private, flip it in the repo's Packages tab and add a registry
-  credential in Dokploy (registry `ghcr.io`, username = the GitHub account,
-  password = a PAT with `read:packages`). The image holds no secrets either way —
-  credentials live in the environment and on the volume, never in the image.
-- **The build fails if the EA does not compile** — once `MT4_DISTRO_URL` is set
+  (`thamitshepe/Forex-hex-algo-strategy-mt4`, wired up as the **`origin`** remote,
+  with the read-only one kept as `upstream`) and the image lands under that
+  account's namespace. If you publish somewhere else, change `image:` in
+  `deploy/docker-compose.yml` to match. The workflow itself needs no edit: it uses
+  `${{ github.repository_owner }}`.
+- **The package has to be pullable by the server, and by default it is not.**
+  A package first created by the workflow's `GITHUB_TOKEN` is **private**, so an
+  anonymous `GET https://ghcr.io/v2/thamitshepe/forex-hex-mt5/tags/list` answers
+  `401 UNAUTHORIZED` (verified 2026-11-02) and Dokploy's pull of
+  `ghcr.io/thamitshepe/forex-hex-mt5:live` fails with a 401 that reads like a
+  network fault. Fix it once, either way:
+  - repo → **Packages** → `forex-hex-mt5` → **Package settings** → *Change
+    visibility* → **Public**; or
+  - keep it private and add a registry credential (registry `ghcr.io`,
+    username = the GitHub account, password = a PAT with `read:packages`) — a
+    click in Dokploy's UI, because it exposes no API field for registry
+    credentials.
+
+  The image holds no secrets either way — credentials live in the environment and
+  on the volume, never in the image.
+- **The build fails if the EA does not compile** — once `MT5_DISTRO_URL` is set
   as a repository variable. That is a feature: green CI and a working robot are
   the same fact here. Without that variable the `ea-check` stage prints
-  `MT4_DISTRO_URL is not set` and skips, and the container compiles from source
-  at first start instead (slower to boot, same result).
+  `MT5_DISTRO_URL is not set` and skips, and the container compiles from source
+  at first start instead (slower to boot, same result). The stage decodes
+  metaeditor's UTF-16 log before reading it, so a real compile error prints as an
+  error instead of a mystery failure.
 - **It is `linux/amd64` only**, which is what a normal VPS is. The published
   manifest is an OCI index holding one `linux/amd64` image plus buildkit's
   provenance attestation.
@@ -515,7 +562,7 @@ environment and the deployment (§6). These are the values it carries.
 | variable | `MT4_PROFILE` | default `default` |
 | variable | `ENABLE_VNC` | default `1` |
 | variable | `TZ` | leave unset (UTC): the preset's trading hours are UTC |
-| variable | `DOKPLOY_PROJECT` / `DOKPLOY_APP` | optional. Rename the project or the Compose app away from `forex-hex-mt4` / `hex-mt4`. `DOKPLOY_APP` is the Compose *project* name, so changing it later is a fresh volume, not a rename |
+| variable | `DOKPLOY_PROJECT` / `DOKPLOY_APP` | optional. The script's defaults are already the MT5 pair — project `forex-hex-mt5`, Compose app `hex-mt5` — so set these only to rename one. `DOKPLOY_APP` is the Compose *project* name, so changing it later is a fresh volume, not a rename |
 | variable | — | there is an extra switch that lives entirely in Dokploy, not here: `MT4_RECLAIM_VOLUME=1`, set in the app's Environment tab, moves an existing volume to the account now in the env (one-shot — see the troubleshooting rows) |
 
 Leave `DOKPLOY_URL` and `DOKPLOY_API_TOKEN` unset and the workflow still does the
@@ -652,11 +699,13 @@ the compiled EA, the HEX-Logs CSVs — is under it, so a redeploy is not a resta
 the demo. This is also the one place `DOKPLOY_APP` matters: it *is* that prefix, so
 renaming the app later points the container at an empty volume.
 
-**Registry pull: not needed.** The package is public (§5), so Dokploy pulls
-`ghcr.io/thamitshepe/forex-hex-mt4:live` with no credential at all. Only if you make
-the package private do you add one here (registry `ghcr.io`, username = the GitHub
-account, password = a PAT with `read:packages`) — and that one is a click, because
-Dokploy exposes no API field for registry credentials.
+**Registry pull: the credential is needed until the package is public.** A package
+first created by the workflow starts **private** (§5), so a pull of
+`ghcr.io/thamitshepe/forex-hex-mt5:live` answers `401` until either the package is
+flipped to Public in the repo's Packages tab, or a credential is added here
+(registry `ghcr.io`, username = the GitHub account, password = a PAT with
+`read:packages`) — and that one is a click, because Dokploy exposes no API field
+for registry credentials.
 
 **Re-pulling the moving tag.** `deploy/docker-compose.yml` carries
 `pull_policy: always` on the service. Without it a redeploy of `:live` can reuse the
