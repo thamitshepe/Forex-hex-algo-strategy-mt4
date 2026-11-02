@@ -12,6 +12,7 @@ InpStopLossPct=0.40
 InpMaxSpreadPct=0.03
 InpMagic=400400
 InpHeartbeatSec=60
+InpSkipLogSec=60
 InpLogDir=HEX-Logs
 ; Pushes are sent by the CONTAINER (curl -> MT5_NOTIFY_URL), not by the EA:
 ; MQL5's WebRequest only accepts URLs whitelisted by hand in the terminal GUI,

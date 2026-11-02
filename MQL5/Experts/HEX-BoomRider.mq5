@@ -35,6 +35,7 @@ input double InpStopLossPct    = 0.40;     // SL: % below entry
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %
 input long   InpMagic          = 400400;   // Magic number
 input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval
+input int    InpSkipLogSec     = 60;       // Repeat the same SKIP line at most this often (0 = every tick)
 input string InpLogDir         = "HEX-Logs";
 input string InpNotifyUrl      = "";       // Push target: ntfy URL, empty = MetaQuotes ID push only
 input bool   InpNotifyTest     = true;     // Send a hello at init so the pipe is proven early
@@ -46,6 +47,8 @@ datetime lastDay       = 0;
 string   csvName       = "";
 int      tradesToday   = 0;
 double   riskToday     = 0.0;
+string   lastSkipKey   = "";
+datetime lastSkipAt    = 0;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -124,7 +127,7 @@ void OnTick()
    double spreadPct = (ask - bid) / ask * 100.0;
    if(!MathIsValidNumber(spreadPct) || spreadPct > InpMaxSpreadPct)
    {
-      Log("SKIP", StringFormat("spread %.4f%% > max %.4f%%", spreadPct, InpMaxSpreadPct));
+      LogSkip("spread", StringFormat("spread %.4f%% > max %.4f%%", spreadPct, InpMaxSpreadPct));
       return;
    }
 
@@ -136,7 +139,7 @@ void OnTick()
    double lots = CalcLots(effective, slDist);
    if(lots <= 0.0)
    {
-      Log("SKIP", "lot calc returned 0 (risk cap / broker limits)");
+      LogSkip("no-size", "lot calc returned 0 (risk cap / broker limits) - see the line before");
       return;
    }
 
@@ -215,10 +218,16 @@ double CalcLots(double effective, double slDist)
    if(lots < minLot)
    {
       double minLotRisk = minLot * moneyPerLot;
-      if(minLotRisk > effective * InpMaxRiskPct / 100.0)
+      double capMoney   = effective * InpMaxRiskPct / 100.0;
+      if(minLotRisk > capMoney)
       {
-         Log("SKIP", StringFormat("min lot %.2f would risk %.4f > cap %.2f%% of %.2f",
-             minLot, minLotRisk, InpMaxRiskPct, effective));
+         // Say what would fix it: the bankroll whose cap covers one minimum lot.
+         // A trading log that only repeats "no" is what cost a whole night here.
+         LogSkip("minlot-cap", StringFormat("min lot %.2f would risk %.4f > cap %.2f%% of %.2f "
+             "(needs a bankroll of >= %.2f, i.e. equity >= %.2f)",
+             minLot, minLotRisk, InpMaxRiskPct, effective,
+             minLotRisk / (InpMaxRiskPct / 100.0),
+             InpBaselineEquity + minLotRisk / (InpMaxRiskPct / 100.0)));
          return 0.0;
       }
       lots = minLot;
@@ -302,6 +311,23 @@ void Log(string event, string detail)
    FileWriteString(h, line + "\n");
    FileClose(h);
    Print("[BoomRider] ", event, ": ", detail);   // banner mirror via Experts log
+}
+
+//+------------------------------------------------------------------+
+//| SKIP logging, throttled. The sizing guard fires on every tick,   |
+//| and the same line twice a second for hours buries the BUY/ERROR  |
+//| rows it exists to explain (and doubles docker-log volume through |
+//| the MQL5 mirror). One line per reason per InpSkipLogSec; a new   |
+//| reason is logged at once. key is the category, not the text: the |
+//| risk figure inside the text changes on every single tick.        |
+//+------------------------------------------------------------------+
+void LogSkip(string key, string detail)
+{
+   if(key == lastSkipKey && InpSkipLogSec > 0 && TimeCurrent() - lastSkipAt < InpSkipLogSec)
+      return;
+   lastSkipKey = key;
+   lastSkipAt  = TimeCurrent();
+   Log("SKIP", detail);
 }
 
 void WriteHeartbeat()

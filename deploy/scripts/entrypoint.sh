@@ -748,12 +748,25 @@ push_watcher() {
       case "$n" in ''|*[!0-9]*) n=0 ;; esac
       followed="$followed$(basename "$f") "
       (
+        pushed=" "
         tail -n "+$((n + 1))" -F "$f" 2>/dev/null | while IFS= read -r line; do
           case "$line" in
             *,BUY,*)    hex_push "BUY"   "$line" ;;
             *,CLOSE,*)  hex_push "CLOSE" "$line" ;;
             *,BLOWN,*)  hex_push "BLOWN" "$line" ;;
             *,ERROR,*)  hex_push "ERROR" "$line" ;;
+            *,SKIP,*)
+              # A SKIP repeats on every tick with a risk figure that changes each
+              # time, so it is deduped by shape and pushed once per reason per
+              # run. Silence while nothing trades is exactly how the night of
+              # 2026-11-02 went unnoticed: the EA was fine, it just could not
+              # size a trade.
+              k=$(printf '%s' "$line" | sed 's/[0-9][0-9.]*/#/g')
+              case "$pushed" in
+                *"|$k|"*) ;;
+                *) pushed="$pushed|$k|"
+                   hex_push "SKIP" "$line (pushed once per reason - the EA is running, it just cannot size a trade)" ;;
+              esac ;;
           esac
         done
       ) &

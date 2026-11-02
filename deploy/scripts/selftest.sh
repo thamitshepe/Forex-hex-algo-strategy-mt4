@@ -231,6 +231,8 @@ check_contains "the watchdog knows a bare removal, not only a sync timeout" \
   "'expert '*removed*" "$(cat "$ENTRYPOINT")"
 check_contains "and the push carries the MQL5 line that caused it" \
   "MQL5 log:" "$(cat "$ENTRYPOINT")"
+check_contains "a SKIP is pushed once per reason, not on every tick" \
+  'hex_push "SKIP"' "$(cat "$ENTRYPOINT")"
 
 
 echo "the EA carries the bankroll rule"
@@ -250,6 +252,14 @@ if [ -f "$EA" ]; then
     "$([ -f "$HERE/../../MQL5/Presets/HEX-BoomRider.set" ] && echo 1)"
   check_contains "and the preset carries the same cap" "InpMaxRiskPct=60.0" \
     "$(cat "$HERE/../../MQL5/Presets/HEX-BoomRider.set")"
+  # A SKIP repeated twice a second for hours is how "nothing is trading" stayed
+  # invisible for a night; and a refusal has to name what would fix it.
+  check_contains "repeated SKIPs are throttled to one per reason per minute" \
+    "InpSkipLogSec" "$(cat "$EA")"
+  check_contains "the throttle keys on the reason, not the changing risk figure" \
+    "void LogSkip(string key, string detail)" "$(cat "$EA")"
+  check_contains "and a refused size names the bankroll it would need" \
+    "needs a bankroll of >= " "$(cat "$EA")"
 else
   bad "EA exists at MQL5/Experts/HEX-BoomRider.mq5"
 fi
