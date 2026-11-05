@@ -45,7 +45,13 @@ InpMaxLadderLots=0.40
 InpMaxLadderRiskPct=30.0
 InpMaxSpreadPct=0.03
 InpMagic=400400
+; The heartbeat is written from a terminal TIMER, not from OnTick, so it keeps
+; moving when the chart stops being ticked - and the age of the last tick goes
+; inside it. A stale beat therefore means the EA is gone; a moving beat with a
+; climbing tick age means the feed is dead (the container restarts the terminal
+; after HEX_TICK_STALL_MIN and pushes FEED-STALL).
 InpHeartbeatSec=60
+InpTickStallSec=300
 InpSkipLogSec=60
 InpLogDir=HEX-Logs
 ; Pushes are sent by the CONTAINER (curl -> MT5_NOTIFY_URL), not by the EA:

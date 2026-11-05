@@ -87,7 +87,19 @@ services:
       ENABLE_VNC: "${ENABLE_VNC:-1}"
       VNC_PASSWORD: "${VNC_PASSWORD:-}"
       TZ: "${TZ:-UTC}"
+      # Both limits are about the EA's heartbeat file, and they answer two
+      # different questions (2026-11-02: the chart stopped being ticked at 21:54
+      # while the terminal stayed up, so the EA was never called again and the
+      # container read "unhealthy" for six hours with the wrong explanation).
+      #   HEX_HEARTBEAT_MAX_AGE_MIN - how stale the file may be before the EA is
+      #     considered gone. The EA writes it from a terminal TIMER, so it should
+      #     keep moving regardless of ticks.
+      #   HEX_TICK_STALL_MIN - how long the chart may go without a tick while the
+      #     EA is still beating. Boom indices are 24/7, so this is a fault: the
+      #     entrypoint's feed_watchdog restarts the terminal after it (3 tries,
+      #     budget on the volume), and the healthcheck reports it.
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
+      HEX_TICK_STALL_MIN: "${HEX_TICK_STALL_MIN:-15}"
     volumes:
       # Fresh MT5 volume. The old MT4 volumes (hex-mt4-data, hex-mt4-doge-data)
       # are no longer referenced and can be removed on the server once their

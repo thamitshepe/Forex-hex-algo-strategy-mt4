@@ -731,11 +731,13 @@ hex_push() { # TITLE BODY
 
 # Turn the EA's own CSV rows into phone pushes. The EA writes one row per
 # event (INIT / BUY / CLOSE / ADD / LOCKIN / TRAIL / EPISODE / BLOWN / SKIP /
-# ERROR): BUY, CLOSE, ADD, BLOWN and ERROR are forwarded every time, and the
-# first SKIP of each distinct reason once per run - so a quiet market does not
-# spam the phone, but "nothing is trading" is never silent either. ADD is the
-# one to watch for: it is the EA putting a second (third, fourth) leg on a trade
-# that is already in profit, i.e. a spike being multiplied.
+# ERROR / FEED / DEINIT): BUY, CLOSE, ADD, BLOWN, ERROR, FEED and DEINIT are
+# forwarded every time, and the first SKIP of each distinct reason once per run -
+# so a quiet market does not spam the phone, but "nothing is trading" is never
+# silent either. ADD is the one to watch for: it is the EA putting a second
+# (third, fourth) leg on a trade that is already in profit, i.e. a spike being
+# multiplied. FEED is the opposite: ticks stopped arriving. DEINIT says the EA
+# left the chart, with the reason the terminal never states on its own.
 push_watcher() {
   local ea_dir="$MT5DIR/MQL5/Files/HEX-Logs"
   local followed=" " f n line
@@ -760,6 +762,8 @@ push_watcher() {
             *,ADD,*)    hex_push "ADD"   "$line (profit leg added - the spike is being multiplied)" ;;
             *,BLOWN,*)  hex_push "BLOWN" "$line" ;;
             *,ERROR,*)  hex_push "ERROR" "$line" ;;
+            *,FEED,*)   hex_push "FEED"  "$line (ticks are arriving again)" ;;
+            *,DEINIT,*) hex_push "DEINIT" "$line (the EA left the chart - nothing is managing the trade until it is back)" ;;
             *,SKIP,*)
               # A SKIP repeats on every tick with a risk figure that changes each
               # time, so it is deduped by shape and pushed once per reason per
@@ -780,35 +784,138 @@ push_watcher() {
   done
 }
 
+# Two helpers for reading the EA's heartbeat, used by both watchers below.
+#
+# `stat -c` is GNU, `stat -f` is BSD: the same file is inspected by hand on a dev
+# machine, where the container's coreutils are not the ones in $PATH (healthcheck
+# learned this the hard way - see the note there).
+file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+
+# The EA's beat is "<local time>|tick_age=<s>|equity=..|trades=..". tick_age is
+# the one fact mtime cannot carry: how long the chart has gone without a tick.
+# Empty output = the field is not there (an older build) and must read as
+# "unknown", never as a stall - printing 0 for "I cannot tell" is how a healthy
+# container becomes a restart loop.
+hb_tick_age() {
+  sed -n 's/.*|tick_age=\([0-9][0-9]*\)|.*/\1/p' "$1" 2>/dev/null | tail -1
+}
+
 # "Trader enabled" and "robot running" are not the same thing - last night
 # proved it: the EA had been removed hours earlier and the only outward sign
 # was an Experts tab with nothing in it. The EA rewrites its heartbeat file
 # every InpHeartbeatSec; if that file stops moving, the EA is not on the chart
 # no matter what the AutoTrading button says. Buzz once, then every 6h.
+#
+# What "silent" can mean changed on 2026-11-02, and the two are different
+# incidents this watcher may not confuse:
+#   * the heartbeat stops moving   -> the EA is not being called at all: removed
+#     from the chart, or its terminal thread is stuck;
+#   * the beat moves, tick_age climbs -> the EA is attached and alive but the
+#     CHART is not being fed (feed_watchdog below owns that one).
+# The EA beats from a terminal timer now, so a stale beat can be trusted to mean
+# the first case. Before that, a dead feed looked identical, and on that night
+# this line blamed the chart attachment for six hours.
 silence_watcher() {
   local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-  local limit="${HEX_SILENCE_MIN:-20}" age now mtime warned=0 last=0
+  local limit="${HEX_SILENCE_MIN:-20}" age now mt warned=0 last=0 started
+  started=$(date +%s)
   set +e
   while :; do
     sleep 300
     now=$(date +%s)
+    mt=0
     if [ -f "$hb" ]; then
-      mtime=$(stat -c %Y "$hb" 2>/dev/null || echo 0)
-      age=$(( (now - mtime) / 60 ))
+      mt=$(file_mtime "$hb")
+      case "$mt" in ''|*[!0-9]*) mt=0 ;; esac
+    fi
+    if [ "$mt" -gt 0 ]; then
+      age=$(( (now - mt) / 60 ))
+    elif [ $(( now - started )) -lt 1800 ]; then
+      # No beat has ever been written on this volume. A first boot seeds the
+      # terminal, synchronizes the symbol and only then loads the EA, which is
+      # minutes; alarming inside that window would be a false NOT-RUNNING on
+      # every fresh volume (the healthcheck says "no heartbeat yet" here too).
+      continue
     else
       age=9999
     fi
     if [ "$age" -ge "$limit" ]; then
       if [ "$warned" -eq 0 ] || [ $(( now - last )) -ge 21600 ]; then
         warned=1; last=$now
-        log "SILENCE: the EA has not written a heartbeat for ${age}m - it is NOT running on the chart (an enabled AutoTrading button does not mean the robot is attached)"
-        hex_push "NOT-RUNNING" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}. The robot is not attached to the chart - nothing is trading. Check the container logs / VNC desktop."
+        log "SILENCE: the EA has not written a heartbeat for ${age}m - the EA is not being called at all (off the chart, or its terminal thread is stuck). An enabled AutoTrading button does not mean the robot is attached"
+        hex_push "NOT-RUNNING" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}. The robot is not being called - nothing is trading. Check the container logs / VNC desktop. (A moving heartbeat with no ticks is a different fault: that one says FEED-STALL.)"
       fi
     elif [ "$warned" -eq 1 ]; then
       warned=0
       log "SILENCE: heartbeat is back (${age}m old) - the EA is running again"
       hex_push "RUNNING" "EA heartbeat is back on ${MT5_SYMBOL} - the robot is trading again."
     fi
+  done
+}
+
+# The other half of silence - the half nothing watched. On 2026-11-02 at 21:54
+# the chart stopped being ticked while the terminal stayed UP and connected: the
+# stop it was holding filled at 22:04 and was journalled normally, but OnTick was
+# never called again. The EA wrote nothing for six hours, the container sat there
+# "running" with nothing trading, and the only signal said the EA was off the
+# chart (it was not). MT5 does not reliably come back from that by itself;
+# restarting the terminal re-synchronizes the symbol and re-subscribes the chart,
+# which is the only lever a container has.
+#
+# The restart budget lives on the volume (/data/.hex-feed) because the restart
+# takes the container down with it - in memory every boot would start at attempt
+# 1 and a genuinely dead feed would be restarted for ever. A stall that survives
+# three restarts is not a restart problem, and then it says so and stops.
+feed_watchdog() {
+  local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+  local state="$MT5DIR/.hex-feed"
+  local limit="${HEX_TICK_STALL_MIN:-15}"
+  local tick_age beat_age tries last now mt
+  set +e
+  while :; do
+    sleep 60
+    [ -f "$hb" ] || continue
+    # A blown account has halted on purpose and the healthcheck says so; a dead
+    # feed in that state is not costing anything, and restarting the terminal
+    # every 15 minutes would be noise about a robot that is not supposed to trade.
+    [ -f "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt" ] && continue
+    tick_age=$(hb_tick_age "$hb")
+    [ -n "$tick_age" ] || continue          # older EA build: no tick age to judge
+    if [ "$tick_age" -lt $(( limit * 60 )) ]; then
+      if [ -f "$state" ]; then
+        rm -f "$state" 2>/dev/null
+        log "WATCHDOG: the feed is back (last tick ${tick_age}s ago) - feed restart budget cleared"
+      fi
+      continue
+    fi
+    # A stale beat is silence_watcher's incident; restarting here as well would
+    # have two watchdogs killing the same terminal for two different reasons.
+    now=$(date +%s); mt=$(file_mtime "$hb")
+    case "$mt" in ''|*[!0-9]*) mt=0 ;; esac
+    beat_age=9999
+    [ "$mt" -gt 0 ] && beat_age=$(( (now - mt) / 60 ))
+    [ "$beat_age" -le 5 ] || continue
+    tries=0; last=0
+    if [ -f "$state" ]; then
+      read -r tries last < "$state" 2>/dev/null
+    fi
+    case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+    case "$last"  in ''|*[!0-9]*) last=0  ;; esac
+    # The budget belongs to an incident: thirty quiet minutes after the last
+    # attempt is a new one, the same rule ea_watchdog uses.
+    [ "$last" -gt 0 ] && [ $(( now - last )) -gt 1800 ] && tries=0
+    tries=$(( tries + 1 ))
+    printf '%s %s\n' "$tries" "$now" > "$state" 2>/dev/null || true
+    if [ "$tries" -le 3 ]; then
+      log "WATCHDOG: the EA is on the chart and beating, but nothing has ticked $MT5_SYMBOL for $(( tick_age / 60 ))m (attempt $tries/3) - restarting the terminal to re-subscribe the symbol"
+      hex_push "FEED-STALL" "No tick for $(( tick_age / 60 )) minutes on $MT5_SYMBOL. The EA is attached and its heartbeat is moving, but the chart is not being fed - no entry, no exit, nothing trading. Restarting the terminal (attempt $tries/3)."
+      sleep 3
+      kill "$TERMINAL_PID" 2>/dev/null || true
+      return 0   # main() waits on that pid; the container is coming down
+    fi
+    log "WATCHDOG: 3 terminal restarts did not restore the feed (last tick ${tick_age}s ago) - this is not a restart problem, it is the terminal, the symbol or the broker"
+    hex_push "NEEDS-YOU" "The feed is still dead after 3 terminal restarts on $MT5_SYMBOL (no tick for $(( tick_age / 60 ))m, EA attached and beating). Open the VNC desktop: Market Watch, the symbol, the broker's status page."
+    sleep 900
   done
 }
 
@@ -886,6 +993,10 @@ main() {
   desktop_keeper &
   push_watcher &
   silence_watcher &
+  # Silences are two different faults with two different fixes: no heartbeat at
+  # all (silence_watcher, the EA is gone) and a heartbeat on a chart nothing is
+  # ticking (feed_watchdog, the terminal is up but the feed is dead).
+  feed_watchdog &
   hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You will get a buzz on every BUY, CLOSE, ADD, ERROR and BLOWN - ADD means the EA just put another leg on a trade that is already in profit - plus the first SKIP of each reason if the EA cannot size a trade."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.

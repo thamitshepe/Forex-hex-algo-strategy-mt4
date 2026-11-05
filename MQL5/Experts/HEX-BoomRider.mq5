@@ -67,7 +67,8 @@ input double InpMaxLadderLots  = 0.40;     // Hard cap on ladder exposure
 input double InpMaxLadderRiskPct = 30.0;   // ... and its total stop risk, % of headroom (3-loss budget)
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %
 input long   InpMagic          = 400400;   // Magic number
-input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval
+input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval (terminal timer, NOT ticks)
+input int    InpTickStallSec   = 300;      // Log/push a dead feed after this long with no tick (0 = never)
 input int    InpSkipLogSec     = 60;       // Repeat the same SKIP line at most this often (0 = every tick)
 input string InpLogDir         = "HEX-Logs";
 input string InpNotifyUrl      = "";       // Push target: ntfy URL, empty = MetaQuotes ID push only
@@ -75,7 +76,19 @@ input bool   InpNotifyTest     = true;     // Send a hello at init so the pipe i
 
 CTrade   trade;
 bool     blown         = false;
-datetime lastHeartbeat = 0;
+// All three clocks are TimeLocal(), deliberately. TimeCurrent() is the server
+// time of the LAST TICK, so on a chart that stops being ticked it freezes - and
+// a heartbeat, a throttle or a stall detector built on it goes quiet exactly
+// when it is needed. Live, 2026-11-02: the terminal stayed up and connected (the
+// stop it was holding filled at 22:04 and was journalled), but the chart stopped
+// being ticked at 21:54, OnTick was never called again, and the EA wrote nothing
+// for six hours while every outward signal said "running".
+datetime lastHeartbeat = 0;   // TimeLocal of the last heartbeat write
+datetime lastTickLocal = 0;   // TimeLocal of the last tick OnTick was called with
+datetime lastStallLog  = 0;   // TimeLocal of the last "no tick" line
+datetime stallSince    = 0;   // TimeLocal when the current stall was first logged
+datetime startedAt     = 0;   // TimeLocal of OnInit (a chart that never ticks stalls too)
+bool     tickStalled   = false;
 datetime lastDay       = 0;
 string   csvName       = "";
 int      tradesToday   = 0;
@@ -97,6 +110,14 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(50);
    trade.SetTypeFillingBySymbol(_Symbol);
+
+   // The heartbeat is a lease on ATTACHMENT, never on ticks. A terminal timer
+   // fires whether or not the chart is being fed, so the file now moves for as
+   // long as the EA is loaded, and the AGE OF THE LAST TICK goes inside it - that
+   // is what separates "the EA is gone" from "the EA is here and the feed is
+   // dead", which on 2026-11-02 were the same silence from the outside.
+   startedAt = TimeLocal();
+   EventSetTimer(1);
 
    blown = BlownMarkerExists();
    MqlDateTime dt; TimeCurrent(dt);
@@ -136,8 +157,16 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // --- heartbeat (lease/monitor evidence for the deploy side) ---
-   if(TimeCurrent() - lastHeartbeat >= InpHeartbeatSec)
+   // --- heartbeat + the other half of it: ticks ARE arriving ---
+   lastTickLocal = TimeLocal();
+   if(tickStalled)
+   {
+      tickStalled = false;
+      Log("FEED", StringFormat("ticks are back after %dm - it was the feed, not the EA",
+          (int)((TimeLocal() - stallSince) / 60)));
+      stallSince = 0;
+   }
+   if(TimeLocal() - lastHeartbeat >= InpHeartbeatSec)
       WriteHeartbeat();
 
    // --- blow guard: the $10 of headroom is gone ---
@@ -237,6 +266,84 @@ void OnTick()
    else
       Notify("ERROR", StringFormat("Buy failed: %d %s",
              trade.ResultRetcode(), trade.ResultRetcodeDescription()));
+}
+
+//+------------------------------------------------------------------+
+//| The heartbeat, on a terminal timer instead of on ticks.          |
+//|                                                                  |
+//| Ticks are not a lease on the EA: on 2026-11-02 the chart stopped |
+//| being fed at 21:54 while the terminal stayed up and connected,   |
+//| so OnTick was never called again. A heartbeat written from       |
+//| OnTick therefore stopped too - and "the feed died" and "the EA   |
+//| was removed" became the same silence in the container log, which |
+//| announced the wrong one for six hours.                           |
+//|                                                                  |
+//| This timer is independent of the quote flow: if the file stops   |
+//| moving, the EA really is gone. The age of the last tick is       |
+//| written INSIDE the beat, so the deploy side can tell the feed is |
+//| dead while the EA is alive - and restart the terminal to re-      |
+//| subscribe the chart.                                             |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+   if(lastHeartbeat == 0 || TimeLocal() - lastHeartbeat >= InpHeartbeatSec)
+      WriteHeartbeat();
+
+   if(InpTickStallSec <= 0)
+      return;
+   int idle = SecondsSinceTick();
+   if(idle < InpTickStallSec)
+      return;
+   // One line at the threshold, then one every five minutes: a stalled feed can
+   // last hours (that night: six), and a line a second would bury the fact that
+   // there is only one thing wrong. push_watcher turns the first one into a buzz.
+   if(lastStallLog > 0 && TimeLocal() - lastStallLog < 300)
+      return;
+   lastStallLog = TimeLocal();
+   if(!tickStalled)
+   {
+      tickStalled = true;
+      stallSince  = TimeLocal();
+   }
+   LogSkip("no-ticks", StringFormat("%dm without a tick on %s - the EA is attached and "
+           "beating, the chart is not being fed (no entry, no exit, nothing trading)",
+           idle / 60, _Symbol));
+}
+
+//+------------------------------------------------------------------+
+//| Why the EA left the chart, in the log the deploy side already   |
+//| mirrors. The terminal writes the reason to the Experts log only  |
+//| in some cases ("expert ... removed") and never says when it      |
+//| happened; this row is a fact with a time on it, and DEINIT is    |
+//| forwarded to the phone.                                          |
+//+------------------------------------------------------------------+
+string DeinitReason(const int reason)
+{
+   switch(reason)
+   {
+      case REASON_PROGRAM:     return "ExpertRemove() was called";
+      case REASON_REMOVE:      return "removed from the chart";
+      case REASON_RECOMPILE:   return "recompiled";
+      case REASON_CHARTCHANGE: return "symbol or timeframe changed";
+      case REASON_CHARTCLOSE:  return "chart closed";
+      case REASON_PARAMETERS:  return "inputs changed";
+      case REASON_ACCOUNT:     return "another account was logged in";
+      case REASON_TEMPLATE:    return "template applied";
+      case REASON_INITFAILED:  return "OnInit did not succeed";
+      case REASON_CLOSE:       return "terminal closed";
+   }
+   return StringFormat("reason %d", reason);
+}
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+   // The row's own timestamp is TimeCurrent() like every other row, so the local
+   // clock goes in the text: on a dead feed the server clock is frozen and the
+   // one thing that matters is when this actually happened.
+   Log("DEINIT", StringFormat("unloaded at %s local: %s; last tick %dm ago",
+       TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+       DeinitReason(reason), SecondsSinceTick() / 60));
 }
 
 //+------------------------------------------------------------------+
@@ -729,23 +836,47 @@ void Log(string event, string detail)
 //+------------------------------------------------------------------+
 void LogSkip(string key, string detail)
 {
-   if(key == lastSkipKey && InpSkipLogSec > 0 && TimeCurrent() - lastSkipAt < InpSkipLogSec)
+   // TimeLocal, not TimeCurrent: the server clock is the last tick's, so it
+   // freezes when the feed does - and "no tick for Nm" would then be logged once
+   // and throttled for ever, which is the silence it exists to break.
+   if(key == lastSkipKey && InpSkipLogSec > 0 && TimeLocal() - lastSkipAt < InpSkipLogSec)
       return;
    lastSkipKey = key;
-   lastSkipAt  = TimeCurrent();
+   lastSkipAt  = TimeLocal();
    Log("SKIP", detail);
+}
+
+//+------------------------------------------------------------------+
+//| How long the chart has gone without a tick, in seconds. Before  |
+//| the first tick it counts from OnInit, so "the symbol never      |
+//| synchronized" is a stall too and not an eternal all-clear.      |
+//+------------------------------------------------------------------+
+int SecondsSinceTick()
+{
+   datetime since = (lastTickLocal > 0) ? lastTickLocal : startedAt;
+   if(since <= 0)
+      return 0;
+   int age = (int)(TimeLocal() - since);
+   return age < 0 ? 0 : age;
 }
 
 void WriteHeartbeat()
 {
-   lastHeartbeat = TimeCurrent();
+   lastHeartbeat = TimeLocal();
    string name = InpLogDir + "/HEX-BoomRider-heartbeat.txt";
    int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(h == INVALID_HANDLE)
       return;
-   FileWriteString(h, StringFormat("%s|%.2f|%d\n",
-                   TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS),
-                   AccountInfoDouble(ACCOUNT_EQUITY), tradesToday));
+   // "<local time>|tick_age=<s>|equity=..|trades=..". The timestamp is when the
+   // EA last ran (mtime says the same thing to the container); tick_age is the
+   // fact mtime cannot carry: 0..N seconds since the chart last ticked, so a
+   // beat that keeps moving while tick_age climbs is a dead feed with a live EA.
+   // Parsed by deploy/scripts/healthcheck.sh and feed_watchdog in the entrypoint
+   // with `tick_age=\([0-9][0-9]*\)` - an older build has no such field and must
+   // read as "unknown", never as a stall.
+   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d\n",
+                   TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+                   SecondsSinceTick(), AccountInfoDouble(ACCOUNT_EQUITY), tradesToday));
    FileClose(h);
 }
 

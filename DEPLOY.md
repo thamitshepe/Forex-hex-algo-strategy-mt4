@@ -764,7 +764,9 @@ UI-made app and a script-made app cannot stay different for long.
 | `MT4_KEEP_SEED_LOGIN` | `1` keeps the seeded tree's `config/accounts.ini`, `server.ini` and `community.ini`, which instance 2's seeding otherwise deletes so it cannot come up as instance 1's account. Set it only when the distro was prepared from *this* broker's terminal with *this* account — it is your assertion, because those files are encrypted and the entrypoint cannot check whose login it is |
 | `MT4_SETUP_URL` | the installer to run when a volume has no terminal and no distro is given. Defaults to MetaQuotes' `mt4setup.exe`, which does not work under Wine; a broker's own `setup.exe` might, and `deploy/scripts/prepare-broker-distro.sh` is the way to find out (§4C). `MT4_SETUP_URL2` for instance 2 |
 | `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
-| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale `equity.csv` may be before the healthcheck says so. CI does not set it; the compose file's `180` applies |
+| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale the EA's heartbeat file may be before the healthcheck calls the container `unhealthy`. CI does not set it; the compose file's `180` applies. The EA writes that file from a terminal **timer** (every `InpHeartbeatSec`, 60 s), not from ticks, so a stale one means the EA is not being called at all - off the chart, or its terminal thread stuck |
+| `HEX_TICK_STALL_MIN` | how long the chart may go without a *tick* while the EA is still beating before that counts as a dead feed: the entrypoint pushes `FEED-STALL` and restarts the terminal (three times per incident, budget kept on the volume), and the healthcheck reports `no quotes for N min`. Compose sets `15`. Boom indices trade 24/7, so this is a fault; raise it if the broker's maintenance window is longer than that |
+| `HEX_SILENCE_MIN` | how long a frozen heartbeat is tolerated before the `NOT-RUNNING` push (default `20`; no compose override, since the EA beats every 60 s) |
 
 ### A second instance (different account, different strategy)
 
@@ -1157,9 +1159,27 @@ there is no such `.srv` and that the list lives in `servers.ini`, which is norma
 
 ```bash
 docker inspect --format '{{.State.Health.Status}}' <container>   # ok / unhealthy
-ls -l /data/mt4/MQL4/Files/Common/HEX-Logs/                      # heartbeat + history
+ls -l /data/mt5/MQL5/Files/HEX-Logs/                              # heartbeat + history
+cat /data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt      # <time>|tick_age=<s>|equity|trades
 docker compose stop                                              # SIGTERM -> wineserver -k -> clean flush
 ```
+
+The healthcheck asks three questions, in the order they go wrong: is
+`terminal64.exe` running, is the EA's heartbeat file moving, and is the chart
+actually being ticked. All three are facts in that one heartbeat line: the file's
+mtime answers the second, `tick_age` the third. They are separate failures with
+separate fixes, and on 2026-11-02 they were indistinguishable:
+
+| what the beat says | what it means | what acts on it |
+|---|---|---|
+| file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. `hex_push NOT-RUNNING` | `silence_watcher` (push), `ea_watchdog` (restart on the journal's removal line) |
+| file fresh, `tick_age` climbing past `HEX_TICK_STALL_MIN` | the EA is attached and alive, the **chart** is not being fed - no entry, no exit, nothing trading. `hex_push FEED-STALL` | `feed_watchdog` (restarts the terminal, 3 tries per incident), healthcheck reports `no quotes for N min` |
+| file fresh, `tick_age` small | running and trading | - |
+
+The EA writes that file from a terminal timer rather than from `OnTick` on
+purpose: a tick-driven heartbeat goes quiet exactly when the feed dies, which is
+how six hours of nothing-trading was reported as "the EA is not on the chart"
+when the EA had never left it.
 
 **Input changes belong in git.** Every start re-copies `MQL4/Presets/*.set` and
 recompiles the EA, so a setting changed on the server is overwritten by the next
@@ -1237,7 +1257,9 @@ shows the EA's prints, and a rebuild is a `git push`.
 | two `Expert HEX-FVG-Breaker …: loaded successfully` lines, one per timeframe | MT4 restores the profile's charts **and** opens one for `startup.ini`'s `Symbol=`, so the expert runs twice on one magic number. The entrypoint now omits `Symbol=` when the profile already carries a chart for the symbol (`chart source: the default profile`), and the EA refuses to start a second copy (`FATAL another copy of this EA holds MagicNumber`) | if you still see two charts, the profile itself has two — remove one and redeploy |
 | two `loaded successfully` lines with *different* timestamps, the earlier one hours old | not a double load: on a restart the log mirror re-read the journal that was already on the volume, so the previous run's lines came out again | fixed — the mirror now starts at the end of an existing journal and says `N line(s) from the previous run … not replayed`. One run = one `loaded successfully` |
 | `Compiling '._HEX-FVG-Breaker'` (and 200 more `._` names) while MT4 starts | the distro was built on macOS without `--no-mac-metadata`: Linux tar extracts the AppleDouble twins that macOS `tar -t` hides, and MetaEditor compiles every one. Costs ~15 s of boot and puts junk in `MQL4` | rebuild the distro with `deploy/scripts/prepare-distro.sh` (it now refuses to write an archive with AppleDouble members) and re-seed with `MT4_FORCE_SEED=1`. The entrypoint also filters `._*` on extraction, so a stale archive is no longer noisy |
-| healthcheck `unhealthy` while the market is shut | `equity.csv` is only written on ticks | raise `HEX_HEARTBEAT_MAX_AGE_MIN`, or ignore it over the weekend |
+| healthcheck `unhealthy`, "EA heartbeat is N min old" | the heartbeat file stopped moving. It is written from a terminal **timer**, so this is not "the market is quiet": the EA is not being called at all | check the Experts (MQL5) log for `error …` / `expert … removed`; the EA's own `DEINIT` row now says why and when it left. `ea_watchdog` restarts the terminal for the removal lines it knows |
+| healthcheck `unhealthy`, "no quotes for N min" while the box is clearly up | the chart is not being ticked: the terminal is running and the EA is beating, but `OnTick` is never called, so nothing can enter or exit. Measured 2026-11-02: last tick 21:54, a stop filled and was journalled at 22:04, six hours of nothing after that | `feed_watchdog` restarts the terminal after `HEX_TICK_STALL_MIN` (three tries per incident) because a restart re-synchronizes the symbol. If it survives three, the fault is the terminal, the symbol or the broker - open the VNC desktop. Raise `HEX_TICK_STALL_MIN` past a maintenance window that is genuinely that long |
+| healthcheck `unhealthy` while the broker's market is shut | `tick_age` climbs when the broker publishes no quotes, by design (the beat keeps moving) | raise `HEX_TICK_STALL_MIN` past the closure, or ignore it over a weekend |
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |
 | it trades the wrong timeframe | the chart comes from the profile, not from the env | prepare a distro with the XAUUSD M15 chart, or set the chart once in the desktop (the profile is then saved on the volume) |
 | two robots on one account | the laptop copy is still running | stop one of them, always |

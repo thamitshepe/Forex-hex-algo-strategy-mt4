@@ -190,6 +190,108 @@ check_eq "blown-but-alive reports healthy" "0" "$rc"
 check_contains "and explains the halt" "by design" "$out"
 rm -f "$LOGDIR/HEX-BoomRider-BLOWN.txt"
 
+# An attached EA on a chart that is not being ticked traded nothing for six
+# hours on 2026-11-02 while every other signal said "running". The beat now
+# carries the age of the last tick, so the healthcheck can say which half is
+# broken instead of calling a live EA detached.
+echo "healthcheck: a live EA on a dead feed"
+printf '2026.11.02 22:04:19|tick_age=12|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "a beating EA with live quotes is healthy" "0" "$rc"
+check_contains "and reports the age of the last tick" "last tick 0 min ago" "$out"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "a beating EA with a dead feed is unhealthy" "1" "$rc"
+check_contains "and says how long nothing has quoted" "no quotes for 62 min" "$out"
+check_contains "not that the EA is gone" "chart is not being ticked" "$out"
+printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "a beat from a build without tick_age is unknown, not a stall" "0" "$rc"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" HEX_TICK_STALL_MIN=120 bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "the stall limit is a knob, not a constant" "0" "$rc"
+
+
+echo "the heartbeat's tick age, read the way the watchers read it"
+HB="$TMP/heartbeat.txt"
+load_fn "$ENTRYPOINT" hb_tick_age >/dev/null
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$HB"
+check_eq "the age comes out of the beat" "3720" "$(hb_tick_age "$HB")"
+printf '2026.11.02 22:04:19|tick_age=0|equity=9994.29|trades=1\n' > "$HB"
+check_eq "a tick right now reads as 0, not as unknown" "0" "$(hb_tick_age "$HB")"
+printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$HB"
+check_eq "an older beat has no age at all" "" "$(hb_tick_age "$HB")"
+check_eq "and a missing file is not an error" "" "$(hb_tick_age "$TMP/nope.txt")"
+
+# The decision, not just the parsing: on a stalled feed the watchdog has to push
+# FEED-STALL and restart the terminal exactly once, and on a live feed it has to
+# do nothing and forget last incident's budget. sleep/kill/hex_push are stubbed
+# inside a subshell (the second `sleep` ends the loop), so no real process dies.
+echo "feed_watchdog: restart once, or not at all"
+MT5DIR="$TMP/fw"
+mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
+FW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+ACTIONS="$TMP/fw-actions"
+MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=999999; HEX_TICK_STALL_MIN=15
+load_fn "$ENTRYPOINT" file_mtime >/dev/null
+load_fn "$ENTRYPOINT" feed_watchdog >/dev/null
+fw_run() { # one or two loop passes, whatever the beat says
+  ( i=0
+    sleep() { case "${1:-}" in 60) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
+    kill() { printf 'kill %s\n' "$1" >> "$ACTIONS"; }
+    hex_push() { printf 'push %s\n' "$1" >> "$ACTIONS"; }
+    feed_watchdog )
+}
+: > "$ACTIONS"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$FW"
+fw_run
+check_contains "a stalled feed says FEED-STALL" "push FEED-STALL" "$(cat "$ACTIONS")"
+check_eq "and restarts the terminal once, by pid" "1" "$(grep -c "^kill 999999" "$ACTIONS")"
+check_eq "and records the attempt on the volume" "1" \
+  "$(grep -c '^1 ' "$MT5DIR/.hex-feed")"
+: > "$ACTIONS"
+printf '2026.11.02 22:04:19|tick_age=5|equity=9994.29|trades=1\n' > "$FW"
+fw_run
+check_eq "a live feed kills nothing" "0" "$(grep -c '^kill' "$ACTIONS" || true)"
+check_eq "and the incident's budget is forgotten" "0" \
+  "$([ -f "$MT5DIR/.hex-feed" ] && echo 1 || echo 0)"
+: > "$ACTIONS"
+printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$FW"
+fw_run
+check_eq "a beat with no tick age restarts nothing" "0" "$(grep -c '^kill' "$ACTIONS" || true)"
+: > "$ACTIONS"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$FW"
+: > "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+fw_run
+check_eq "a blown account's dead feed is not restarted into noise" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+rm -f "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+
+echo "silence_watcher: no beat yet is not an alarm, an old beat is"
+MT5DIR="$TMP/sw"
+mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
+SW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+ACTIONS="$TMP/sw-actions"
+MT5_SYMBOL="Volatility Boom 400 Index"; HEX_SILENCE_MIN=20
+load_fn "$ENTRYPOINT" silence_watcher >/dev/null
+sw_run() {
+  ( i=0
+    sleep() { case "${1:-}" in 300) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
+    hex_push() { printf 'push %s|%s\n' "$1" "$2" >> "$ACTIONS"; }
+    silence_watcher )
+}
+: > "$ACTIONS"
+sw_run
+check_eq "a volume that has never had a beat gets a grace period" "0" \
+  "$(wc -l < "$ACTIONS" | tr -d ' ')"
+printf '2026.11.02 21:54:49|tick_age=0|equity=9998.25|trades=0\n' > "$SW"
+touch -t "$(date -v-4H +%Y%m%d%H%M 2>/dev/null || date -d '4 hours ago' +%Y%m%d%H%M)" "$SW"
+sw_run
+check_contains "a beat that stopped moving pages NOT-RUNNING" \
+  "push NOT-RUNNING" "$(cat "$ACTIONS")"
+check_contains "and says the robot is not being called" "not being called" \
+  "$(cat "$ACTIONS")"
+
 
 echo "compose file"
 # The compose file is what Dokploy runs, so what it resolves into is checked,
@@ -206,6 +308,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   check_contains "the account's Boom symbol is the default" "Volatility Boom 400 Index" "$out"
   check_contains "the EA the image ships is attached" "HEX-BoomRider" "$out"
   check_contains "the port a domain proxies to" '6080' "$out"
+  check_contains "the dead-feed limit reaches the container" "HEX_TICK_STALL_MIN" "$out"
 else
   printf '  skip docker compose (not installed)\n'
 fi
@@ -331,6 +434,39 @@ if [ -f "$EA" ]; then
 else
   bad "EA exists at MQL5/Experts/HEX-BoomRider.mq5"
 fi
+
+echo "a live EA on a dead feed is a different fault, with its own fix"
+# 2026-11-02: the chart stopped being ticked at 21:54, the EA wrote nothing for
+# six hours, and the only line said the robot was not on the chart. It was. The
+# EA now beats on a terminal timer and puts the tick age inside the beat, so the
+# container can name the fault and restart the terminal to re-subscribe the symbol.
+check_contains "the EA beats from a terminal timer, not from ticks" \
+  "EventSetTimer(1)" "$(cat "$EA")"
+check_contains "and writes the beat there" "void OnTimer()" "$(cat "$EA")"
+check_contains "the beat carries the age of the last tick" "tick_age=" "$(cat "$EA")"
+check_contains "a stalled feed is logged instead of swallowed" \
+  'LogSkip("no-ticks"' "$(cat "$EA")"
+check_contains "and the throttle runs on the wall clock, not the frozen tick clock" \
+  "TimeLocal() - lastSkipAt" "$(cat "$EA")"
+check_contains "the EA says why it left the chart" "void OnDeinit(" "$(cat "$EA")"
+check_contains "with the reason named, not a number" "REASON_REMOVE" "$(cat "$EA")"
+check_contains "the reason the EA left still reaches the phone" \
+  '*,DEINIT,*)' "$(cat "$ENTRYPOINT")"
+check_contains "and so does the recovery when ticks come back" \
+  '*,FEED,*)' "$(cat "$ENTRYPOINT")"
+check_contains "the container restarts the terminal when the feed stalls" \
+  'hex_push "FEED-STALL"' "$(cat "$ENTRYPOINT")"
+check_contains "with a budget that survives the restart it causes" \
+  'state="$MT5DIR/.hex-feed"' "$(cat "$ENTRYPOINT")"
+check_contains "and it stops restarting after three tries" 'attempt $tries/3' \
+  "$(cat "$ENTRYPOINT")"
+check_contains "the watchdog is started with the others" "feed_watchdog &" \
+  "$(cat "$ENTRYPOINT")"
+check_contains "a stale beat is still reported as NOT-RUNNING" \
+  'hex_push "NOT-RUNNING"' "$(cat "$ENTRYPOINT")"
+check_contains "preset pins the stall threshold the container uses" \
+  "InpTickStallSec=300" "$(cat "$SET")"
+
 check_eq "backtest still compiles" "0" \
   "$(python3 -m py_compile "$HERE/../../Tools/boom_backtest.py" >/dev/null 2>&1 && echo 0 || echo 1)"
 # 2026-11-02 again: the harness reported the broken rule as the MOST profitable
