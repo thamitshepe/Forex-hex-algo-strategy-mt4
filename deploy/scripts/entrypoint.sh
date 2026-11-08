@@ -397,6 +397,55 @@ compile_ea() {
   die "no compiled ${MT5_EXPERT}.ex5: the runtime compile failed (see above) and this image has no baked-in copy. Fix the MQL5 or build the image with MT5_DISTRO_URL set so the ea-check stage can compile."
 }
 
+# ---------------------------------------------------- one chart, always -------
+# MT5 restores the desktop it saved on shutdown and THEN applies [StartUp], so
+# every start adds a chart to the ones already there. A volume that restarts (a
+# feed stall, a deploy, a boot loop) therefore accumulates them: by 2026-11-08
+# the noVNC desktop carried several, each restored chart re-attaching its own
+# copy of the expert out of the profile - N copies of one robot on one magic
+# number, and a Wine desktop painting N charts is why the browser tab felt stuck.
+# This volume has exactly one chart: the one [StartUp] opens for $MT5_SYMBOL.
+# Everything the terminal saved is cleared before every start, and the profile as
+# it first arrived is kept in .profile-orig so the old desktop can be restored by
+# hand (copy it back over profiles/).
+ensure_single_chart() {
+  local root dir n removed=0 detail="" roots=""
+  for root in "$MT5DIR/profiles" "$MT5DIR/Profiles"; do
+    [ -d "$root" ] && roots="$roots $root"
+  done
+  if [ -z "$roots" ]; then
+    log "no desktop profile on the volume yet - [StartUp] opens the only chart"
+    return 0
+  fi
+  for root in $roots; do
+    if [ ! -d "$MT5DIR/.profile-orig" ]; then
+      mkdir -p "$MT5DIR/.profile-orig.part" 2>/dev/null || true
+      if cp -a "$root/." "$MT5DIR/.profile-orig.part/" 2>/dev/null &&
+         mv "$MT5DIR/.profile-orig.part" "$MT5DIR/.profile-orig" 2>/dev/null; then
+        log "kept the profile that shipped on this volume in .profile-orig (copy it back over $root to get the old desktop)"
+      else
+        rm -rf "$MT5DIR/.profile-orig.part" 2>/dev/null || true
+        warn "could not keep a copy of $root (read-only or full volume?) - clearing it anyway"
+      fi
+    fi
+    for dir in "$root"/*; do
+      [ -d "$dir" ] || continue
+      n=$(find "$dir" -maxdepth 1 -type f -name 'chart*.chr' 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      [ "$n" -gt 0 ] || continue
+      find "$dir" -maxdepth 1 -type f -name 'chart*.chr' -delete 2>/dev/null || true
+      removed=$((removed + n))
+      detail="$detail $(basename "$dir"):$n"
+    done
+    chown -R trader:trader "$root" 2>/dev/null || true
+  done
+  if [ "$removed" -gt 0 ]; then
+    log "cleared $removed saved chart(s) from the desktop profile (${detail# }) - the terminal opens exactly one, the one [StartUp] makes for $MT5_SYMBOL"
+  else
+    log "the desktop profile carries no saved chart - [StartUp] opens the only one"
+  fi
+}
+
 # ------------------------------------------------------------- start config --
 # MT5 reads a start configuration from /config:<file>. This is what makes the
 # first boot unattended, which MT4 could never fully do:
@@ -435,12 +484,40 @@ write_mt5_ini() {
 
 # ------------------------------------------------------- desktop and launch --
 
+# The window manager, started the one way that can fail loudly. openbox exits at
+# once if the display is not accepting connections yet, and a desktop with no
+# window manager is the noVNC tab that "freezes": the charts are drawn, but no
+# window can be focused, moved or closed, so no dialog can be dismissed - and the
+# keeper below used to relaunch it into the same race, forever.
+start_wm() {
+  openbox >>/tmp/openbox.log 2>&1 &
+  WM_PID=$!
+  sleep 1
+  if kill -0 "$WM_PID" 2>/dev/null; then
+    return 0
+  fi
+  WM_PID=""
+  warn "openbox did not stay up - this desktop has no window manager (that is the frozen noVNC tab). Its own log:"
+  tail -n 8 /tmp/openbox.log 2>/dev/null | sed 's/^/  [openbox] /' || true
+  return 1
+}
+
 start_desktop() {
   Xvfb "$DISPLAY" -screen 0 "$SCREEN" -nolisten tcp >/tmp/xvfb.log 2>&1 &
   XVFB_PID=$!
-  sleep 1
-  openbox >/tmp/openbox.log 2>&1 &
-  WM_PID=$!
+  # Xvfb publishes /tmp/.X11-unix/X<n> when it is ready to accept clients. A WM
+  # started before that exits immediately - which is how this desktop ended up
+  # with none at all. sleep 1 was a guess; the socket is the signal.
+  local sock="/tmp/.X11-unix/X${DISPLAY#:}" waited=0
+  while [ ! -S "$sock" ] && [ "$waited" -lt 40 ]; do
+    sleep 0.25
+    waited=$((waited + 1))
+  done
+  if [ ! -S "$sock" ]; then
+    warn "Xvfb never published $sock - the desktop will not come up. Its own log:"
+    tail -n 8 /tmp/xvfb.log 2>/dev/null | sed 's/^/  [xvfb] /' || true
+  fi
+  start_wm || true
   log "virtual desktop: Xvfb on $DISPLAY ($SCREEN)"
   # An unauthenticated VNC on a public host is a trading terminal anyone can
   # drive. Refuse, loudly, rather than publish one and hope the firewall is
@@ -703,20 +780,36 @@ ea_watchdog() { # DIR
 # A dead window manager or a dead VNC bridge looks identical to "the EA is
 # broken" from a browser - and nobody can click through it. Revive the pieces
 # whose death does not mean the terminal should restart.
+#
+# Liveness is a PID, not a pgrep: `kill -0` cannot miss a process that exists,
+# and the fallback ADOPTS an openbox it did not start instead of launching a
+# second one. Two window managers on one X display is a desktop nobody can
+# click - and the old pgrep-only check could produce exactly that.
+wm_alive() {
+  if [ -n "$WM_PID" ] && kill -0 "$WM_PID" 2>/dev/null; then
+    return 0
+  fi
+  WM_PID=$(pgrep -x openbox 2>/dev/null | head -1 || true)
+  [ -n "$WM_PID" ]
+}
+
 desktop_keeper() {
+  local want_vnc=0
+  if [ -n "${VNC_PASSWORD:-}" ]; then
+    want_vnc=1
+  fi
   while :; do
-    if ! pgrep -x openbox >/dev/null 2>&1; then
-      log "WATCHDOG: openbox died - relaunching (this is why the desktop froze)"
-      openbox >/tmp/openbox.log 2>&1 &
-      WM_PID=$!
+    if ! wm_alive; then
+      log "WATCHDOG: openbox is gone - relaunching (without a window manager the noVNC desktop cannot be clicked)"
+      start_wm || true
     fi
-    if [ -n "$VNC_PASSWORD" ] && ! pgrep -f 'x11vnc' >/dev/null; then
-      log "WATCHDOG: x11vnc died - relaunching"
+    if [ "$want_vnc" -eq 1 ] && ! pgrep -f 'x11vnc' >/dev/null; then
+      log "WATCHDOG: x11vnc died - relaunching (the noVNC tab stays blank until it is back)"
       x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -passwd "$VNC_PASSWORD" \
         -forever -shared -nolookup -o /tmp/x11vnc.log >/dev/null 2>&1 &
       X11VNC_PID=$!
     fi
-    if [ -n "$VNC_PASSWORD" ] && ! pgrep -f 'websockify' >/dev/null; then
+    if [ "$want_vnc" -eq 1 ] && ! pgrep -f 'websockify' >/dev/null; then
       log "WATCHDOG: websockify died - relaunching (refresh the noVNC tab afterwards)"
       websockify --web=/usr/share/novnc "$NOVNC_PORT" "localhost:$VNC_PORT" \
         >/tmp/novnc.log 2>&1 &
@@ -844,6 +937,13 @@ hb_tick_age() {
   sed -n 's/.*|tick_age=\([0-9][0-9]*\)|.*/\1/p' "$1" 2>/dev/null | tail -1
 }
 
+# Any numeric field out of the same beat, so a new field costs one call instead of
+# a parser per field. Empty output = the field is not in this build's beat, which
+# must read as "unknown" - never as 0, and never as the failing value.
+hb_field() { # FILE KEY
+  sed -n "s/.*|$2=\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | tail -1
+}
+
 # "Trader enabled" and "robot running" are not the same thing - last night
 # proved it: the EA had been removed hours earlier and the only outward sign
 # was an Experts tab with nothing in it. The EA rewrites its heartbeat file
@@ -964,7 +1064,7 @@ feed_watchdog() {
   local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
   local state="$MT5DIR/.hex-feed"
   local limit="${HEX_TICK_STALL_MIN:-15}"
-  local tick_age beat_age tries last now mt
+  local tick_age beat_age tries last now mt sel sub
   set +e
   while :; do
     sleep 60
@@ -1001,14 +1101,20 @@ feed_watchdog() {
     tries=$(( tries + 1 ))
     printf '%s %s\n' "$tries" "$now" > "$state" 2>/dev/null || true
     if [ "$tries" -le 3 ]; then
-      log "WATCHDOG: the EA is on the chart and beating, but nothing has ticked $MT5_SYMBOL for $(( tick_age / 60 ))m (attempt $tries/3) - restarting the terminal to re-subscribe the symbol"
-      hex_push "FEED-STALL" "No tick for $(( tick_age / 60 )) minutes on $MT5_SYMBOL. The EA is attached and its heartbeat is moving, but the chart is not being fed - no entry, no exit, nothing trading. Restarting the terminal (attempt $tries/3)."
+      # The beat now also says whether the symbol is subscribed at all. An
+      # unselected symbol gets no quotes, ever - a restart cannot fix that, and
+      # "feed stalled" would send the operator looking at the wrong thing.
+      sel=$(hb_field "$hb" sel)
+      sub=""
+      [ "$sel" = "0" ] && sub=" and the EA reports the symbol is NOT SUBSCRIBED (SYMBOL_SELECT=0)"
+      log "WATCHDOG: the EA is on the chart and beating, but nothing has ticked $MT5_SYMBOL for $(( tick_age / 60 ))m$sub (attempt $tries/3) - restarting the terminal to re-subscribe the symbol"
+      hex_push "FEED-STALL" "No tick for $(( tick_age / 60 )) minutes on $MT5_SYMBOL. The EA is attached and its heartbeat is moving, but the chart is not being fed$sub - no entry, no exit, nothing trading. Restarting the terminal (attempt $tries/3)."
       sleep 3
       kill "$TERMINAL_PID" 2>/dev/null || true
       return 0   # main() waits on that pid; the container is coming down
     fi
     log "WATCHDOG: 3 terminal restarts did not restore the feed (last tick ${tick_age}s ago) - this is not a restart problem, it is the terminal, the symbol or the broker"
-    hex_push "NEEDS-YOU" "The feed is still dead after 3 terminal restarts on $MT5_SYMBOL (no tick for $(( tick_age / 60 ))m, EA attached and beating). Open the VNC desktop: Market Watch, the symbol, the broker's status page."
+    hex_push "NEEDS-YOU" "The feed is still dead after 3 terminal restarts on $MT5_SYMBOL (no tick for $(( tick_age / 60 ))m, EA attached and beating). Open the VNC desktop: Market Watch, the symbol, the broker's status page. An ERROR row in the log saying the symbol is not in the server's list means MT5_SYMBOL is the wrong name - the row lists the names the server does carry."
     sleep 900
   done
 }
@@ -1072,6 +1178,7 @@ main() {
   repair_symbol_bases
   sync_ea
   compile_ea
+  ensure_single_chart
   write_mt5_ini
   launch_terminal
   wait_for_terminal

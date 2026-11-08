@@ -266,14 +266,19 @@ touches Dokploy when those two are set.
 
 After the first start the terminal is on its own: a new commit builds a new image,
 the redeploy pulls it, the entrypoint recompiles the EA from that commit, and the
-chart comes back exactly as it was because the profile is on the volume.
+desktop comes back with exactly one chart - the one `[StartUp]` opens. MT5 also
+restores whatever charts it saved on the volume, so the entrypoint clears those
+before every start (`cleared N saved chart(s) from the desktop profile`): the chart
+pile-up of 2026-11-08 was N copies of the expert on one magic number. The profile
+as it first arrived is kept in `/data/mt5/.profile-orig`.
 
 **What a redeploy keeps, and what it resets.** Everything that matters lives on the
 named volume `hex-mt4-doge-data` (compose: `hex-mt4-doge-data:/data`), and a
 redeploy — `up -d` against a new image — replaces the *container*, never the
 volume. Kept across every deploy: the account login, the balance and open
-positions (they live at the broker anyway), the chart profile, the CSV logs
-(`trades.csv`, `equity.csv`, …), and the WebRequest allow-list. Reset on every
+positions (they live at the broker anyway), the desktop profile MT5 saved (cleared
+before each start, kept in `.profile-orig`), the CSV logs
+(`HEX-BoomRider-*.csv`, `equity.csv`, …), and the WebRequest allow-list. Reset on every
 deploy, on purpose: the EA is recompiled from the commit being deployed, the
 presets are re-copied from the image (`sync_ea`), and `startup.ini` is rewritten —
 which is why hand-edits inside the container do not survive. The preset the EA
@@ -1160,7 +1165,8 @@ there is no such `.srv` and that the list lives in `servers.ini`, which is norma
 ```bash
 docker inspect --format '{{.State.Health.Status}}' <container>   # ok / unhealthy
 ls -l /data/mt5/MQL5/Files/HEX-Logs/                              # heartbeat + history
-cat /data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt      # <time>|tick_age=<s>|equity|trades
+cat /data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt      # <time>|tick_age=<s>|equity|trades|sel|spread
+grep -hE ',SUB,|,ERROR,' /data/mt5/MQL5/Files/HEX-Logs/*.csv | tail -5   # is the symbol on the server, and subscribed?
 docker compose stop                                              # SIGTERM -> wineserver -k -> clean flush
 ```
 
@@ -1174,6 +1180,8 @@ separate fixes, and on 2026-11-02 they were indistinguishable:
 |---|---|---|
 | file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. `hex_push NOT-RUNNING` | `silence_watcher` (pushes, then restarts the terminal so `[StartUp]` re-attaches the expert - 3 tries per incident, budget in `/data/.hex-silence`), `ea_watchdog` (same restart, from the journal's removal line) |
 | file fresh, `tick_age` climbing past `HEX_TICK_STALL_MIN` | the EA is attached and alive, the **chart** is not being fed - no entry, no exit, nothing trading. `hex_push FEED-STALL` | `feed_watchdog` (restarts the terminal, 3 tries per incident), healthcheck reports `no quotes for N min` |
+| file fresh, `sel=0` | the symbol is not **subscribed** (`SYMBOL_SELECT=0`, i.e. not in Market Watch), so no quote can arrive however long we wait - a restart is not the fix | the EA logs `SUB … was not subscribed` and calls `SymbolSelect(_Symbol, true)` at init and again on every stall; healthcheck fails with `NOT SUBSCRIBED`; `feed_watchdog` repeats it in its push |
+| file fresh, `sel=1`, `spread=0` | subscribed, but the broker is publishing no spread for it (the terminal's own sync line says `725 symbols, 0 spreads`) - typically a name the server no longer carries, see the `ERROR` row in the EA's CSV | fix the name (`MT5_SYMBOL`), the restart loop cannot |
 | file fresh, `tick_age` small | running and trading | - |
 
 The EA writes that file from a terminal timer rather than from `OnTick` on
@@ -1277,6 +1285,11 @@ shows the EA's prints, and a rebuild is a `git push`.
 | `push FAILED (…): HTTP 429` | the ntfy topic rate-limited us (60 requests/hour per visitor on ntfy.sh). A container that restarts in a loop used to spend that quota on `UP` and login hints and lose the alerts that mattered | since 2026-11-06 the same title is sent at most once per `HEX_PUSH_REPEAT_SEC` (300 s) - `push held (…)` in the log is that working - and trade events (`BUY CLOSE ADD BLOWN ERROR FEED DEINIT`) are never held. A self-hosted ntfy has no such limit |
 | healthcheck `unhealthy`, "no quotes for N min" while the box is clearly up | the chart is not being ticked: the terminal is running and the EA is beating, but `OnTick` is never called, so nothing can enter or exit. Measured 2026-11-02: last tick 21:54, a stop filled and was journalled at 22:04, six hours of nothing after that | `feed_watchdog` restarts the terminal after `HEX_TICK_STALL_MIN` (three tries per incident) because a restart re-synchronizes the symbol. If it survives three, the fault is the terminal, the symbol or the broker - open the VNC desktop. Raise `HEX_TICK_STALL_MIN` past a maintenance window that is genuinely that long |
 | healthcheck `unhealthy` while the broker's market is shut | `tick_age` climbs when the broker publishes no quotes, by design (the beat keeps moving) | raise `HEX_TICK_STALL_MIN` past the closure, or ignore it over a weekend |
+| **more than one chart** on the noVNC desktop, and the tab is slow or stuck | MT5 restores the desktop it saved on shutdown and *then* applies `[StartUp]`, so every restart adds a chart - and each restored chart re-attaches its own copy of the expert out of the profile. On 2026-11-08 the desktop carried several after a feed-stall restart loop: N robots on one magic number, N charts for Wine to paint | fixed - `ensure_single_chart` deletes the saved charts before every start (`cleared 4 saved chart(s) from the desktop profile (default:3 Charts:1)`) and keeps the profile as it arrived in `/data/mt5/.profile-orig`; the EA also refuses a second copy (`ERROR: another copy of this EA is already running on this terminal (chart …)`, `OnInit` fails). Only the chart `[StartUp]` opens exists, so **do not** park manual charts on this desktop - they are removed on the next restart by design |
+| the noVNC desktop draws the charts but nothing can be clicked (no title bars, dialogs cannot be dismissed, "the UI is stuck") | there is no window manager: `openbox` exits at once if Xvfb is not accepting clients yet, and the keeper used to relaunch it into the same race - or, worse, a second one, which fights the first | fixed - the desktop waits for `/tmp/.X11-unix/X99` before starting the WM, `start_wm` reports `openbox did not stay up` with its own log (`[openbox] …`), and the keeper checks `kill -0 $WM_PID`, adopting a live openbox instead of starting a second. `WATCHDOG: openbox is gone - relaunching` is the self-heal working |
+| `healthcheck` says `NOT SUBSCRIBED (SYMBOL_SELECT=0)`, and the EA's CSV has `SUB … was not subscribed` | the chart's symbol is not in Market Watch, so the terminal subscribes nothing and receives no quotes at all - it looks exactly like a dead feed, but restarting the terminal cannot fix it | the EA selects it itself (`SymbolSelect(_Symbol, true)`) at init and on every stall; if it comes back `FAILED`, add the symbol once in the desktop's Market Watch. Persisting across restarts is a volume whose `Bases/Deriv-Demo/symbols.sel` lost the selection - the volume's base is copied out of the image only when it has no history for the symbol |
+| `ERROR` row: `… is NOT in the server's symbol list (725 symbols on Deriv-Demo) … Names on this server containing "Boom": …` | the chart's name is not (or no longer) offered by the server. MT5 still opens a chart for it out of the terminal's cache, the expert still loads and beats, and **no quote can ever arrive** - the sync line's `0 spreads` is the same fact | the row lists the names the server does carry: set `MT5_SYMBOL` to the exact one and redeploy (the container re-opens the chart). This is the fault `feed_watchdog` cannot restart away, and it says so in its third `NEEDS-YOU` |
+| `ERROR` row: `… is on the server but DISABLED for trading on this account` | the symbol exists and can be ticked, but the broker has trading disabled on it for this account | nothing in this container can change it - the broker has to enable it, or use another symbol |
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |
 | it trades the wrong timeframe | the chart comes from the profile, not from the env | prepare a distro with the XAUUSD M15 chart, or set the chart once in the desktop (the profile is then saved on the volume) |
 | two robots on one account | the laptop copy is still running | stop one of them, always |

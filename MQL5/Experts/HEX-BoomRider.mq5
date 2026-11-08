@@ -103,10 +103,181 @@ double   episodeBooked  = 0.0;    // money this episode has already banked
 bool     episodeBanked  = false;  // the base leg has taken its target
 int      episodeAdds    = 0;      // adds placed so far this episode
 double   ladderStopLast = 0.0;    // last stop we pushed (log a move only once)
+bool     symbolNameReported = false;   // "not in the server's list" was already said once
+
+//+------------------------------------------------------------------+
+//| One chart, one robot.                                            |
+//|                                                                  |
+//| MT5 restores the charts it saved when the terminal last exited   |
+//| and THEN applies [StartUp], so every terminal restart adds a     |
+//| chart to the ones already there - and a restored chart reloads   |
+//| its own copy of this expert out of the profile. By 2026-11-08    |
+//| the noVNC desktop carried several charts, which is N copies of   |
+//| the robot sizing off one equity and able to trade one account    |
+//| twice (plus a Wine desktop painting all of them). The entrypoint |
+//| clears the saved charts before every start; this refuses the     |
+//| leftovers anyway, because a chart can also be opened by hand.    |
+//|                                                                  |
+//| The claim is a TEMPORARY global (it dies with the terminal) that |
+//| the owner refreshes from the timer, so a copy whose owner was    |
+//| removed or crashed can be taken over after two minutes instead   |
+//| of locking the volume out for ever.                              |
+//+------------------------------------------------------------------+
+string ClaimKey() { return "HEXBR-" + IntegerToString(InpMagic); }
+
+bool ClaimChart()
+{
+   string lease = ClaimKey() + "-seen";
+   string owner = ClaimKey() + "-chart";
+   long   me    = ChartID();
+   long   held  = (long)GlobalVariableGet(owner);
+   long   seen  = (long)GlobalVariableGet(lease);
+   if(held != 0 && held != me && seen > 0 && (long)TimeLocal() - seen < 120)
+   {
+      string msg = "another copy of this EA is already running on this terminal (chart " +
+                   IntegerToString(held) + ", magic " + IntegerToString(InpMagic) + ") - this "
+                   "chart refuses to start, so the two cannot trade the same account twice. The "
+                   "container keeps exactly one chart; close the duplicate on the desktop.";
+      Log("ERROR", msg);
+      Alert("HEX-BoomRider: duplicate chart refused - " + msg);
+      return(false);
+   }
+   GlobalVariableSet(lease, (double)TimeLocal());
+   GlobalVariableTemp(lease);
+   GlobalVariableSet(owner, (double)me);
+   GlobalVariableTemp(owner);
+   return(true);
+}
+
+void RefreshClaim()
+{
+   GlobalVariableSet(ClaimKey() + "-seen", (double)TimeLocal());
+}
+
+//+------------------------------------------------------------------+
+//| Can this chart be ticked at all? Two different faults with two   |
+//| different fixes, and from outside they were the same silence:    |
+//|                                                                  |
+//|  * the name is NOT in the SERVER's symbol list - the broker has  |
+//|    renamed or retired it. The chart still opens from the         |
+//|    terminal's cache, the expert still loads and beats, and no    |
+//|    quote can ever arrive. Only a correct MT5_SYMBOL fixes that,  |
+//|    so the log names the ones the server does carry.              |
+//|  * the name is on the server but not SELECTED - it is not in     |
+//|    Market Watch, so nothing subscribes it. SymbolSelect does.    |
+//|                                                                  |
+//| The terminal's own sync line says the same thing in one number:  |
+//| "725 symbols, 0 spreads". No spread data at all means nothing    |
+//| is subscribed, whatever the chart is drawing.                    |
+//+------------------------------------------------------------------+
+bool SymbolOnServer(const string sym)
+{
+   const int total = SymbolsTotal(false);       // everything the server carries
+   for(int i = 0; i < total; i++)
+      if(SymbolName(i, false) == sym)
+         return(true);
+   return(false);
+}
+
+// The names the server does carry that look like the one we were asked for: the
+// operator needs a choice, not a diagnosis ("Boom 300 Index, Boom 500 Index ..."),
+// because the fix is to set MT5_SYMBOL to one of them.
+string SimilarSymbols(const string needle, const int cap)
+{
+   string out = "";
+   const int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
+   {
+      string n = SymbolName(i, false);
+      if(StringFind(n, needle) < 0)
+         continue;
+      if(out != "")
+         out += ", ";
+      out += n;
+      if(StringLen(out) > cap)
+      {
+         out += ", ...";
+         break;
+      }
+   }
+   return(out == "" ? "none" : out);
+}
+
+// When the last quote the terminal knows about arrived: on a dead chart this is
+// the one number that says how long "nothing is trading" has been true.
+string LastQuoteTime()
+{
+   MqlTick t;
+   if(!SymbolInfoTick(_Symbol, t) || t.time == 0)
+      return("never");
+   return(TimeToString(t.time, TIME_DATE | TIME_SECONDS));
+}
+
+void EnsureSubscribed()
+{
+   const int total = SymbolsTotal(false);
+   if(total > 0 && !SymbolOnServer(_Symbol))
+   {
+      symbolNameReported = true;
+      Log("ERROR", StringFormat("%s is NOT in the server's symbol list (%d symbols on %s). A chart "
+          "opened on a name the broker does not offer still draws out of the terminal's cache and "
+          "this expert still loads - but no quote can ever arrive, so there is no entry, no exit and "
+          "nothing trading. Names on this server containing \"Boom\": %s. Set MT5_SYMBOL to the exact "
+          "one and the container re-opens the chart.",
+          _Symbol, total, AccountInfoString(ACCOUNT_SERVER), SimilarSymbols("Boom", 400)));
+      return;
+   }
+   const int sel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT);
+   const int vis  = (int)SymbolInfoInteger(_Symbol, SYMBOL_VISIBLE);
+   const int mode = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   Log("SUB", StringFormat("symbol: select=%d visible=%d spread=%d points, trade mode=%d, "
+       "symbols on server=%d, last quote=%s (server time)",
+       sel, vis, (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD), mode, total, LastQuoteTime()));
+   if(sel == 0 || vis == 0)
+   {
+      const bool ok = SymbolSelect(_Symbol, true);
+      Log(ok ? "SUB" : "ERROR", StringFormat("%s was not subscribed (select=%d visible=%d) - "
+          "SymbolSelect(%s, true) -> %s. A symbol that is not selected receives no quotes at all, "
+          "which looks exactly like a dead feed and trades nothing.",
+          _Symbol, sel, vis, _Symbol, ok ? "ok" : "FAILED"));
+   }
+   if(mode == (int)SYMBOL_TRADE_MODE_DISABLED)
+      Log("ERROR", StringFormat("%s is on the server but DISABLED for trading on this account - "
+          "the chart can be ticked, but every order will be refused", _Symbol));
+}
+
+// Called from the timer while the chart is stalled: the one thing the EA can do
+// about a lost subscription from inside. A name the server does not carry cannot
+// be fixed in this loop - but if the list was still empty when OnInit ran (a
+// terminal that had not synchronized yet), the fault is named here instead, once.
+void RetrySubscribe()
+{
+   const int total = SymbolsTotal(false);
+   if(total > 0 && !SymbolOnServer(_Symbol))
+   {
+      if(!symbolNameReported)
+         EnsureSubscribed();
+      return;
+   }
+   if((int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT) != 0)
+      return;
+   const bool ok = SymbolSelect(_Symbol, true);
+   Log(ok ? "SUB" : "ERROR", StringFormat("the stall is a lost subscription - re-selecting %s "
+       "in Market Watch -> %s", _Symbol, ok ? "ok" : "FAILED"));
+}
 
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // Order matters: name the CSV before anything can log into it, refuse a second
+   // copy before it can trade, and only then announce what the chart can see.
+   MqlDateTime dt; TimeCurrent(dt);
+   csvName = StringFormat("%s/HEX-BoomRider-%04d%02d%02d.csv",
+                          InpLogDir, dt.year, dt.mon, dt.day);
+   FolderCreate(InpLogDir);
+   if(!ClaimChart())
+      return(INIT_FAILED);
+
    trade.SetExpertMagicNumber(InpMagic);
    trade.SetDeviationInPoints(50);
    trade.SetTypeFillingBySymbol(_Symbol);
@@ -120,10 +291,6 @@ int OnInit()
    EventSetTimer(1);
 
    blown = BlownMarkerExists();
-   MqlDateTime dt; TimeCurrent(dt);
-   csvName = StringFormat("%s/HEX-BoomRider-%04d%02d%02d.csv",
-                          InpLogDir, dt.year, dt.mon, dt.day);
-   FolderCreate(InpLogDir);
    Log("INIT", StringFormat("baseline=%.2f risk=%.1f%% tp=%.2f%% sl=%.2f%% blown=%d",
        InpBaselineEquity, InpRiskPct, InpTakeProfitPct, InpStopLossPct, blown));
    Log("INIT", StringFormat("manage: bank %.2f%%; floor %+.2f%% ONLY after the bank; min stop "
@@ -144,6 +311,12 @@ int OnInit()
        DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE), 5),
        DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE), 5),
        (int)_Digits));
+   // What this chart can actually SEE. Every field logged above reads back out of
+   // the terminal's cached symbol description even when the broker no longer
+   // offers the name, so a chart that can never be ticked has looked perfectly
+   // healthy until now (2026-11-06 and 2026-11-08: expert loaded, heartbeat
+   // moving, tick_age climbing to 900, not one trade).
+   EnsureSubscribed();
    NotifyAnnounce();
    if(InpNotifyTest)
       Notify("HELLO", StringFormat("HEX-BoomRider online on %s, equity %.2f. "
@@ -286,6 +459,9 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   // The chart claim is a lease: refreshing it here is what lets another copy take
+   // over when this one is gone (and what stops one from starting while it is not).
+   RefreshClaim();
    if(lastHeartbeat == 0 || TimeLocal() - lastHeartbeat >= InpHeartbeatSec)
       WriteHeartbeat();
 
@@ -308,6 +484,10 @@ void OnTimer()
    LogSkip("no-ticks", StringFormat("%dm without a tick on %s - the EA is attached and "
            "beating, the chart is not being fed (no entry, no exit, nothing trading)",
            idle / 60, _Symbol));
+   // ...and the one repair the EA can attempt itself: a chart that lost its Market
+   // Watch selection receives nothing, and re-selecting it starts the quotes again
+   // without anyone touching the desktop.
+   RetrySubscribe();
 }
 
 //+------------------------------------------------------------------+
@@ -338,6 +518,10 @@ string DeinitReason(const int reason)
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   // Hand the chart claim back at once, so re-attaching the expert does not have
+   // to wait out the two-minute lease (and a duplicate cannot start in between).
+   if((long)GlobalVariableGet(ClaimKey() + "-chart") == ChartID())
+      GlobalVariableSet(ClaimKey() + "-seen", 0);
    // The row's own timestamp is TimeCurrent() like every other row, so the local
    // clock goes in the text: on a dead feed the server clock is frozen and the
    // one thing that matters is when this actually happened.
@@ -867,16 +1051,21 @@ void WriteHeartbeat()
    int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(h == INVALID_HANDLE)
       return;
-   // "<local time>|tick_age=<s>|equity=..|trades=..". The timestamp is when the
-   // EA last ran (mtime says the same thing to the container); tick_age is the
-   // fact mtime cannot carry: 0..N seconds since the chart last ticked, so a
-   // beat that keeps moving while tick_age climbs is a dead feed with a live EA.
-   // Parsed by deploy/scripts/healthcheck.sh and feed_watchdog in the entrypoint
-   // with `tick_age=\([0-9][0-9]*\)` - an older build has no such field and must
-   // read as "unknown", never as a stall.
-   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d\n",
+   // "<local time>|tick_age=<s>|equity=..|trades=..|sel=..|spread=..". The
+   // timestamp is when the EA last ran (mtime says the same thing to the
+   // container); tick_age is the fact mtime cannot carry: 0..N seconds since the
+   // chart last ticked, so a beat that keeps moving while tick_age climbs is a
+   // dead feed with a live EA. sel is whether the symbol is subscribed at all -
+   // 0 means no quote can arrive however long we wait, which is a different fix
+   // (select it) from a stalled feed (restart the terminal).
+   // Parsed by deploy/scripts/healthcheck.sh and the watchers in the entrypoint
+   // with `tick_age=\([0-9][0-9]*\)` / `|sel=\([0-9][0-9]*\)` - an older build
+   // has no such field and must read as "unknown", never as a stall.
+   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d|sel=%d|spread=%d\n",
                    TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
-                   SecondsSinceTick(), AccountInfoDouble(ACCOUNT_EQUITY), tradesToday));
+                   SecondsSinceTick(), AccountInfoDouble(ACCOUNT_EQUITY), tradesToday,
+                   (int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT),
+                   (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD)));
    FileClose(h);
 }
 

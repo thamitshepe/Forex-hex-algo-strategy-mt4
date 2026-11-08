@@ -211,6 +211,26 @@ printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" HEX_TICK_STALL_MIN=120 bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "the stall limit is a knob, not a constant" "0" "$rc"
 
+# 2026-11-08: a symbol that is not subscribed receives NO quotes at all, so
+# tick_age climbs for ever and every restart of the terminal is wasted. That is a
+# different fault from "the feed stalled", and the beat now carries it.
+echo "healthcheck: an unsubscribed symbol is not a stalled feed"
+printf '2026.11.08 09:20:40|tick_age=660|equity=10000.00|trades=0|sel=0|spread=0\n' \
+  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "an unsubscribed symbol is unhealthy" "1" "$rc"
+check_contains "and the sentence names the subscription, not the feed" "NOT SUBSCRIBED" "$out"
+printf '2026.11.08 09:20:40|tick_age=3720|equity=10000.00|trades=0|sel=1|spread=12\n' \
+  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "a subscribed symbol with old quotes is still unhealthy" "1" "$rc"
+check_contains "but then it blames the feed" "chart is not being ticked" "$out"
+check_not_contains "and not the subscription" "NOT SUBSCRIBED" "$out"
+printf '2026.11.08 09:20:40|tick_age=0|equity=10000.00|trades=0|sel=1|spread=12\n' \
+  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
+check_eq "subscribed and ticking is healthy" "0" "$rc"
+
 
 echo "the heartbeat's tick age, read the way the watchers read it"
 HB="$TMP/heartbeat.txt"
@@ -222,6 +242,16 @@ check_eq "a tick right now reads as 0, not as unknown" "0" "$(hb_tick_age "$HB")
 printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$HB"
 check_eq "an older beat has no age at all" "" "$(hb_tick_age "$HB")"
 check_eq "and a missing file is not an error" "" "$(hb_tick_age "$TMP/nope.txt")"
+
+# The same reader for the fields added later (sel, spread), so a new fact in the
+# beat costs one call instead of a parser per fact.
+load_fn "$ENTRYPOINT" hb_field >/dev/null
+printf '2026.11.08 09:20:40|tick_age=660|equity=10000.00|trades=0|sel=0|spread=7\n' > "$HB"
+check_eq "a field at the end of the beat reads out" "0" "$(hb_field "$HB" sel)"
+check_eq "so does spread" "7" "$(hb_field "$HB" spread)"
+check_eq "and one in the middle, whatever follows it" "660" "$(hb_field "$HB" tick_age)"
+check_eq "a field this build does not write is unknown, not 0" "" "$(hb_field "$HB" nope)"
+check_eq "a missing file is not an error either" "" "$(hb_field "$TMP/nope.txt" sel)"
 
 # The decision, not just the parsing: on a stalled feed the watchdog has to push
 # FEED-STALL and restart the terminal exactly once, and on a live feed it has to
@@ -417,6 +447,83 @@ check_eq "a beat that is moving again is not restarted" "0" \
 check_eq "and the incident's budget is forgotten" "0" \
   "$([ -f "$MT5DIR/.hex-silence" ] && echo 1 || echo 0)"
 
+
+echo "one chart: the desktop MT5 saved is cleared before every start"
+# MT5 restores the charts it saved on exit and THEN applies [StartUp], so every
+# restart adds one. 2026-11-08: the noVNC desktop carried several charts, each one
+# reloading its own copy of the expert on the same magic number, and the tab froze.
+EA="$HERE/../../MQL5/Experts/HEX-BoomRider.mq5"
+CH="$TMP/chart-vol"
+mkdir -p "$CH/profiles/default" "$CH/profiles/Charts"
+: > "$CH/profiles/default/chart01.chr"
+: > "$CH/profiles/default/chart02.chr"
+: > "$CH/profiles/default/chart03.chr"
+: > "$CH/profiles/default/window.ini"
+: > "$CH/profiles/Charts/chart01.chr"
+MT5DIR="$CH"; MT5_SYMBOL="Volatility Boom 400 Index"
+load_fn "$ENTRYPOINT" ensure_single_chart >/dev/null
+out="$(ensure_single_chart 2>&1)"
+check_eq "every saved chart is gone" "0" \
+  "$(find "$CH/profiles" -type f -name 'chart*.chr' 2>/dev/null | wc -l | tr -d ' ')"
+check_contains "and the log says how many" "cleared 4 saved chart(s)" "$out"
+check_contains "and where they were" "default:3" "$out"
+check_eq "the window layout, which has no expert in it, is left alone" "1" \
+  "$(find "$CH/profiles" -type f -name 'window.ini' 2>/dev/null | wc -l | tr -d ' ')"
+check_eq "the profile as it arrived is kept once" "4" \
+  "$(find "$CH/.profile-orig" -type f -name 'chart*.chr' 2>/dev/null | wc -l | tr -d ' ')"
+out="$(ensure_single_chart 2>&1)"
+check_contains "a second boot finds nothing to clear" "carries no saved chart" "$out"
+check_eq "and does not touch the kept copy" "4" \
+  "$(find "$CH/.profile-orig" -type f -name 'chart*.chr' 2>/dev/null | wc -l | tr -d ' ')"
+MT5DIR="$TMP/empty-vol"; mkdir -p "$MT5DIR"
+out="$(ensure_single_chart 2>&1)"
+check_contains "a volume with no profile yet is not an error" "no desktop profile" "$out"
+
+esc_call="$(grep -n '^  ensure_single_chart$' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+launch_call="$(grep -n '^  launch_terminal$' "$ENTRYPOINT" | head -1 | cut -d: -f1)"
+check_eq "the profile is cleared before the terminal is launched" "1" \
+  "$([ -n "$esc_call" ] && [ -n "$launch_call" ] && [ "$esc_call" -lt "$launch_call" ] && echo 1 || echo 0)"
+check_contains "the EA is the second lock: it refuses a duplicate chart" \
+  "bool ClaimChart()" "$(cat "$EA")"
+check_contains "and a live second copy is a failed init, not a silent twin" \
+  'return(INIT_FAILED);' "$(cat "$EA")"
+check_contains "the claim is refreshed from the timer" "RefreshClaim();" "$(cat "$EA")"
+check_contains "and handed back when the EA leaves" \
+  'GlobalVariableSet(ClaimKey() + "-seen", 0)' "$(cat "$EA")"
+
+echo "a desktop with no window manager is why the noVNC tab froze"
+# openbox exits at once if Xvfb is not accepting clients yet; a desktop with no WM
+# draws the charts and cannot be clicked. And two WMs on one display is the same
+# freeze from the other side, so the keeper adopts instead of double-starting.
+check_contains "the WM starts only after the display publishes its socket" \
+  'X11-unix/X${DISPLAY#:}' "$(cat "$ENTRYPOINT")"
+check_contains "a WM that died within a second is reported, with its own log" \
+  "openbox did not stay up" "$(cat "$ENTRYPOINT")"
+check_contains "and that log is printed" '[openbox]' "$(cat "$ENTRYPOINT")"
+check_contains "liveness is a pid, not only a name match" "kill -0 \"\$WM_PID\"" "$(cat "$ENTRYPOINT")"
+check_contains "the keeper adopts an openbox it did not start" "wm_alive" "$(cat "$ENTRYPOINT")"
+check_not_contains "so it can no longer start a second WM" \
+  "if ! pgrep -x openbox" "$(cat "$ENTRYPOINT")"
+
+echo "a chart that cannot be ticked says which of the two faults it is"
+check_contains "the EA asks the server for its symbol list" 'SymbolsTotal(false)' "$(cat "$EA")"
+check_contains "and says so when the name is not on it" \
+  "is NOT in the server's symbol list" "$(cat "$EA")"
+check_contains "naming the names that do exist" 'SimilarSymbols("Boom", 400)' "$(cat "$EA")"
+check_contains "an unselected symbol is selected, not just reported" \
+  'SymbolSelect(_Symbol, true)' "$(cat "$EA")"
+check_contains "a symbol disabled for trading is named too" \
+  "SYMBOL_TRADE_MODE_DISABLED" "$(cat "$EA")"
+check_contains "the last quote the terminal knows about is logged" \
+  "string LastQuoteTime()" "$(cat "$EA")"
+check_contains "the beat carries the subscription state" '|sel=%d' "$(cat "$EA")"
+check_contains "and the spread" '|spread=%d' "$(cat "$EA")"
+check_contains "a stall retries the subscription" "void RetrySubscribe()" "$(cat "$EA")"
+check_contains "and folds a name fault written late, not never" \
+  "symbolNameReported" "$(cat "$EA")"
+check_contains "the watchdog repeats the subscription state in its push" \
+  'hb_field "$hb" sel' "$(cat "$ENTRYPOINT")"
+check_contains "and the healthcheck fails on it" "NOT SUBSCRIBED" "$(cat "$HEALTHCHECK")"
 
 echo "compose file"
 # The compose file is what Dokploy runs, so what it resolves into is checked,
@@ -626,6 +733,10 @@ if [ -f "$DOC" ] && [ -f "$WF" ]; then
     "ghcr.io/thamitshepe/$IMG" "$(cat "$DOC")"
   check_contains "and they do not promise a public package without checking" \
     "verified 2026-11-02" "$(cat "$DOC")"
+  check_contains "the docs explain where the cleared profile is kept" \
+    ".profile-orig" "$(cat "$DOC")"
+  check_contains "and the unsubscribed-symbol fault by its field name" \
+    "SYMBOL_SELECT" "$(cat "$DOC")"
 fi
 # The EA compile check lives in the image build. metaeditor writes its log in
 # UTF-16, so reading it with plain cat prints NULs and a real compile error looks

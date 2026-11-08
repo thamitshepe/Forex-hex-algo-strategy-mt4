@@ -53,6 +53,14 @@ if [ -f "$HB" ]; then
   # nothing is ticking - no entry, no exit, nothing trading - and on this symbol
   # (Deriv Boom, 24/7) that is a fault, never a closed market. An older build's
   # beat has no such field, and "unknown" must not read as a failure.
+  # ...and whether the symbol is SUBSCRIBED at all (SYMBOL_SELECT). An unselected
+  # symbol receives no quotes, so tick_age climbs for ever and no restart of the
+  # terminal fixes it - that is a different sentence from "the feed stalled", and
+  # on 2026-11-08 the container could not say it.
+  sel=$(sed -n 's/.*|sel=\([01]\).*/\1/p' "$HB" 2>/dev/null | tail -1)
+  if [ "${sel:-1}" = "0" ]; then
+    fail "terminal up, EA beating, but the chart's symbol (${MT5_SYMBOL:-see the beat}) is NOT SUBSCRIBED (SYMBOL_SELECT=0) - an unsubscribed symbol gets no quotes at all, so nothing can trade until it is back in Market Watch"
+  fi
   tick_age=$(sed -n 's/.*|tick_age=\([0-9][0-9]*\)|.*/\1/p' "$HB" 2>/dev/null | tail -1)
   if [ -n "$tick_age" ]; then
     [ "$tick_age" -le $(( TICK_MAX_MIN * 60 )) ] || \
