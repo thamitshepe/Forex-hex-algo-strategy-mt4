@@ -207,7 +207,8 @@ seed_distro_from_url() { # URL
   case "$url" in
     file:///*) tarball="${url#file://}" ;;
     *) tarball="${TMPDIR:-/tmp}/hex-distro.tar"
-       curl -fsSL --retry 3 --retry-delay 5 -o "$tarball" "$url" \
+       curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+         -o "$tarball" "$url" \
          || die "download failed: $url" ;;
   esac
   case "$tarball" in
@@ -261,7 +262,8 @@ install_fresh_terminal() {
   log "no terminal in $MT5DIR - running the installer at $MT5_SETUP_URL"
   command -v wine >/dev/null 2>&1 \
     || die "wine is not installed - cannot run the installer; supply MT5_DISTRO_URL (a prepared portable tarball) instead"
-  curl -fsSL --retry 3 --retry-delay 5 -o "$setup" "$MT5_SETUP_URL" \
+  curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+    -o "$setup" "$MT5_SETUP_URL" \
     || die "download failed: $MT5_SETUP_URL"
   log "running the installer with /auto"
   local rc=0

@@ -57,7 +57,8 @@ RUN set -eux; \
         > /opt/ea-built/compile.log; \
       exit 0; \
     fi; \
-    curl -fsSL --retry 3 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
+    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 600 --retry-all-errors \
+         --connect-timeout 20 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
     mkdir -p /tmp/distro; \
     case "$MT5_DISTRO_URL" in \
       *.zst|*.tzst) tar --use-compress-program=unzstd -xf /tmp/distro.tar -C /tmp/distro ;; \
@@ -175,7 +176,8 @@ ENV HEX_BUILD="${HEX_BUILD}"
 ARG MT5_DISTRO_URL=""
 RUN set -eux; \
     if [ -n "$MT5_DISTRO_URL" ]; then \
-      curl -fsSL --retry 3 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
+      curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 600 --retry-all-errors \
+           --connect-timeout 20 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
       mkdir -p /opt/mt5-distro; \
       case "$MT5_DISTRO_URL" in \
         *.zst|*.tzst) tar --use-compress-program=unzstd -xf /tmp/distro.tar -C /opt/mt5-distro ;; \

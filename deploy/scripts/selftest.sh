@@ -747,6 +747,14 @@ check_contains "the EA compile log is decoded before it is read" \
   "tr -d '\\000' < " "$(cat "$DOCKERFILE")"
 check_contains "a distro without the include tree is named as such" \
   "refusing to blame the EA for a distro problem" "$(cat "$DOCKERFILE")"
+# GitHub's release CDN answered 504 to every attempt on 2026-11-08 and two image
+# builds - and with them two deploys - never happened, while the terminal on the
+# server was already stale. One transient gateway error is not a reason to lose a
+# deploy, so every download of the distro retries instead of giving up.
+check_eq "the distro download survives a flaky CDN in the build" "2" \
+  "$(grep -c -- '--retry-all-errors' "$DOCKERFILE" || true)"
+check_eq "and so does the one at container start" "2" \
+  "$(grep -c -- '--retry-all-errors' "$ENTRYPOINT" || true)"
 
 
 echo "dokploy-apply"
