@@ -98,8 +98,24 @@ services:
       #     EA is still beating. Boom indices are 24/7, so this is a fault: the
       #     entrypoint's feed_watchdog restarts the terminal after it (3 tries,
       #     budget on the volume), and the healthcheck reports it.
+      #   HEX_SILENCE_MIN - how long the heartbeat may be stale before the EA is
+      #     judged to be off the chart and the terminal restarted to put it back
+      #     (3 tries, budget on the volume, then NEEDS-YOU). This used to push
+      #     and nothing else, so on 2026-11-06 a chart that MT5 closed took the
+      #     robot down for two days while every watchdog stood aside: the feed
+      #     watchdog stops judging once the beat is stale and this one never
+      #     restarted anything. HEX_SILENCE_GRACE_MIN (10) is the head start a
+      #     freshly booted terminal gets before any of that, because the killed
+      #     container leaves an old beat on the volume.
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
       HEX_TICK_STALL_MIN: "${HEX_TICK_STALL_MIN:-15}"
+      HEX_SILENCE_MIN: "${HEX_SILENCE_MIN:-20}"
+      HEX_SILENCE_GRACE_MIN: "${HEX_SILENCE_GRACE_MIN:-10}"
+      # The phone side has a quota - ntfy.sh rate-limits a visitor and answers
+      # 429 - and a container that restarts in a loop spends it: the same title
+      # now goes out at most once per this many seconds, and trade events are
+      # never held. 0 disables the window.
+      HEX_PUSH_REPEAT_SEC: "${HEX_PUSH_REPEAT_SEC:-300}"
     volumes:
       # Fresh MT5 volume. The old MT4 volumes (hex-mt4-data, hex-mt4-doge-data)
       # are no longer referenced and can be removed on the server once their

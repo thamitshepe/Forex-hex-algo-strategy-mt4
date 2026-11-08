@@ -582,6 +582,14 @@ journal_hints() { # DIR
       if [ "$n" -gt "$p" ]; then
         tail -n "+$((p + 1))" "$f" 2>/dev/null | while IFS= read -r line; do
           key=""; lead=""
+          # "MQL5.community authorization failed" is MetaQuotes' community login
+          # (the MCP server, Tools > Options > Community), not the broker. On
+          # 2026-11-06 it fired this hint eight times during a boot loop while the
+          # very same MT5_PASSWORD logged in on the ninth start at 03:40:47 - a
+          # hint that names the wrong fix is worse than none, it sends the
+          # operator to retype a password that was never wrong (and the pushes
+          # it spends are the alerts they did not get).
+          case "$line" in *MQL5.community*) continue ;; esac
           case "$line" in
             *"no connection"*|*"failed to connect"*)
               key=connect
@@ -637,10 +645,18 @@ ea_watchdog() { # DIR
   set +e
   set +o pipefail
   while :; do
+    # The journal the terminal is WRITING, chosen by mtime. The glob alone is
+    # sorted by name, and a name is not a time: a volume that also holds a
+    # journal for another day (a distro baked earlier, a clock that was off, a
+    # copy someone made) hands back a file nothing appends to any more, and a
+    # watchdog reading a quiet file never fires - which is one way the removal
+    # line at 2026-11-06 03:53:50 went unanswered for two days.
     cur=""
     for f in "$dir"/*.log; do
       [ -f "$f" ] || continue
-      cur="$f"          # the glob is sorted, so the last match is the newest day
+      if [ -z "$cur" ] || [ "$(file_mtime "$f")" -ge "$(file_mtime "$cur")" ]; then
+        cur="$f"
+      fi
     done
     if [ -z "$cur" ]; then
       sleep 5
@@ -717,7 +733,35 @@ desktop_keeper() {
 # headless box must not depend on. curl has no such gate.
 hex_push() { # TITLE BODY
   [ -n "${MT5_NOTIFY_URL:-}" ] || return 0
-  local title="$1" body="$2" code
+  local title="$1" body="$2" code dir stamp last now
+  # One push per title per HEX_PUSH_REPEAT_SEC (default 300). On 2026-11-06 the
+  # container booted nine times in two minutes and each boot pushed UP plus the
+  # login HINT: sixteen requests, ntfy answered 429 to everything after the
+  # first batch, and the pushes that mattered - SKIP at 03:46, DEINIT at 03:53,
+  # NOT-RUNNING at 04:15 - were the ones dropped. A container that is crashing
+  # is exactly when the phone has to still work.
+  #
+  # Trade events are never throttled: an ADD or a CLOSE that arrives five
+  # minutes late is worse than a duplicate, and the EA itself already throttles
+  # the ones that could repeat (SKIP once per reason, FEED on the first tick
+  # back). The stamp is written before the curl, so a title also repeats at most
+  # once per window when the topic is refusing them - hammering a 429 extends it.
+  case " BUY CLOSE ADD BLOWN ERROR FEED DEINIT " in
+    *" $title "*) ;;
+    *)
+      now=$(date +%s)
+      dir="$MT5DIR/.hex-pushes"
+      mkdir -p "$dir" 2>/dev/null || true
+      stamp="$dir/$(printf '%s' "$title" | tr -c 'A-Za-z0-9._-' '_')"
+      last=$(cat "$stamp" 2>/dev/null | tr -d '[:space:]')
+      case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      if [ "$last" -gt 0 ] && [ $(( now - last )) -lt "${HEX_PUSH_REPEAT_SEC:-300}" ]; then
+        log "push held ($title): the same title went out $(( now - last ))s ago - not spending the topic's quota on a repeat"
+        return 0
+      fi
+      printf '%s\n' "$now" > "$stamp" 2>/dev/null || true
+      ;;
+  esac
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
     -H "Title: HEX-BoomRider $title" \
     -H "Content-Type: text/plain" \
@@ -804,7 +848,9 @@ hb_tick_age() {
 # proved it: the EA had been removed hours earlier and the only outward sign
 # was an Experts tab with nothing in it. The EA rewrites its heartbeat file
 # every InpHeartbeatSec; if that file stops moving, the EA is not on the chart
-# no matter what the AutoTrading button says. Buzz once, then every 6h.
+# no matter what the AutoTrading button says. Buzz once, then every 6h - and
+# restart the terminal, because a push is not a fix and on 2026-11-06 this
+# watcher was the only thing left awake while nothing traded for two days.
 #
 # What "silent" can mean changed on 2026-11-02, and the two are different
 # incidents this watcher may not confuse:
@@ -817,7 +863,9 @@ hb_tick_age() {
 # this line blamed the chart attachment for six hours.
 silence_watcher() {
   local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-  local limit="${HEX_SILENCE_MIN:-20}" age now mt warned=0 last=0 started
+  local state="$MT5DIR/.hex-silence"
+  local limit="${HEX_SILENCE_MIN:-20}" grace="${HEX_SILENCE_GRACE_MIN:-10}"
+  local age now mt warned=0 last=0 started tries=0 ts=0
   started=$(date +%s)
   set +e
   while :; do
@@ -839,17 +887,63 @@ silence_watcher() {
     else
       age=9999
     fi
-    if [ "$age" -ge "$limit" ]; then
-      if [ "$warned" -eq 0 ] || [ $(( now - last )) -ge 21600 ]; then
-        warned=1; last=$now
-        log "SILENCE: the EA has not written a heartbeat for ${age}m - the EA is not being called at all (off the chart, or its terminal thread is stuck). An enabled AutoTrading button does not mean the robot is attached"
-        hex_push "NOT-RUNNING" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}. The robot is not being called - nothing is trading. Check the container logs / VNC desktop. (A moving heartbeat with no ticks is a different fault: that one says FEED-STALL.)"
+    if [ "$age" -lt "$limit" ]; then
+      if [ "$warned" -eq 1 ]; then
+        warned=0
+        log "SILENCE: heartbeat is back (${age}m old) - the EA is running again"
+        hex_push "RUNNING" "EA heartbeat is back on ${MT5_SYMBOL} - the robot is trading again."
       fi
-    elif [ "$warned" -eq 1 ]; then
-      warned=0
-      log "SILENCE: heartbeat is back (${age}m old) - the EA is running again"
-      hex_push "RUNNING" "EA heartbeat is back on ${MT5_SYMBOL} - the robot is trading again."
+      # A beat that moves again ends the incident, so the next silence gets its
+      # own three restarts (feed_watchdog's rule, for the same reason).
+      rm -f "$state" 2>/dev/null || true
+      continue
     fi
+    if [ "$warned" -eq 0 ] || [ $(( now - last )) -ge 21600 ]; then
+      warned=1; last=$now
+      log "SILENCE: the EA has not written a heartbeat for ${age}m - the EA is not being called at all (off the chart, or its terminal thread is stuck). An enabled AutoTrading button does not mean the robot is attached"
+      hex_push "NOT-RUNNING" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}. The robot is not being called - nothing is trading. Check the container logs / VNC desktop. (A moving heartbeat with no ticks is a different fault: that one says FEED-STALL.)"
+    fi
+    # Then PUT IT BACK. Until 2026-11-06 this watcher only ever pushed, and that
+    # cost two days of trading: the feed died at 03:41, MT5 unloaded the
+    # expert at 03:53 ("chart closed"), and after that nothing in the container
+    # restarted the terminal. The two watchdogs each deferred to the other -
+    # feed_watchdog stops judging once the beat goes stale ("that is the silence
+    # incident"), and this watcher, which owns that incident, had no restart in
+    # it at all. Restarting the terminal is the only lever there is: mt5.ini's
+    # [StartUp] opens the chart and attaches the expert on every PROCESS start,
+    # and a terminal that is already up never re-reads it.
+    #
+    # Grace first: a container that restarted a moment ago still has the dead
+    # run's heartbeat on the volume, so on the first pass the beat already looks
+    # hours old. A terminal that is still booting has not had its chance
+    # (login + symbol sync + expert load was 28s on 2026-11-06, minutes after a
+    # bad night), and restarting it there is a restart loop with extra steps.
+    if [ $(( now - started )) -lt $(( grace * 60 )) ]; then
+      log "SILENCE: ${age}m without a beat, but this container is only $(( (now - started) / 60 ))m old - letting it finish booting before restarting anything"
+      continue
+    fi
+    tries=0; ts=0
+    if [ -f "$state" ]; then
+      read -r tries ts < "$state" 2>/dev/null
+    fi
+    case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+    case "$ts"    in ''|*[!0-9]*) ts=0    ;; esac
+    # The budget belongs to an incident, not to the container: thirty quiet
+    # minutes after the last attempt starts a new set, the same rule ea_watchdog
+    # and feed_watchdog use.
+    [ "$ts" -gt 0 ] && [ $(( now - ts )) -gt 1800 ] && tries=0
+    tries=$(( tries + 1 ))
+    printf '%s %s\n' "$tries" "$now" > "$state" 2>/dev/null || true
+    if [ "$tries" -le 3 ]; then
+      log "WATCHDOG: the EA has been off the chart for ${age}m (attempt $tries/3) - restarting the terminal so [StartUp] attaches it again"
+      hex_push "EA-RESTART" "No EA heartbeat for ${age} minutes on ${MT5_SYMBOL}: the expert is not on a chart, so nothing is trading. Restarting the terminal to attach it again (attempt $tries/3)."
+      sleep 3
+      kill "$TERMINAL_PID" 2>/dev/null || true
+      return 0   # main() waits on that pid; the container is coming down
+    fi
+    log "WATCHDOG: 3 terminal restarts did not get the EA back on the chart (no beat for ${age}m) - this is not a restart problem"
+    hex_push "NEEDS-YOU" "The EA is still not on $MT5_SYMBOL after 3 automatic terminal restarts (no heartbeat for ${age}m). Open the VNC desktop: is the chart open, is the expert on it, what does the Experts tab say?"
+    sleep 900
   done
 }
 

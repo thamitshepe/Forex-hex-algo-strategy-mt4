@@ -1172,7 +1172,7 @@ separate fixes, and on 2026-11-02 they were indistinguishable:
 
 | what the beat says | what it means | what acts on it |
 |---|---|---|
-| file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. `hex_push NOT-RUNNING` | `silence_watcher` (push), `ea_watchdog` (restart on the journal's removal line) |
+| file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. `hex_push NOT-RUNNING` | `silence_watcher` (pushes, then restarts the terminal so `[StartUp]` re-attaches the expert - 3 tries per incident, budget in `/data/.hex-silence`), `ea_watchdog` (same restart, from the journal's removal line) |
 | file fresh, `tick_age` climbing past `HEX_TICK_STALL_MIN` | the EA is attached and alive, the **chart** is not being fed - no entry, no exit, nothing trading. `hex_push FEED-STALL` | `feed_watchdog` (restarts the terminal, 3 tries per incident), healthcheck reports `no quotes for N min` |
 | file fresh, `tick_age` small | running and trading | - |
 
@@ -1180,6 +1180,21 @@ The EA writes that file from a terminal timer rather than from `OnTick` on
 purpose: a tick-driven heartbeat goes quiet exactly when the feed dies, which is
 how six hours of nothing-trading was reported as "the EA is not on the chart"
 when the EA had never left it.
+
+Both watchers have to **act**, not only report, and until 2026-11-06 only
+`feed_watchdog` restarted anything. The two defer to each other by design - once
+the beat goes stale, `feed_watchdog` stops judging ("that is the silence
+incident") - and the watcher that owned that incident had no restart in it at
+all. That night the sequence was exactly that: last tick 03:41, MT5 unloaded the
+expert at 03:53 with `chart closed`, and the container ran a terminal with an
+empty desktop for two days, pushing `NOT-RUNNING` every six hours. A terminal
+that is already up never re-reads `mt5.ini`, so nothing re-attached the expert;
+only a restart re-runs `[StartUp]`. `HEX_SILENCE_GRACE_MIN` (10) is the head
+start a freshly booted container gets first, because the container a restart
+kills leaves its old beat behind on the volume. The flip side: closing the chart
+in the VNC desktop is no longer a way to stop the robot on purpose - the
+container will put the expert back three times and then page you. Stop the
+container instead.
 
 **Input changes belong in git.** Every start re-copies `MQL4/Presets/*.set` and
 recompiles the EA, so a setting changed on the server is overwritten by the next
@@ -1257,7 +1272,9 @@ shows the EA's prints, and a rebuild is a `git push`.
 | two `Expert HEX-FVG-Breaker …: loaded successfully` lines, one per timeframe | MT4 restores the profile's charts **and** opens one for `startup.ini`'s `Symbol=`, so the expert runs twice on one magic number. The entrypoint now omits `Symbol=` when the profile already carries a chart for the symbol (`chart source: the default profile`), and the EA refuses to start a second copy (`FATAL another copy of this EA holds MagicNumber`) | if you still see two charts, the profile itself has two — remove one and redeploy |
 | two `loaded successfully` lines with *different* timestamps, the earlier one hours old | not a double load: on a restart the log mirror re-read the journal that was already on the volume, so the previous run's lines came out again | fixed — the mirror now starts at the end of an existing journal and says `N line(s) from the previous run … not replayed`. One run = one `loaded successfully` |
 | `Compiling '._HEX-FVG-Breaker'` (and 200 more `._` names) while MT4 starts | the distro was built on macOS without `--no-mac-metadata`: Linux tar extracts the AppleDouble twins that macOS `tar -t` hides, and MetaEditor compiles every one. Costs ~15 s of boot and puts junk in `MQL4` | rebuild the distro with `deploy/scripts/prepare-distro.sh` (it now refuses to write an archive with AppleDouble members) and re-seed with `MT4_FORCE_SEED=1`. The entrypoint also filters `._*` on extraction, so a stale archive is no longer noisy |
-| healthcheck `unhealthy`, "EA heartbeat is N min old" | the heartbeat file stopped moving. It is written from a terminal **timer**, so this is not "the market is quiet": the EA is not being called at all | check the Experts (MQL5) log for `error …` / `expert … removed`; the EA's own `DEINIT` row now says why and when it left. `ea_watchdog` restarts the terminal for the removal lines it knows |
+| healthcheck `unhealthy`, "EA heartbeat is N min old" | the heartbeat file stopped moving. It is written from a terminal **timer**, so this is not "the market is quiet": the EA is not being called at all | check the Experts (MQL5) log for `error …` / `expert … removed`; the EA's own `DEINIT` row now says why and when it left. `silence_watcher` restarts the terminal after `HEX_SILENCE_MIN` (three tries, then `NEEDS-YOU`) and `ea_watchdog` restarts it on the journal's removal lines |
+| `WATCHDOG: the EA has been off the chart for Nm (attempt 1/3)` | that is the fix working: the beat is stale, the expert is not on a chart, so the terminal is being restarted to re-run `[StartUp]` | if all three attempts fail, the Experts log and the VNC desktop have the reason the expert will not stay. A `DEINIT` saying `chart closed` means MT5 closed the chart itself - check Market Watch for the symbol |
+| `push FAILED (…): HTTP 429` | the ntfy topic rate-limited us (60 requests/hour per visitor on ntfy.sh). A container that restarts in a loop used to spend that quota on `UP` and login hints and lose the alerts that mattered | since 2026-11-06 the same title is sent at most once per `HEX_PUSH_REPEAT_SEC` (300 s) - `push held (…)` in the log is that working - and trade events (`BUY CLOSE ADD BLOWN ERROR FEED DEINIT`) are never held. A self-hosted ntfy has no such limit |
 | healthcheck `unhealthy`, "no quotes for N min" while the box is clearly up | the chart is not being ticked: the terminal is running and the EA is beating, but `OnTick` is never called, so nothing can enter or exit. Measured 2026-11-02: last tick 21:54, a stop filled and was journalled at 22:04, six hours of nothing after that | `feed_watchdog` restarts the terminal after `HEX_TICK_STALL_MIN` (three tries per incident) because a restart re-synchronizes the symbol. If it survives three, the fault is the terminal, the symbol or the broker - open the VNC desktop. Raise `HEX_TICK_STALL_MIN` past a maintenance window that is genuinely that long |
 | healthcheck `unhealthy` while the broker's market is shut | `tick_age` climbs when the broker publishes no quotes, by design (the beat keeps moving) | raise `HEX_TICK_STALL_MIN` past the closure, or ignore it over a weekend |
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |

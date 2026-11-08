@@ -267,6 +267,86 @@ check_eq "a blown account's dead feed is not restarted into noise" "0" \
   "$(grep -c '^kill' "$ACTIONS" || true)"
 rm -f "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
 
+echo "ea_watchdog: it follows the journal the terminal writes, not the name that sorts last"
+WLOGS="$TMP/ew-logs"; mkdir -p "$WLOGS"
+ACTIONS="$TMP/ew-actions"
+MT5_SYMBOL="Volatility Boom 400 Index"
+NEWEST="$WLOGS/20261106.log"
+printf '0\t03:40:41.000\tExperts\texpert HEX-BoomRider (Volatility Boom 400 Index,M15) loaded successfully\n' > "$NEWEST"
+# A journal from another day whose NAME sorts last and which never grows again:
+# picking the newest by name makes this the file under watch, and its silence is
+# indistinguishable from a healthy evening.
+printf '0\t03:30:00.000\tTerminal\tjournal from a distro baked on another day\n' > "$WLOGS/zz-20261105.log"
+touch -t 200001010000 "$WLOGS/zz-20261105.log"
+load_fn "$ENTRYPOINT" file_mtime >/dev/null
+load_fn "$ENTRYPOINT" ea_watchdog >/dev/null
+ew_run() {
+  ( i=0
+    sleep() {
+      case "${1:-}" in
+        5) i=$((i + 1))
+           # the removal lands between two passes, the way a live journal does
+           [ "$i" -eq 1 ] && printf '0\t03:53:50.142\tExperts\texpert HEX-BoomRider (Volatility Boom 400 Index,M15) removed\n' >> "$NEWEST"
+           [ "$i" -ge 3 ] && exit 0
+           ;;
+      esac
+      return 0
+    }
+    kill() { printf 'kill %s\n' "$1" >> "$ACTIONS"; }
+    hex_push() { printf 'push %s\n' "$1" >> "$ACTIONS"; }
+    mql_tail() { printf 'mql'; }
+    TERMINAL_PID=4343
+    ea_watchdog "$WLOGS" )
+}
+: > "$ACTIONS"
+ew_run
+check_eq "a removal in the journal the terminal is writing restarts the terminal" "1" \
+  "$(grep -c '^kill 4343' "$ACTIONS")"
+check_contains "and the push is EA-RESTART, with the MQL5 line that caused it" \
+  "MQL5 log:" "$(cat "$ENTRYPOINT")"
+
+echo "journal_hints: MetaQuotes' community login is not the broker login"
+JH="$TMP/jh-logs"; mkdir -p "$JH"
+MT5_SERVER=Deriv-Demo; MT5_LOGIN=41311895; MT5_INSTANCE=1
+load_fn "$ENTRYPOINT" journal_hints >/dev/null
+jh_run() { # DIR STATE
+  ( i=0
+    sleep() { i=$((i + 1)); [ "$i" -ge 2 ] && exit 0; }
+    TMPDIR="$2"
+    journal_hints "$1" )
+}
+printf '2\t03:38:26.115\tMQL5.community\tauthorization failed\n' > "$JH/20261106.log"
+out="$(jh_run "$JH" "$TMP/jh-state-a" 2>&1)"
+check_not_contains "a failed community login is NOT reported as a refused broker login" \
+  "refused login" "$out"
+check_eq "and it says nothing at all about it" "0" \
+  "$(printf '%s' "$out" | grep -c . || true)"
+printf "2\t03:38:30.000\tNetwork\t'41311895': authorization failed\n" >> "$JH/20261106.log"
+out="$(jh_run "$JH" "$TMP/jh-state-b" 2>&1)"
+check_contains "a broker refusal that names the account still gets the hint" \
+  "refused login" "$out"
+
+echo "hex_push: a boot loop cannot burn the topic's quota"
+MT5DIR="$TMP/push"; mkdir -p "$MT5DIR"
+MT5_NOTIFY_URL="https://ntfy.sh/hex-test"
+SENT="$TMP/push-sent"; : > "$SENT"
+load_fn "$ENTRYPOINT" hex_push >/dev/null
+hp_run() { # TITLE
+  ( curl() { printf '%s\n' "$*" >> "$SENT"; echo 200; }
+    hex_push "$1" "body" )
+}
+hp_run UP   >/dev/null
+hp_run UP   >/dev/null
+check_eq "the same status title twice in one window goes out once" "1" \
+  "$(wc -l < "$SENT" | tr -d ' ')"
+out="$(hp_run UP 2>&1)"
+check_contains "and the hold says why it is not spending the quota" "push held" "$out"
+hp_run BUY   >/dev/null
+hp_run CLOSE >/dev/null
+check_eq "a BUY and a CLOSE are never held" "3" "$(wc -l < "$SENT" | tr -d ' ')"
+hp_run DIFFERENT-TITLE >/dev/null
+check_eq "a different title has its own window" "4" "$(wc -l < "$SENT" | tr -d ' ')"
+
 echo "silence_watcher: no beat yet is not an alarm, an old beat is"
 MT5DIR="$TMP/sw"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
@@ -292,6 +372,51 @@ check_contains "a beat that stopped moving pages NOT-RUNNING" \
 check_contains "and says the robot is not being called" "not being called" \
   "$(cat "$ACTIONS")"
 
+# 2026-11-06: MT5 closed the chart at 03:53 and the next outward sign was a
+# NOT-RUNNING push every six hours, for two days, while nothing traded. The
+# incident owner has to be the one that puts the expert back: mt5.ini's
+# [StartUp] re-attaches it on the next PROCESS start, and only a kill causes one.
+sw_run_restart() {
+  ( i=0
+    sleep() { case "${1:-}" in 300) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
+    kill() { printf 'kill %s\n' "$1" >> "$ACTIONS"; }
+    hex_push() { printf 'push %s|%s\n' "$1" "$2" >> "$ACTIONS"; }
+    TERMINAL_PID=4242
+    silence_watcher )
+}
+: > "$ACTIONS"
+HEX_SILENCE_GRACE_MIN=0
+sw_run_restart
+check_eq "a stale beat restarts the terminal to re-attach the expert" "1" \
+  "$(grep -c '^kill 4242' "$ACTIONS")"
+check_contains "and says that is what it is doing" "push EA-RESTART" "$(cat "$ACTIONS")"
+check_eq "and records the attempt on the volume, not in memory" "1" \
+  "$(grep -c '^1 ' "$MT5DIR/.hex-silence")"
+: > "$ACTIONS"
+sw_run_restart
+check_eq "a second attempt spends the same budget" "1" \
+  "$(grep -c '^kill 4242' "$ACTIONS")"
+: > "$ACTIONS"
+HEX_SILENCE_GRACE_MIN=10
+sw_run_restart
+check_eq "a container that has only just booted restarts nothing yet" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+: > "$ACTIONS"
+printf '3 %s\n' "$(date +%s)" > "$MT5DIR/.hex-silence"
+HEX_SILENCE_GRACE_MIN=0
+sw_run_restart
+check_eq "after three restarts it stops restarting and asks for a human" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+check_contains "which is the NEEDS-YOU push" "push NEEDS-YOU" "$(cat "$ACTIONS")"
+: > "$ACTIONS"
+printf '2026.11.02 22:10:00|tick_age=0|equity=9994.29|trades=0\n' > "$SW"
+HEX_SILENCE_GRACE_MIN=0
+sw_run_restart
+check_eq "a beat that is moving again is not restarted" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+check_eq "and the incident's budget is forgotten" "0" \
+  "$([ -f "$MT5DIR/.hex-silence" ] && echo 1 || echo 0)"
+
 
 echo "compose file"
 # The compose file is what Dokploy runs, so what it resolves into is checked,
@@ -309,6 +434,8 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   check_contains "the EA the image ships is attached" "HEX-BoomRider" "$out"
   check_contains "the port a domain proxies to" '6080' "$out"
   check_contains "the dead-feed limit reaches the container" "HEX_TICK_STALL_MIN" "$out"
+  check_contains "and the silence limit, which restarts the terminal" "HEX_SILENCE_MIN" "$out"
+  check_contains "and the phone-side push window" "HEX_PUSH_REPEAT_SEC" "$out"
 else
   printf '  skip docker compose (not installed)\n'
 fi
@@ -336,6 +463,12 @@ check_contains "and the push carries the MQL5 line that caused it" \
   "MQL5 log:" "$(cat "$ENTRYPOINT")"
 check_contains "a SKIP is pushed once per reason, not on every tick" \
   'hex_push "SKIP"' "$(cat "$ENTRYPOINT")"
+# 2026-11-06: the journal had the removal line and the container still never
+# restarted, so both halves of "put it back" are checked, not just the push.
+check_contains "a stale beat spends a restart budget on the volume" \
+  ".hex-silence" "$(cat "$ENTRYPOINT")"
+check_contains "the journal under watch is chosen by mtime, not by name" \
+  'file_mtime "$cur"' "$(cat "$ENTRYPOINT")"
 
 
 echo "the EA carries the bankroll rule"
