@@ -123,20 +123,37 @@ bool     symbolNameReported = false;   // "not in the server's list" was already
 //| removed or crashed can be taken over after two minutes instead   |
 //| of locking the volume out for ever.                              |
 //+------------------------------------------------------------------+
+// A chart id does NOT fit in a global variable without losing digits: ChartID()
+// is a long above 2^53, and GlobalVariableSet only stores a double. Storing it
+// whole would make the owner fail to recognise itself, so it is split into two
+// exact halves (integer shift and mask, each well under 2^53 as a double).
 string ClaimKey() { return "HEXBR-" + IntegerToString(InpMagic); }
+
+void SetClaimOwner(const long id)
+{
+   GlobalVariableSet(ClaimKey() + "-hi", (double)(id >> 32));
+   GlobalVariableSet(ClaimKey() + "-lo", (double)(id & 0xFFFFFFFF));
+}
+
+bool ClaimOwnerIs(const long id)
+{
+   return((long)GlobalVariableGet(ClaimKey() + "-hi") == (long)(id >> 32) &&
+          (long)GlobalVariableGet(ClaimKey() + "-lo") == (long)(id & 0xFFFFFFFF));
+}
 
 bool ClaimChart()
 {
    string lease = ClaimKey() + "-seen";
-   string owner = ClaimKey() + "-chart";
    long   me    = ChartID();
-   long   held  = (long)GlobalVariableGet(owner);
    long   seen  = (long)GlobalVariableGet(lease);
-   if(held != 0 && held != me && seen > 0 && (long)TimeLocal() - seen < 120)
+   // Another copy is "live" if it refreshed the lease within two minutes. A copy
+   // that was removed or crashed stops refreshing, and its claim expires - a
+   // permanent global would lock the volume out of trading for ever.
+   if(GlobalVariableCheck(ClaimKey() + "-hi") && !ClaimOwnerIs(me) &&
+      seen > 0 && (long)TimeLocal() - seen < 120)
    {
-      string msg = "another copy of this EA is already running on this terminal (chart " +
-                   IntegerToString(held) + ", magic " + IntegerToString(InpMagic) + ") - this "
-                   "chart refuses to start, so the two cannot trade the same account twice. The "
+      string msg = "another copy of this EA is already running on this terminal - this chart "
+                   "refuses to start, so the two cannot trade the same account twice. The "
                    "container keeps exactly one chart; close the duplicate on the desktop.";
       Log("ERROR", msg);
       Alert("HEX-BoomRider: duplicate chart refused - " + msg);
@@ -144,13 +161,18 @@ bool ClaimChart()
    }
    GlobalVariableSet(lease, (double)TimeLocal());
    GlobalVariableTemp(lease);
-   GlobalVariableSet(owner, (double)me);
-   GlobalVariableTemp(owner);
+   SetClaimOwner(me);
+   GlobalVariableTemp(ClaimKey() + "-hi");
+   GlobalVariableTemp(ClaimKey() + "-lo");
    return(true);
 }
 
 void RefreshClaim()
 {
+   // Only the owner refreshes: a superseded copy that somehow still runs must not
+   // keep a stale claim alive.
+   if(!ClaimOwnerIs(ChartID()))
+      return;
    GlobalVariableSet(ClaimKey() + "-seen", (double)TimeLocal());
 }
 
@@ -520,7 +542,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    // Hand the chart claim back at once, so re-attaching the expert does not have
    // to wait out the two-minute lease (and a duplicate cannot start in between).
-   if((long)GlobalVariableGet(ClaimKey() + "-chart") == ChartID())
+   if(ClaimOwnerIs(ChartID()))
       GlobalVariableSet(ClaimKey() + "-seen", 0);
    // The row's own timestamp is TimeCurrent() like every other row, so the local
    // clock goes in the text: on a dead feed the server clock is frozen and the

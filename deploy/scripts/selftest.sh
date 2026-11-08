@@ -488,6 +488,8 @@ check_contains "the EA is the second lock: it refuses a duplicate chart" \
 check_contains "and a live second copy is a failed init, not a silent twin" \
   'return(INIT_FAILED);' "$(cat "$EA")"
 check_contains "the claim is refreshed from the timer" "RefreshClaim();" "$(cat "$EA")"
+check_contains "and the owner recognises itself despite the double store" \
+  "bool ClaimOwnerIs(const long id)" "$(cat "$EA")"
 check_contains "and handed back when the EA leaves" \
   'GlobalVariableSet(ClaimKey() + "-seen", 0)' "$(cat "$EA")"
 
