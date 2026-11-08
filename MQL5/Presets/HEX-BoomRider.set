@@ -45,11 +45,12 @@ InpMaxLadderLots=0.40
 InpMaxLadderRiskPct=30.0
 InpMaxSpreadPct=0.03
 InpMagic=400400
-; The heartbeat is written from a terminal TIMER, not from OnTick, so it keeps
+; The status line is written from a terminal TIMER, not from OnTick, so it keeps
 ; moving when the chart stops being ticked - and the age of the last tick goes
-; inside it. A stale beat therefore means the EA is gone; a moving beat with a
-; climbing tick age means the feed is dead (the container restarts the terminal
-; after HEX_TICK_STALL_MIN and pushes FEED-STALL).
+; inside it. A stale line therefore means the EA is gone; a moving line with a
+; climbing tick age means the feed is dead (the container sends ONE alert and
+; restarts the terminal after HEX_TICK_STALL_MIN). Nothing here notifies by
+; itself: no buzz, no per-minute message.
 InpHeartbeatSec=60
 InpTickStallSec=300
 InpSkipLogSec=60

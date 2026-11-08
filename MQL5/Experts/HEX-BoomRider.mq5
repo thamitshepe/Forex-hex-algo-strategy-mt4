@@ -67,7 +67,7 @@ input double InpMaxLadderLots  = 0.40;     // Hard cap on ladder exposure
 input double InpMaxLadderRiskPct = 30.0;   // ... and its total stop risk, % of headroom (3-loss budget)
 input double InpMaxSpreadPct   = 0.03;     // Skip entries when spread wider than this %
 input long   InpMagic          = 400400;   // Magic number
-input int    InpHeartbeatSec   = 60;       // Heartbeat file write interval (terminal timer, NOT ticks)
+input int    InpHeartbeatSec   = 60;       // Status line write interval (a terminal timer - never a notification)
 input int    InpTickStallSec   = 300;      // Log/push a dead feed after this long with no tick (0 = never)
 input int    InpSkipLogSec     = 60;       // Repeat the same SKIP line at most this often (0 = every tick)
 input string InpLogDir         = "HEX-Logs";

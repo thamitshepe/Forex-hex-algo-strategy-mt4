@@ -168,12 +168,12 @@ mkdir -p "$MT5DIR/logs" "$LOGDIR"
 if pgrep -f 'terminal64[.]exe' >/dev/null 2>&1; then
   date +%s > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
   out="$("$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
-  check_eq "fresh heartbeat is healthy" "0" "$rc"
-  check_contains "and says so" "EA heartbeat" "$out"
+  check_eq "a fresh status line is healthy" "0" "$rc"
+  check_contains "and says so" "EA status line" "$out"
   touch -t "$(date -v-4H +%Y%m%d%H%M 2>/dev/null || date -d '4 hours ago' +%Y%m%d%H%M)" \
     "$LOGDIR/HEX-BoomRider-heartbeat.txt"
   out="$("$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
-  check_eq "stale heartbeat is unhealthy" "1" "$rc"
+  check_eq "a stale status line is unhealthy" "1" "$rc"
   check_contains "with the age in the sentence" "min old" "$out"
 else
   printf '  skip process checks (no terminal64.exe process on a dev machine - they run in the container)\n'
@@ -253,49 +253,95 @@ check_eq "and one in the middle, whatever follows it" "660" "$(hb_field "$HB" ti
 check_eq "a field this build does not write is unknown, not 0" "" "$(hb_field "$HB" nope)"
 check_eq "a missing file is not an error either" "" "$(hb_field "$TMP/nope.txt" sel)"
 
-# The decision, not just the parsing: on a stalled feed the watchdog has to push
-# FEED-STALL and restart the terminal exactly once, and on a live feed it has to
-# do nothing and forget last incident's budget. sleep/kill/hex_push are stubbed
-# inside a subshell (the second `sleep` ends the loop), so no real process dies.
-echo "feed_watchdog: restart once, or not at all"
-MT5DIR="$TMP/fw"
+# The decision, not just the parsing. ONE thing pushes about the robot stopping
+# now, and it pushes when the STATE CHANGES: two watchers on two timers used to
+# buzz about the same incident, and a refused order (which the EA logs on every
+# tick) buzzed the phone every second. sleep/kill/hex_push are stubbed inside a
+# subshell (the second `sleep` ends the loop), so no real process dies.
+echo "alert_watcher: one alert per state change, and only one"
+MT5DIR="$TMP/aw"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
-FW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-ACTIONS="$TMP/fw-actions"
-MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=999999; HEX_TICK_STALL_MIN=15
-load_fn "$ENTRYPOINT" file_mtime >/dev/null
-load_fn "$ENTRYPOINT" feed_watchdog >/dev/null
-fw_run() { # one or two loop passes, whatever the beat says
+AW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+BLOWN="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+ACTIONS="$TMP/aw-actions"
+MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=999999
+HEX_TICK_STALL_MIN=15; HEX_SILENCE_GRACE_MIN=0; HEX_ALERT_REPEAT_HOURS=6
+for fn in file_mtime hb_tick_age hb_field alert_read_state alert_write_state \
+          alert_what alert_facts alert_span alert_watcher; do
+  load_fn "$ENTRYPOINT" "$fn" >/dev/null
+done
+aw_run() { # one or two loop passes, whatever the status line says
   ( i=0
     sleep() { case "${1:-}" in 60) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
     kill() { printf 'kill %s\n' "$1" >> "$ACTIONS"; }
-    hex_push() { printf 'push %s\n' "$1" >> "$ACTIONS"; }
-    feed_watchdog )
+    hex_push() { printf 'push %s|%s\n' "$1" "$2" >> "$ACTIONS"; }
+    alert_watcher )
 }
 : > "$ACTIONS"
-printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$FW"
-fw_run
-check_contains "a stalled feed says FEED-STALL" "push FEED-STALL" "$(cat "$ACTIONS")"
-check_eq "and restarts the terminal once, by pid" "1" "$(grep -c "^kill 999999" "$ACTIONS")"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1|sel=1|spread=7\n' > "$AW"
+aw_run
+check_eq "a stalled feed raises exactly ONE alert" "1" "$(grep -c '^push ' "$ACTIONS")"
+check_contains "and it is titled OFFLINE" "push OFFLINE|" "$(cat "$ACTIONS")"
+check_contains "naming the stall in minutes, not the fault it is not" \
+  "has not ticked for 62 minutes" "$(cat "$ACTIONS")"
+check_contains "with the figures that make it countable" "Equity 9994.29" "$(cat "$ACTIONS")"
+check_contains "and what was done about it" "attempt 1/3" "$(cat "$ACTIONS")"
+check_eq "and restarts the terminal once, by pid" "1" "$(grep -c '^kill 999999' "$ACTIONS")"
 check_eq "and records the attempt on the volume" "1" \
-  "$(grep -c '^1 ' "$MT5DIR/.hex-feed")"
+  "$(grep -c '^1 ' "$MT5DIR/.hex-alert-tries")"
 : > "$ACTIONS"
-printf '2026.11.02 22:04:19|tick_age=5|equity=9994.29|trades=1\n' > "$FW"
-fw_run
-check_eq "a live feed kills nothing" "0" "$(grep -c '^kill' "$ACTIONS" || true)"
-check_eq "and the incident's budget is forgotten" "0" \
-  "$([ -f "$MT5DIR/.hex-feed" ] && echo 1 || echo 0)"
+aw_run
+check_eq "the next boot is not news: no second buzz" "0" "$(grep -c '^push ' "$ACTIONS")"
+check_eq "yet the second attempt is still spent" "2" \
+  "$(awk '{print $1}' "$MT5DIR/.hex-alert-tries")"
+check_eq "and the terminal is restarted again" "1" "$(grep -c '^kill 999999' "$ACTIONS")"
 : > "$ACTIONS"
-printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$FW"
-fw_run
-check_eq "a beat with no tick age restarts nothing" "0" "$(grep -c '^kill' "$ACTIONS" || true)"
-: > "$ACTIONS"
-printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$FW"
-: > "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
-fw_run
-check_eq "a blown account's dead feed is not restarted into noise" "0" \
+printf '3 %s offline:no-ticks\n' "$(date +%s)" > "$MT5DIR/.hex-alert-tries"
+aw_run
+check_eq "after three restarts it stops restarting" "0" \
   "$(grep -c '^kill' "$ACTIONS" || true)"
-rm -f "$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+check_contains "and asks for a human exactly once" "push NEEDS-YOU|" "$(cat "$ACTIONS")"
+check_eq "recording that it asked, so it cannot ask again" "4" \
+  "$(awk '{print $1}' "$MT5DIR/.hex-alert-tries")"
+# The third attempt is still an attempt: it must not also page, or the operator
+# gets an OFFLINE and a NEEDS-YOU for one pass.
+: > "$ACTIONS"
+printf '2 %s offline:no-ticks\n' "$(date +%s)" > "$MT5DIR/.hex-alert-tries"
+aw_run
+check_eq "the third attempt is spent quietly, with nothing new said" "0" \
+  "$(grep -c '^push ' "$ACTIONS")"
+check_not_contains "and does not page on top of the alert" "NEEDS-YOU" "$(cat "$ACTIONS")"
+check_eq "while still restarting the terminal" "1" "$(grep -c '^kill 999999' "$ACTIONS")"
+: > "$ACTIONS"
+printf '2026.11.02 22:04:19|tick_age=5|equity=9994.29|trades=1|sel=1|spread=7\n' > "$AW"
+aw_run
+check_contains "a live feed says it is back, once" "push ONLINE|" "$(cat "$ACTIONS")"
+check_contains "in a duration a human can read" "after less than a minute" \
+  "$(cat "$ACTIONS")"
+check_eq "and kills nothing" "0" "$(grep -c '^kill' "$ACTIONS" || true)"
+check_eq "and forgets the incident's budget" "0" \
+  "$([ -f "$MT5DIR/.hex-alert-tries" ] && echo 1 || echo 0)"
+: > "$ACTIONS"; rm -f "$MT5DIR/.hex-alert" "$MT5DIR/.hex-alert-tries"
+printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$AW"
+aw_run
+check_eq "a beat from a build with no tick age is online, not a stall" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+: > "$ACTIONS"; rm -f "$MT5DIR/.hex-alert" "$MT5DIR/.hex-alert-tries"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1|sel=0|spread=0\n' > "$AW"
+aw_run
+check_contains "an unsubscribed symbol is named, not blamed on the feed" \
+  "not subscribed (SYMBOL_SELECT=0)" "$(cat "$ACTIONS")"
+check_contains "and the container still tries the one thing it can" "attempt 1/3" \
+  "$(cat "$ACTIONS")"
+: > "$ACTIONS"; rm -f "$MT5DIR/.hex-alert" "$MT5DIR/.hex-alert-tries"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1|sel=1|spread=7\n' > "$AW"
+: > "$BLOWN"
+aw_run
+check_eq "a blown account is halted, not restarted into noise" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+check_eq "and nothing is pushed (the EA's own BLOWN row already did)" "0" \
+  "$(grep -c '^push ' "$ACTIONS")"
+rm -f "$BLOWN"
 
 echo "ea_watchdog: it follows the journal the terminal writes, not the name that sorts last"
 WLOGS="$TMP/ew-logs"; mkdir -p "$WLOGS"
@@ -332,8 +378,10 @@ ew_run() {
 ew_run
 check_eq "a removal in the journal the terminal is writing restarts the terminal" "1" \
   "$(grep -c '^kill 4343' "$ACTIONS")"
-check_contains "and the push is EA-RESTART, with the MQL5 line that caused it" \
+check_contains "and the restart is logged with the MQL5 line that caused it" \
   "MQL5 log:" "$(cat "$ENTRYPOINT")"
+check_not_contains "the restart itself is not a page (the DEINIT row already was)" \
+  'hex_push "EA-RESTART"' "$(cat "$ENTRYPOINT")"
 
 echo "journal_hints: MetaQuotes' community login is not the broker login"
 JH="$TMP/jh-logs"; mkdir -p "$JH"
@@ -377,75 +425,66 @@ check_eq "a BUY and a CLOSE are never held" "3" "$(wc -l < "$SENT" | tr -d ' ')"
 hp_run DIFFERENT-TITLE >/dev/null
 check_eq "a different title has its own window" "4" "$(wc -l < "$SENT" | tr -d ' ')"
 
-echo "silence_watcher: no beat yet is not an alarm, an old beat is"
-MT5DIR="$TMP/sw"
+
+echo "push_once_shape: one buzz per fault, not one per tick"
+MT5DIR="$TMP/shape"; mkdir -p "$MT5DIR"
+SHAPE_SENT="$TMP/shape-sent"; : > "$SHAPE_SENT"
+load_fn "$ENTRYPOINT" push_once_shape >/dev/null
+hex_push() { printf '%s\n' "$2" >> "$SHAPE_SENT"; }
+ps_run() { push_once_shape "ERROR" "$1" >/dev/null; }
+ps_run '2026.11.08 09:20:40,ERROR,Volatility Boom 400 Index,9980.15,stop move #1 -> 100.10 refused: 10016 Invalid stops'
+ps_run '2026.11.08 09:20:41,ERROR,Volatility Boom 400 Index,9980.16,stop move #2 -> 100.20 refused: 10016 Invalid stops'
+check_eq "the same refusal twice (the figures move) buzzes once" "1" \
+  "$(wc -l < "$SHAPE_SENT" | tr -d ' ')"
+ps_run '2026.11.08 09:20:42,ERROR,Volatility Boom 400 Index,9980.17,buy failed: 10018 Market closed'
+check_eq "a different fault is its own buzz" "2" "$(wc -l < "$SHAPE_SENT" | tr -d ' ')"
+check_eq "and the stamps live on the volume, so a restart does not replay them" "1" \
+  "$([ -d "$MT5DIR/.hex-seen" ] && echo 1 || echo 0)"
+echo "alert_watcher: a container that has only just booted is not an incident"
+MT5DIR="$TMP/aw2"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
 SW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-ACTIONS="$TMP/sw-actions"
-MT5_SYMBOL="Volatility Boom 400 Index"; HEX_SILENCE_MIN=20
-load_fn "$ENTRYPOINT" silence_watcher >/dev/null
-sw_run() {
-  ( i=0
-    sleep() { case "${1:-}" in 300) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
-    hex_push() { printf 'push %s|%s\n' "$1" "$2" >> "$ACTIONS"; }
-    silence_watcher )
-}
+ACTIONS="$TMP/aw2-actions"
+MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=4242
+HEX_SILENCE_MIN=20; HEX_SILENCE_GRACE_MIN=10; HEX_ALERT_REPEAT_HOURS=6
 : > "$ACTIONS"
-sw_run
-check_eq "a volume that has never had a beat gets a grace period" "0" \
+aw_run
+check_eq "a volume that has never had a status line gets a grace period" "0" \
   "$(wc -l < "$ACTIONS" | tr -d ' ')"
-printf '2026.11.02 21:54:49|tick_age=0|equity=9998.25|trades=0\n' > "$SW"
+# The container this watcher killed leaves the previous run's status line behind:
+# four hours old, and it is not this run's news.
+printf '2026.11.02 21:54:49|tick_age=0|equity=9998.25|trades=0|sel=1|spread=9\n' > "$SW"
 touch -t "$(date -v-4H +%Y%m%d%H%M 2>/dev/null || date -d '4 hours ago' +%Y%m%d%H%M)" "$SW"
-sw_run
-check_contains "a beat that stopped moving pages NOT-RUNNING" \
-  "push NOT-RUNNING" "$(cat "$ACTIONS")"
-check_contains "and says the robot is not being called" "not being called" \
+: > "$ACTIONS"
+aw_run
+check_eq "an old status line inside the grace window restarts nothing" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
+HEX_SILENCE_GRACE_MIN=0
+aw_run
+check_contains "past the grace period the silence is ONE alert" "push OFFLINE|" \
   "$(cat "$ACTIONS")"
+check_contains "and it blames the expert, not the feed" "the expert is not on the chart" \
+  "$(cat "$ACTIONS")"
+check_eq "with the restart that puts it back" "1" "$(grep -c '^kill 4242' "$ACTIONS")"
+check_eq "and the budget on the volume, not in memory" "1" \
+  "$(grep -c '^1 ' "$MT5DIR/.hex-alert-tries")"
 
-# 2026-11-06: MT5 closed the chart at 03:53 and the next outward sign was a
-# NOT-RUNNING push every six hours, for two days, while nothing traded. The
-# incident owner has to be the one that puts the expert back: mt5.ini's
-# [StartUp] re-attaches it on the next PROCESS start, and only a kill causes one.
-sw_run_restart() {
-  ( i=0
-    sleep() { case "${1:-}" in 300) i=$((i + 1)); [ "$i" -ge 2 ] && exit 0 ;; esac; return 0; }
-    kill() { printf 'kill %s\n' "$1" >> "$ACTIONS"; }
-    hex_push() { printf 'push %s|%s\n' "$1" "$2" >> "$ACTIONS"; }
-    TERMINAL_PID=4242
-    silence_watcher )
-}
-: > "$ACTIONS"
-HEX_SILENCE_GRACE_MIN=0
-sw_run_restart
-check_eq "a stale beat restarts the terminal to re-attach the expert" "1" \
-  "$(grep -c '^kill 4242' "$ACTIONS")"
-check_contains "and says that is what it is doing" "push EA-RESTART" "$(cat "$ACTIONS")"
-check_eq "and records the attempt on the volume, not in memory" "1" \
-  "$(grep -c '^1 ' "$MT5DIR/.hex-silence")"
-: > "$ACTIONS"
-sw_run_restart
-check_eq "a second attempt spends the same budget" "1" \
-  "$(grep -c '^kill 4242' "$ACTIONS")"
-: > "$ACTIONS"
-HEX_SILENCE_GRACE_MIN=10
-sw_run_restart
-check_eq "a container that has only just booted restarts nothing yet" "0" \
-  "$(grep -c '^kill' "$ACTIONS" || true)"
-: > "$ACTIONS"
-printf '3 %s\n' "$(date +%s)" > "$MT5DIR/.hex-silence"
-HEX_SILENCE_GRACE_MIN=0
-sw_run_restart
-check_eq "after three restarts it stops restarting and asks for a human" "0" \
-  "$(grep -c '^kill' "$ACTIONS" || true)"
-check_contains "which is the NEEDS-YOU push" "push NEEDS-YOU" "$(cat "$ACTIONS")"
-: > "$ACTIONS"
-printf '2026.11.02 22:10:00|tick_age=0|equity=9994.29|trades=0\n' > "$SW"
-HEX_SILENCE_GRACE_MIN=0
-sw_run_restart
-check_eq "a beat that is moving again is not restarted" "0" \
-  "$(grep -c '^kill' "$ACTIONS" || true)"
-check_eq "and the incident's budget is forgotten" "0" \
-  "$([ -f "$MT5DIR/.hex-silence" ] && echo 1 || echo 0)"
+echo "one alert: the state is one value, so the phone hears about it once"
+check_contains "the state lives on the volume as <state>|<epoch>" \
+  'statef="$MT5DIR/.hex-alert"' "$(cat "$ENTRYPOINT")"
+check_contains "and reading it back is its own function" "alert_read_state()" \
+  "$(cat "$ENTRYPOINT")"
+check_contains "an unchanged state pushes nothing until the reminder window" \
+  'STILL-OFFLINE' "$(cat "$ENTRYPOINT")"
+check_contains "the reminder window is configurable, and 0 means never" \
+  'HEX_ALERT_REPEAT_HOURS' "$(cat "$ENTRYPOINT")"
+check_contains "a repeated EA message is deduped by shape before it is pushed" \
+  'push_once_shape "ERROR"' "$(cat "$ENTRYPOINT")"
+check_contains "and the same is true of the SKIPs a stalled entry produces" \
+  'push_once_shape "SKIP"' "$(cat "$ENTRYPOINT")"
+check_not_contains "the two watchers that buzzed on their own timers are gone" \
+  "feed_watchdog() {" "$(cat "$ENTRYPOINT")"
+check_not_contains "and so is the second one" "silence_watcher() {" "$(cat "$ENTRYPOINT")"
 
 
 echo "one chart: the desktop MT5 saved is cleared before every start"
@@ -571,11 +610,11 @@ check_contains "the watchdog knows a bare removal, not only a sync timeout" \
 check_contains "and the push carries the MQL5 line that caused it" \
   "MQL5 log:" "$(cat "$ENTRYPOINT")"
 check_contains "a SKIP is pushed once per reason, not on every tick" \
-  'hex_push "SKIP"' "$(cat "$ENTRYPOINT")"
+  'push_once_shape "SKIP"' "$(cat "$ENTRYPOINT")"
 # 2026-11-06: the journal had the removal line and the container still never
 # restarted, so both halves of "put it back" are checked, not just the push.
 check_contains "a stale beat spends a restart budget on the volume" \
-  ".hex-silence" "$(cat "$ENTRYPOINT")"
+  ".hex-alert-tries" "$(cat "$ENTRYPOINT")"
 check_contains "the journal under watch is chosen by mtime, not by name" \
   'file_mtime "$cur"' "$(cat "$ENTRYPOINT")"
 
@@ -697,15 +736,17 @@ check_contains "the reason the EA left still reaches the phone" \
 check_contains "and so does the recovery when ticks come back" \
   '*,FEED,*)' "$(cat "$ENTRYPOINT")"
 check_contains "the container restarts the terminal when the feed stalls" \
-  'hex_push "FEED-STALL"' "$(cat "$ENTRYPOINT")"
+  'title="OFFLINE"' "$(cat "$ENTRYPOINT")"
 check_contains "with a budget that survives the restart it causes" \
-  'state="$MT5DIR/.hex-feed"' "$(cat "$ENTRYPOINT")"
+  'budget="$MT5DIR/.hex-alert-tries"' "$(cat "$ENTRYPOINT")"
 check_contains "and it stops restarting after three tries" 'attempt $tries/3' \
   "$(cat "$ENTRYPOINT")"
-check_contains "the watchdog is started with the others" "feed_watchdog &" \
+check_contains "the one watcher is started with the others" "alert_watcher &" \
   "$(cat "$ENTRYPOINT")"
-check_contains "a stale beat is still reported as NOT-RUNNING" \
-  'hex_push "NOT-RUNNING"' "$(cat "$ENTRYPOINT")"
+check_contains "and a state change is the only thing that pushes" \
+  'if [ "$st" != "$prev" ]' "$(cat "$ENTRYPOINT")"
+check_contains "the phone is told once per fault, not once per repetition" \
+  'STILL-OFFLINE' "$(cat "$ENTRYPOINT")"
 check_contains "preset pins the stall threshold the container uses" \
   "InpTickStallSec=300" "$(cat "$SET")"
 

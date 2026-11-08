@@ -778,9 +778,10 @@ UI-made app and a script-made app cannot stay different for long.
 | `MT4_KEEP_SEED_LOGIN` | `1` keeps the seeded tree's `config/accounts.ini`, `server.ini` and `community.ini`, which instance 2's seeding otherwise deletes so it cannot come up as instance 1's account. Set it only when the distro was prepared from *this* broker's terminal with *this* account — it is your assertion, because those files are encrypted and the entrypoint cannot check whose login it is |
 | `MT4_SETUP_URL` | the installer to run when a volume has no terminal and no distro is given. Defaults to MetaQuotes' `mt4setup.exe`, which does not work under Wine; a broker's own `setup.exe` might, and `deploy/scripts/prepare-broker-distro.sh` is the way to find out (§4C). `MT4_SETUP_URL2` for instance 2 |
 | `MT4_IMAGE` | the full image reference. CI sets it to the tag that run pushed, so no owner is hardcoded in the compose file and a rollback can pin a SHA |
-| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale the EA's heartbeat file may be before the healthcheck calls the container `unhealthy`. CI does not set it; the compose file's `180` applies. The EA writes that file from a terminal **timer** (every `InpHeartbeatSec`, 60 s), not from ticks, so a stale one means the EA is not being called at all - off the chart, or its terminal thread stuck |
-| `HEX_TICK_STALL_MIN` | how long the chart may go without a *tick* while the EA is still beating before that counts as a dead feed: the entrypoint pushes `FEED-STALL` and restarts the terminal (three times per incident, budget kept on the volume), and the healthcheck reports `no quotes for N min`. Compose sets `15`. Boom indices trade 24/7, so this is a fault; raise it if the broker's maintenance window is longer than that |
-| `HEX_SILENCE_MIN` | how long a frozen heartbeat is tolerated before the `NOT-RUNNING` push (default `20`; no compose override, since the EA beats every 60 s) |
+| `HEX_HEARTBEAT_MAX_AGE_MIN` | how stale the EA's status line may be before the healthcheck calls the container `unhealthy`. CI does not set it; the compose file's `180` applies. The EA writes that file from a terminal **timer** (every `InpHeartbeatSec`, 60 s), not from ticks, so a stale one means the EA is not being called at all - off the chart, or its terminal thread stuck. The file is read by the healthcheck and by the container's one alert watcher; it does not notify anything by itself |
+| `HEX_TICK_STALL_MIN` | how long the chart may go without a *tick* while the EA is still beating before that counts as a dead feed: the container sends ONE `OFFLINE` alert and restarts the terminal (three times per incident, budget kept on the volume), and the healthcheck reports `no quotes for N min`. Compose sets `15`. Boom indices trade 24/7, so this is a fault; raise it if the broker's maintenance window is longer than that |
+| `HEX_SILENCE_MIN` | how long a frozen status line is tolerated before the container judges the EA to be off the chart (default `20`; no compose override, since the EA writes the line every 60 s) |
+| `HEX_ALERT_REPEAT_HOURS` | how long an unchanged outage stays quiet before it is repeated as one `STILL-OFFLINE` reminder, default `6`; `0` means never, so the phone hears about an outage exactly once - when it starts - and once when it ends. The same window dedupes repeated `ERROR`/`SKIP` rows, which the EA writes on every tick while a broker keeps refusing something |
 
 ### A second instance (different account, different strategy)
 
@@ -1173,38 +1174,44 @@ there is no such `.srv` and that the list lives in `servers.ini`, which is norma
 
 ```bash
 docker inspect --format '{{.State.Health.Status}}' <container>   # ok / unhealthy
-ls -l /data/mt5/MQL5/Files/HEX-Logs/                              # heartbeat + history
+ls -l /data/mt5/MQL5/Files/HEX-Logs/                              # status line + history
 cat /data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt      # <time>|tick_age=<s>|equity|trades|sel|spread
+cat /data/mt5/.hex-alert /data/mt5/.hex-alert-tries                # the state the phone was last told about
 grep -hE ',SUB,|,ERROR,' /data/mt5/MQL5/Files/HEX-Logs/*.csv | tail -5   # is the symbol on the server, and subscribed?
 docker compose stop                                              # SIGTERM -> wineserver -k -> clean flush
 ```
 
 The healthcheck asks three questions, in the order they go wrong: is
-`terminal64.exe` running, is the EA's heartbeat file moving, and is the chart
-actually being ticked. All three are facts in that one heartbeat line: the file's
+`terminal64.exe` running, is the EA's status line moving, and is the chart
+actually being ticked. All three are facts in that one line: the file's
 mtime answers the second, `tick_age` the third. They are separate failures with
 separate fixes, and on 2026-11-02 they were indistinguishable:
 
 | what the beat says | what it means | what acts on it |
 |---|---|---|
-| file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. `hex_push NOT-RUNNING` | `silence_watcher` (pushes, then restarts the terminal so `[StartUp]` re-attaches the expert - 3 tries per incident, budget in `/data/.hex-silence`), `ea_watchdog` (same restart, from the journal's removal line) |
-| file fresh, `tick_age` climbing past `HEX_TICK_STALL_MIN` | the EA is attached and alive, the **chart** is not being fed - no entry, no exit, nothing trading. `hex_push FEED-STALL` | `feed_watchdog` (restarts the terminal, 3 tries per incident), healthcheck reports `no quotes for N min` |
-| file fresh, `sel=0` | the symbol is not **subscribed** (`SYMBOL_SELECT=0`, i.e. not in Market Watch), so no quote can arrive however long we wait - a restart is not the fix | the EA logs `SUB … was not subscribed` and calls `SymbolSelect(_Symbol, true)` at init and again on every stall; healthcheck fails with `NOT SUBSCRIBED`; `feed_watchdog` repeats it in its push |
+| file stale (`HEX_SILENCE_MIN`, then `HEX_HEARTBEAT_MAX_AGE_MIN`) | the EA is not being called at all: removed from the chart, or its terminal thread is stuck. State `offline:no-ea` → ONE `OFFLINE` push | `alert_watcher` (one push per *change*, then restarts the terminal so `[StartUp]` re-attaches the expert - 3 tries per incident, budget in `/data/.hex-alert-tries`), `ea_watchdog` (same restart, from the journal's removal line) |
+| file fresh, `tick_age` climbing past `HEX_TICK_STALL_MIN` | the EA is attached and alive, the **chart** is not being fed - no entry, no exit, nothing trading. State `offline:no-ticks` → the same single `OFFLINE` push | `alert_watcher` (restarts the terminal, 3 tries per incident), healthcheck reports `no quotes for N min` |
+| file fresh, `sel=0` | the symbol is not **subscribed** (`SYMBOL_SELECT=0`, i.e. not in Market Watch), so no quote can arrive however long we wait - a restart is not the fix | the EA logs `SUB … was not subscribed` and calls `SymbolSelect(_Symbol, true)` at init and again on every stall; healthcheck fails with `NOT SUBSCRIBED`; the alert names it as `offline:no-symbol` |
 | file fresh, `sel=1`, `spread=0` | subscribed, but the broker is publishing no spread for it (the terminal's own sync line says `725 symbols, 0 spreads`) - typically a name the server no longer carries, see the `ERROR` row in the EA's CSV | fix the name (`MT5_SYMBOL`), the restart loop cannot |
-| file fresh, `tick_age` small | running and trading | - |
+| file fresh, `tick_age` small | running and trading. State `online` → one `ONLINE` push when it gets here from an outage, nothing while it stays | - |
+
+Nothing in that file is a notification. The file moves every minute and says
+nothing to anyone; **one** watcher reads it, and the phone hears about a change of
+state (`OFFLINE` / `ONLINE`, plus one `STILL-OFFLINE` reminder per
+`HEX_ALERT_REPEAT_HOURS`), not about the passing of time.
 
 The EA writes that file from a terminal timer rather than from `OnTick` on
 purpose: a tick-driven heartbeat goes quiet exactly when the feed dies, which is
 how six hours of nothing-trading was reported as "the EA is not on the chart"
 when the EA had never left it.
 
-Both watchers have to **act**, not only report, and until 2026-11-06 only
-`feed_watchdog` restarted anything. The two defer to each other by design - once
-the beat goes stale, `feed_watchdog` stops judging ("that is the silence
-incident") - and the watcher that owned that incident had no restart in it at
-all. That night the sequence was exactly that: last tick 03:41, MT5 unloaded the
-expert at 03:53 with `chart closed`, and the container ran a terminal with an
-empty desktop for two days, pushing `NOT-RUNNING` every six hours. A terminal
+Until 2026-11-06 only the feed watcher restarted anything. The two deferred to
+each other by design - once the silently-written line went stale, the feed
+watcher stopped judging ("that is the silence incident") - and the watcher that
+owned that incident had no restart in it at all. That night the sequence was
+exactly that: last tick 03:41, MT5 unloaded the expert at 03:53 with `chart
+closed`, and the container ran a terminal with an empty desktop for two days,
+pushing `NOT-RUNNING` every six hours. A terminal
 that is already up never re-reads `mt5.ini`, so nothing re-attached the expert;
 only a restart re-runs `[StartUp]`. `HEX_SILENCE_GRACE_MIN` (10) is the head
 start a freshly booted container gets first, because the container a restart
@@ -1212,6 +1219,32 @@ kills leaves its old beat behind on the volume. The flip side: closing the chart
 in the VNC desktop is no longer a way to stop the robot on purpose - the
 container will put the expert back three times and then page you. Stop the
 container instead.
+
+Since 2026-11-08 there is **one** watcher (`alert_watcher`) with one state
+machine, because two watchers with two vocabularies meant two buzzes about the
+same fault, and a third path forwarded every repeated `ERROR` row - a broker
+refusing a stop move made the phone buzz on every tick. The states are
+`online`, `offline:no-ea`, `offline:no-ticks`, `offline:no-symbol`, `blown` and
+`starting`, and the rule is one push per **change** plus at most one
+`STILL-OFFLINE` reminder per `HEX_ALERT_REPEAT_HOURS`. The restart budget (3 per
+incident, on the volume, 30 quiet minutes resets it) and the escalation to a
+single `NEEDS-YOU` are unchanged - they are now stated inside the alert that was
+going out anyway instead of in pushes of their own.
+
+What actually lands on the phone, in full:
+
+| push | when | how often |
+|---|---|---|
+| `UP` | container start, with symbol / account / build | once per start (`HEX_PUSH_REPEAT_SEC` holds a boot loop to one per 5 min) |
+| `BUY` `CLOSE` `ADD` `BLOWN` `FEED` `DEINIT` | the EA's own event rows | once per event, never held |
+| `ERROR` `SKIP` | the EA's refusal/rejection rows | once per distinct message shape per `HEX_ALERT_REPEAT_HOURS` - they repeat on every tick |
+| `OFFLINE` | the robot's state turns from online to one of the offline reasons: reason, what was done about it (restart attempt N/3), equity and trades | once per incident |
+| `ONLINE` | it turns back to online: how long it was down, equity and trades | once per incident |
+| `STILL-OFFLINE` | the same outage, still true | once per `HEX_ALERT_REPEAT_HOURS` (default 6); `0` disables |
+| `NEEDS-YOU` | three terminal restarts did not fix it (or six did not re-attach the EA) | once per incident |
+
+There is no per-minute message anywhere: the status line is read, never
+forwarded.
 
 **Input changes belong in git.** Every start re-copies `MQL4/Presets/*.set` and
 recompiles the EA, so a setting changed on the server is overwritten by the next
@@ -1289,15 +1322,15 @@ shows the EA's prints, and a rebuild is a `git push`.
 | two `Expert HEX-FVG-Breaker …: loaded successfully` lines, one per timeframe | MT4 restores the profile's charts **and** opens one for `startup.ini`'s `Symbol=`, so the expert runs twice on one magic number. The entrypoint now omits `Symbol=` when the profile already carries a chart for the symbol (`chart source: the default profile`), and the EA refuses to start a second copy (`FATAL another copy of this EA holds MagicNumber`) | if you still see two charts, the profile itself has two — remove one and redeploy |
 | two `loaded successfully` lines with *different* timestamps, the earlier one hours old | not a double load: on a restart the log mirror re-read the journal that was already on the volume, so the previous run's lines came out again | fixed — the mirror now starts at the end of an existing journal and says `N line(s) from the previous run … not replayed`. One run = one `loaded successfully` |
 | `Compiling '._HEX-FVG-Breaker'` (and 200 more `._` names) while MT4 starts | the distro was built on macOS without `--no-mac-metadata`: Linux tar extracts the AppleDouble twins that macOS `tar -t` hides, and MetaEditor compiles every one. Costs ~15 s of boot and puts junk in `MQL4` | rebuild the distro with `deploy/scripts/prepare-distro.sh` (it now refuses to write an archive with AppleDouble members) and re-seed with `MT4_FORCE_SEED=1`. The entrypoint also filters `._*` on extraction, so a stale archive is no longer noisy |
-| healthcheck `unhealthy`, "EA heartbeat is N min old" | the heartbeat file stopped moving. It is written from a terminal **timer**, so this is not "the market is quiet": the EA is not being called at all | check the Experts (MQL5) log for `error …` / `expert … removed`; the EA's own `DEINIT` row now says why and when it left. `silence_watcher` restarts the terminal after `HEX_SILENCE_MIN` (three tries, then `NEEDS-YOU`) and `ea_watchdog` restarts it on the journal's removal lines |
+| healthcheck `unhealthy`, "EA heartbeat is N min old" | the status line stopped moving. It is written from a terminal **timer**, so this is not "the market is quiet": the EA is not being called at all | check the Experts (MQL5) log for `error …` / `expert … removed`; the EA's own `DEINIT` row now says why and when it left. `alert_watcher` sends one `OFFLINE` alert and restarts the terminal after `HEX_SILENCE_MIN` (three tries, then one `NEEDS-YOU`); `ea_watchdog` restarts it on the journal's removal lines |
 | `WATCHDOG: the EA has been off the chart for Nm (attempt 1/3)` | that is the fix working: the beat is stale, the expert is not on a chart, so the terminal is being restarted to re-run `[StartUp]` | if all three attempts fail, the Experts log and the VNC desktop have the reason the expert will not stay. A `DEINIT` saying `chart closed` means MT5 closed the chart itself - check Market Watch for the symbol |
-| `push FAILED (…): HTTP 429` | the ntfy topic rate-limited us (60 requests/hour per visitor on ntfy.sh). A container that restarts in a loop used to spend that quota on `UP` and login hints and lose the alerts that mattered | since 2026-11-06 the same title is sent at most once per `HEX_PUSH_REPEAT_SEC` (300 s) - `push held (…)` in the log is that working - and trade events (`BUY CLOSE ADD BLOWN ERROR FEED DEINIT`) are never held. A self-hosted ntfy has no such limit |
-| healthcheck `unhealthy`, "no quotes for N min" while the box is clearly up | the chart is not being ticked: the terminal is running and the EA is beating, but `OnTick` is never called, so nothing can enter or exit. Measured 2026-11-02: last tick 21:54, a stop filled and was journalled at 22:04, six hours of nothing after that | `feed_watchdog` restarts the terminal after `HEX_TICK_STALL_MIN` (three tries per incident) because a restart re-synchronizes the symbol. If it survives three, the fault is the terminal, the symbol or the broker - open the VNC desktop. Raise `HEX_TICK_STALL_MIN` past a maintenance window that is genuinely that long |
+| `push FAILED (…): HTTP 429` | the ntfy topic rate-limited us (60 requests/hour per visitor on ntfy.sh). A container that restarts in a loop used to spend that quota on `UP` and login hints and lose the alerts that mattered | since 2026-11-06 the same title is sent at most once per `HEX_PUSH_REPEAT_SEC` (300 s) - `push held (…)` in the log is that working - trade events (`BUY CLOSE ADD BLOWN`) are never held, and the repeated `ERROR`/`SKIP` rows are deduped by shape for `HEX_ALERT_REPEAT_HOURS` before they get that far. A self-hosted ntfy has no such limit |
+| healthcheck `unhealthy`, "no quotes for N min" while the box is clearly up | the chart is not being ticked: the terminal is running and the EA is beating, but `OnTick` is never called, so nothing can enter or exit. Measured 2026-11-02: last tick 21:54, a stop filled and was journalled at 22:04, six hours of nothing after that | `alert_watcher` sends one `OFFLINE` alert and restarts the terminal after `HEX_TICK_STALL_MIN` (three tries per incident) because a restart re-synchronizes the symbol. If it survives three, it says `NEEDS-YOU` once and stops - the fault is the terminal, the symbol or the broker, so open the VNC desktop. Raise `HEX_TICK_STALL_MIN` past a maintenance window that is genuinely that long |
 | healthcheck `unhealthy` while the broker's market is shut | `tick_age` climbs when the broker publishes no quotes, by design (the beat keeps moving) | raise `HEX_TICK_STALL_MIN` past the closure, or ignore it over a weekend |
 | **more than one chart** on the noVNC desktop, and the tab is slow or stuck | MT5 restores the desktop it saved on shutdown and *then* applies `[StartUp]`, so every restart adds a chart - and each restored chart re-attaches its own copy of the expert out of the profile. On 2026-11-08 the desktop carried several after a feed-stall restart loop: N robots on one magic number, N charts for Wine to paint | fixed - `ensure_single_chart` deletes the saved charts before every start (`cleared 4 saved chart(s) from the desktop profile (default:3 Charts:1)`) and keeps the profile as it arrived in `/data/mt5/.profile-orig`; the EA also refuses a second copy (`ERROR: another copy of this EA is already running on this terminal (chart …)`, `OnInit` fails). Only the chart `[StartUp]` opens exists, so **do not** park manual charts on this desktop - they are removed on the next restart by design |
 | the noVNC desktop draws the charts but nothing can be clicked (no title bars, dialogs cannot be dismissed, "the UI is stuck") | there is no window manager: `openbox` exits at once if Xvfb is not accepting clients yet, and the keeper used to relaunch it into the same race - or, worse, a second one, which fights the first | fixed - the desktop waits for `/tmp/.X11-unix/X99` before starting the WM, `start_wm` reports `openbox did not stay up` with its own log (`[openbox] …`), and the keeper checks `kill -0 $WM_PID`, adopting a live openbox instead of starting a second. `WATCHDOG: openbox is gone - relaunching` is the self-heal working |
 | `healthcheck` says `NOT SUBSCRIBED (SYMBOL_SELECT=0)`, and the EA's CSV has `SUB … was not subscribed` | the chart's symbol is not in Market Watch, so the terminal subscribes nothing and receives no quotes at all - it looks exactly like a dead feed, but restarting the terminal cannot fix it | the EA selects it itself (`SymbolSelect(_Symbol, true)`) at init and on every stall; if it comes back `FAILED`, add the symbol once in the desktop's Market Watch. Persisting across restarts is a volume whose `Bases/Deriv-Demo/symbols.sel` lost the selection - the volume's base is copied out of the image only when it has no history for the symbol |
-| `ERROR` row: `… is NOT in the server's symbol list (725 symbols on Deriv-Demo) … Names on this server containing "Boom": …` | the chart's name is not (or no longer) offered by the server. MT5 still opens a chart for it out of the terminal's cache, the expert still loads and beats, and **no quote can ever arrive** - the sync line's `0 spreads` is the same fact | the row lists the names the server does carry: set `MT5_SYMBOL` to the exact one and redeploy (the container re-opens the chart). This is the fault `feed_watchdog` cannot restart away, and it says so in its third `NEEDS-YOU` |
+| `ERROR` row: `… is NOT in the server's symbol list (725 symbols on Deriv-Demo) … Names on this server containing "Boom": …` | the chart's name is not (or no longer) offered by the server. MT5 still opens a chart for it out of the terminal's cache, the expert still loads and beats, and **no quote can ever arrive** - the sync line's `0 spreads` is the same fact | the row lists the names the server does carry: set `MT5_SYMBOL` to the exact one and redeploy (the container re-opens the chart). This is the fault `alert_watcher` cannot restart away, and it says so: the third attempt ends in one `NEEDS-YOU` naming the symbol |
 | `ERROR` row: `… is on the server but DISABLED for trading on this account` | the symbol exists and can be ticked, but the broker has trading disabled on it for this account | nothing in this container can change it - the broker has to enable it, or use another symbol |
 | it re-seeds the distro on every start | the volume is not mounted, so `/data` is empty each time | check the `volumes:` block. Seeding is idempotent once `/data/mt4/terminal.exe` exists |
 | it trades the wrong timeframe | the chart comes from the profile, not from the env | prepare a distro with the XAUUSD M15 chart, or set the chart once in the desktop (the profile is then saved on the volume) |

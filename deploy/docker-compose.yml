@@ -87,30 +87,36 @@ services:
       ENABLE_VNC: "${ENABLE_VNC:-1}"
       VNC_PASSWORD: "${VNC_PASSWORD:-}"
       TZ: "${TZ:-UTC}"
-      # Both limits are about the EA's heartbeat file, and they answer two
-      # different questions (2026-11-02: the chart stopped being ticked at 21:54
-      # while the terminal stayed up, so the EA was never called again and the
-      # container read "unhealthy" for six hours with the wrong explanation).
-      #   HEX_HEARTBEAT_MAX_AGE_MIN - how stale the file may be before the EA is
+      # Both limits are about the EA's status line, and they answer two different
+      # questions (2026-11-02: the chart stopped being ticked at 21:54 while the
+      # terminal stayed up, so the EA was never called again and the container read
+      # "unhealthy" for six hours with the wrong explanation).
+      #   HEX_HEARTBEAT_MAX_AGE_MIN - how stale the line may be before the EA is
       #     considered gone. The EA writes it from a terminal TIMER, so it should
       #     keep moving regardless of ticks.
       #   HEX_TICK_STALL_MIN - how long the chart may go without a tick while the
-      #     EA is still beating. Boom indices are 24/7, so this is a fault: the
-      #     entrypoint's feed_watchdog restarts the terminal after it (3 tries,
-      #     budget on the volume), and the healthcheck reports it.
-      #   HEX_SILENCE_MIN - how long the heartbeat may be stale before the EA is
-      #     judged to be off the chart and the terminal restarted to put it back
-      #     (3 tries, budget on the volume, then NEEDS-YOU). This used to push
-      #     and nothing else, so on 2026-11-06 a chart that MT5 closed took the
-      #     robot down for two days while every watchdog stood aside: the feed
-      #     watchdog stops judging once the beat is stale and this one never
-      #     restarted anything. HEX_SILENCE_GRACE_MIN (10) is the head start a
-      #     freshly booted terminal gets before any of that, because the killed
-      #     container leaves an old beat on the volume.
+      #     EA is still writing it. Boom indices are 24/7, so this is a fault: the
+      #     entrypoint's alert_watcher sends ONE offline alert and restarts the
+      #     terminal after it (3 tries, budget on the volume), and the healthcheck
+      #     reports it.
+      #   HEX_SILENCE_MIN - how long the line may be stale before the EA is judged
+      #     to be off the chart and the terminal restarted to put it back (3 tries,
+      #     budget on the volume, then one NEEDS-YOU).
+      #   HEX_SILENCE_GRACE_MIN - the head start a freshly booted terminal gets
+      #     before any of that, because the container a restart kills leaves an old
+      #     line on the volume.
+      # None of these notify anything by themselves: they feed ONE alert per state
+      # CHANGE (online / offline:<why> / blown), never a notification per minute.
       HEX_HEARTBEAT_MAX_AGE_MIN: "180"
       HEX_TICK_STALL_MIN: "${HEX_TICK_STALL_MIN:-15}"
       HEX_SILENCE_MIN: "${HEX_SILENCE_MIN:-20}"
       HEX_SILENCE_GRACE_MIN: "${HEX_SILENCE_GRACE_MIN:-10}"
+      # How long an unchanged outage stays quiet before it is repeated as a single
+      # STILL-OFFLINE reminder (0 = never: the phone hears about an outage once,
+      # when it starts, and once when it ends). The same window dedupes repeated
+      # ERROR/SKIP rows, which the EA writes on every tick while a broker keeps
+      # refusing something - that was the "a notification every other second".
+      HEX_ALERT_REPEAT_HOURS: "${HEX_ALERT_REPEAT_HOURS:-6}"
       # The phone side has a quota - ntfy.sh rate-limits a visitor and answers
       # 429 - and a container that restarts in a loop spends it: the same title
       # now goes out at most once per this many seconds, and trade events are
