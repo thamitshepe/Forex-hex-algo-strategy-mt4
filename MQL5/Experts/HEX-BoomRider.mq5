@@ -131,14 +131,16 @@ string ClaimKey() { return "HEXBR-" + IntegerToString(InpMagic); }
 
 void SetClaimOwner(const long id)
 {
-   GlobalVariableSet(ClaimKey() + "-hi", (double)(id >> 32));
-   GlobalVariableSet(ClaimKey() + "-lo", (double)(id & 0xFFFFFFFF));
+   long hi = (id >> 32);
+   GlobalVariableSet(ClaimKey() + "-hi", (double)hi);
+   GlobalVariableSet(ClaimKey() + "-lo", (double)(id - (hi << 32)));
 }
 
 bool ClaimOwnerIs(const long id)
 {
-   return((long)GlobalVariableGet(ClaimKey() + "-hi") == (long)(id >> 32) &&
-          (long)GlobalVariableGet(ClaimKey() + "-lo") == (long)(id & 0xFFFFFFFF));
+   long hi = (id >> 32);
+   return((long)GlobalVariableGet(ClaimKey() + "-hi") == hi &&
+          (long)GlobalVariableGet(ClaimKey() + "-lo") == (id - (hi << 32)));
 }
 
 bool ClaimChart()
