@@ -125,8 +125,8 @@ bool     symbolNameReported = false;   // "not in the server's list" was already
 //+------------------------------------------------------------------+
 // A chart id does NOT fit in a global variable without losing digits: ChartID()
 // is a long above 2^53, and GlobalVariableSet only stores a double. Storing it
-// whole would make the owner fail to recognise itself, so it is split into two
-// exact halves (integer shift and mask, each well under 2^53 as a double).
+// whole would make the owner fail to recognise itself, so it is kept as two exact
+// halves (a shift and a subtraction: integer, no rounding, no big literal).
 string ClaimKey() { return "HEXBR-" + IntegerToString(InpMagic); }
 
 void SetClaimOwner(const long id)
