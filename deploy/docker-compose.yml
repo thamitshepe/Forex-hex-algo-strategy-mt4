@@ -117,6 +117,14 @@ services:
       # ERROR/SKIP rows, which the EA writes on every tick while a broker keeps
       # refusing something - that was the "a notification every other second".
       HEX_ALERT_REPEAT_HOURS: "${HEX_ALERT_REPEAT_HOURS:-6}"
+      # What counts as a crash loop: this many STARTS inside this many minutes
+      # means the terminal is dying seconds after it comes up. alert_watcher
+      # cannot see that - its first pass is a minute away and a boot is not a
+      # state change - so the boots themselves are counted (on the volume) and the
+      # phone gets ONE CRASHLOOP, quoting the last thing the terminal wrote, per
+      # HEX_ALERT_REPEAT_HOURS.
+      HEX_CRASHLOOP_BOOTS: "${HEX_CRASHLOOP_BOOTS:-3}"
+      HEX_CRASHLOOP_WINDOW_MIN: "${HEX_CRASHLOOP_WINDOW_MIN:-10}"
       # The phone side has a quota - ntfy.sh rate-limits a visitor and answers
       # 429 - and a container that restarts in a loop spends it: the same title
       # now goes out at most once per this many seconds, and trade events are

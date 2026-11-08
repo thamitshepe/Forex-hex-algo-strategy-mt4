@@ -144,6 +144,13 @@ WM_PID=""
 X11VNC_PID=""
 WEBSOCKIFY_PID=""
 TERMINAL_PID=""
+# The terminal's own stdout/stderr (wine + the terminal's crash text). In /tmp it
+# is gone the moment the container restarts, which is exactly when it is worth
+# reading - so the last words are copied to the volume on the way out
+# (write_death_note) and quoted by the next boot (boot_guard).
+TERM_LOG="${TERM_LOG:-/tmp/terminal.out}"
+TERMINAL_RC=""
+BOOT_EPOCH=0
 
 
 # ------------------------------------------------------- the terminal tree ---
@@ -557,7 +564,7 @@ launch_terminal() {
   # Wine user's AppData, which is what makes $MT5DIR a self-contained volume.
   # WINEDEBUG=+err overrides the image's -all for this one process: the
   # terminal's own crash text must reach the log even when wine is quiet.
-  WINEDEBUG=+err wine terminal64.exe /portable /config:mt5.ini >>/tmp/terminal.out 2>&1 &
+  WINEDEBUG=+err wine terminal64.exe /portable /config:mt5.ini >>"$TERM_LOG" 2>&1 &
   TERMINAL_PID=$!
   log "terminal64.exe started (pid $TERMINAL_PID)"
 }
@@ -575,16 +582,101 @@ wait_for_terminal() {
     sleep 2
   done
   warn "terminal64.exe did not appear within 5 minutes - the evidence follows"
-  sed 's/^/  [term] /' /tmp/terminal.out 2>/dev/null | tail -25 || true
+  terminal_evidence
   ps -ef 2>/dev/null | grep -i -e wine -e terminal | grep -v grep | head -6 | sed 's/^/  [ps] /' || true
-  ls -la "$MT5DIR/logs/" 2>/dev/null | tail -5 | sed 's/^/  [logs] /' || true
-  local f
+  log "HINT: a terminal64.exe that dies in seconds under wine is usually a font or a prefix problem - the [term] lines above name it"
+}
+
+# Everything the container knows about why the terminal is not there, in one
+# place, printed for a human reading `docker logs`.
+#
+# The terminal's own text (wine's errors, the terminal's crash lines) is the only
+# evidence that names the fault, and it is written to /tmp - which a restart does
+# not carry. So it is both printed here and copied to the volume
+# (write_death_note), because a container that dies in ten seconds is read AFTER
+# it is gone.
+terminal_evidence() {
+  local f last
+  sed 's/^/  [term] /' "$TERM_LOG" 2>/dev/null | tail -12 || true
+  sed 's/^/  [xvfb] /' /tmp/xvfb.log 2>/dev/null | tail -4 || true
+  sed 's/^/  [openbox] /' /tmp/openbox.log 2>/dev/null | tail -4 || true
+  last=""
   for f in "$MT5DIR"/logs/*.log; do
     [ -f "$f" ] || continue
-    echo "  [journal] $(basename "$f"):"
-    tail -15 "$f" 2>/dev/null | sed 's/^/    /'
+    last="$f"
   done
-  log "HINT: a terminal64.exe that dies in seconds under wine is usually a font or a prefix problem - the [term] lines above name it"
+  if [ -n "$last" ]; then
+    printf '  [journal] %s\n' "$(basename "$last")"
+    tail -8 "$last" 2>/dev/null | sed 's/^/    /' || true
+  fi
+  last=""
+  for f in "$MT5DIR"/MQL5/Logs/*.log; do
+    [ -f "$f" ] || continue
+    last="$f"
+  done
+  if [ -n "$last" ]; then
+    printf '  [experts] %s\n' "$(basename "$last")"
+    tail -8 "$last" 2>/dev/null | sed 's/^/    /' || true
+  fi
+  # A container that is restarted by the kernel looks exactly like one that
+  # exited: no exit code, no message, nothing. Memory is the one figure that
+  # separates the two.
+  awk '/^(MemTotal|MemAvailable):/ { printf "  [mem] %s %s KB\n", $1, $2 }' /proc/meminfo 2>/dev/null || true
+  return 0
+}
+
+# The same evidence, on the volume, for the NEXT boot to quote: /tmp is empty
+# when the container comes back, and a boot loop is precisely the case where the
+# answer is in the boot before this one.
+write_death_note() { # RC UPTIME_SECONDS
+  {
+    printf 'the container was up %ss and exited rc=%s\n' "${2:-?}" "${1:-?}"
+    terminal_evidence | tail -20
+  } > "$MT5DIR/.hex-last-death" 2>/dev/null || true
+  return 0
+}
+
+# Is any terminal64.exe still running? A PID, not a count: wine's launcher and
+# the terminal are not the same process, and a zombie tini has not reaped yet is
+# not a running one.
+terminal_up() {
+  local p stat
+  for p in $(pgrep -f 'terminal64[.]exe' 2>/dev/null); do
+    stat=$(ps -o stat= -p "$p" 2>/dev/null | tr -d '[:space:]')
+    case "$stat" in ''|Z*) continue ;; esac
+    printf '%s' "$p"
+    return 0
+  done
+  return 1
+}
+
+# Wait for the terminal to be gone - and be precise about which process that is.
+#
+# `wait $TERMINAL_PID` waits on the LAUNCHER (what the shell started: `wine
+# terminal64.exe`). Those two are not always the same process: wine hands the
+# work to wine64/terminal64 and its own process can exit while the terminal is
+# still painting. main() then tore the desktop down under a live terminal and
+# exited ~a second after "terminal64.exe is up" - a container restarting every
+# ten seconds, forever, with the robot never getting to trade.
+#
+# So: wait for the launcher, then keep following until no terminal64.exe is left.
+# TERMINAL_RC is the launcher's status - it is the only exit code a parent can
+# ever have.
+wait_terminal_gone() {
+  local pid
+  set +e
+  TERMINAL_RC=""
+  wait "$TERMINAL_PID" 2>/dev/null
+  TERMINAL_RC=$?
+  if pid=$(terminal_up); then
+    log "the wine launcher exited (rc=$TERMINAL_RC) but terminal64.exe (pid $pid) is still up - following the terminal, not the launcher"
+    while :; do
+      sleep 5
+      terminal_up >/dev/null || break
+    done
+    log "terminal64.exe is gone"
+  fi
+  return 0
 }
 
 # MT5 buffers its journals to disk and only flushes them out periodically, so
@@ -817,6 +909,15 @@ desktop_keeper() {
       log "WATCHDOG: openbox is gone - relaunching (without a window manager the noVNC desktop cannot be clicked)"
       start_wm || true
     fi
+    # A dead Xvfb looks like everything at once: a frozen noVNC tab, openbox
+    # failing to open the display, and a terminal that exits a second after it
+    # starts. Relaunching Xvfb under a live terminal is worse (it is the display
+    # that terminal is drawing on), so this only says it - once, because the
+    # cleared pid is what makes it once.
+    if [ -n "$XVFB_PID" ] && ! kill -0 "$XVFB_PID" 2>/dev/null && ! pgrep -x Xvfb >/dev/null 2>&1; then
+      log "WATCHDOG: Xvfb is gone - the terminal has no display and will exit a second after it starts. That is the fault, not the EA (not relaunched under a live terminal)"
+      XVFB_PID=""
+    fi
     if [ "$want_vnc" -eq 1 ] && ! pgrep -f 'x11vnc' >/dev/null; then
       log "WATCHDOG: x11vnc died - relaunching (the noVNC tab stays blank until it is back)"
       x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -passwd "$VNC_PASSWORD" \
@@ -890,7 +991,7 @@ hex_push() { # TITLE BODY
 #
 # The stamps live on the volume, so a restart does not replay the same fault, and
 # they are files (not a hash table) because that is what survives a killed shell.
-push_once_shape() { # TITLE LINE
+push_once_shape() { # TITLE LINE [BODY]
   local dir="$MT5DIR/.hex-seen" key stamp last now win
   win=$(( ${HEX_ALERT_REPEAT_HOURS:-6} * 3600 ))
   mkdir -p "$dir" 2>/dev/null || true
@@ -904,7 +1005,63 @@ push_once_shape() { # TITLE LINE
     return 0
   fi
   printf '%s\n' "$now" > "$stamp" 2>/dev/null || true
-  hex_push "$1" "$2"
+  # The shape decides WHETHER to push; the body is what the phone reads, and it
+  # may carry evidence that changes every boot (a wine error, a list of lines).
+  # Keying on the body is how a "one alarm" turns back into a metronome.
+  hex_push "$1" "${3:-$2}"
+}
+
+# -------------------------------------------------------------- boot loop ----
+# A container that dies ten seconds after it starts is INVISIBLE to alert_watcher:
+# the watcher's first pass is a minute away, and a boot is not a state change (so
+# a crash loop is deliberately quiet). The result is the worst of both - a robot
+# that never trades and a phone that never rings.
+#
+# The boots themselves are the evidence, and they are on the volume: N starts
+# inside a window is a loop, and it is said ONCE per HEX_ALERT_REPEAT_HOURS with
+# the last thing the terminal wrote (write_death_note put it on the volume,
+# because the boot that writes it is gone by the time anybody reads it).
+#
+# Deliberately not a "container up" message: UP already covers a normal start,
+# and a boot loop is not a start.
+boot_guard() {
+  local f="$MT5DIR/.hex-boots" note="$MT5DIR/.hex-last-death" now n win boots ev
+  # Called from main with `set -euo pipefail` in force, and everything here reads
+  # files that do not exist yet on a fresh volume - a failed `cat` inside a
+  # pipeline is not a reason to exit before the terminal has even been installed.
+  # The same reason push_watcher turns it off for its own loop.
+  set +e
+  set +o pipefail
+  now=$(date +%s)
+  BOOT_EPOCH="$now"
+  win=$(( ${HEX_CRASHLOOP_WINDOW_MIN:-10} * 60 ))
+  boots=${HEX_CRASHLOOP_BOOTS:-3}
+  mkdir -p "$MT5DIR" 2>/dev/null || true
+  # Last 20 starts, one per line. Files, not a counter, because the process that
+  # writes it is killed by the loop it is counting.
+  { grep -E '^[0-9]+$' "$f" 2>/dev/null | tail -n 19; printf '%s\n' "$now"; } > "$f.tmp" 2>/dev/null \
+    && mv "$f.tmp" "$f" 2>/dev/null || true
+  n=$(awk -v n="$now" -v w="$win" '$1 > n - w' "$f" 2>/dev/null | wc -l | tr -d '[:space:]') || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ "$n" -lt "$boots" ]; then
+    set -e
+    set -o pipefail
+    return 0
+  fi
+  ev=""
+  if [ -f "$note" ]; then
+    ev=$(head -c 380 "$note") || ev=""
+  fi
+  log "BOOTLOOP: $n starts in $(( win / 60 )) min - the terminal is dying seconds after it comes up"
+  push_once_shape "CRASHLOOP" \
+    "the container is restarting itself over and over and nothing is trading" \
+    "$n starts in $(( win / 60 )) minutes, so ${MT5_EXPERT:-the terminal} is dying seconds after it comes up: this is not the feed and not the EA, and no restart inside the container can fix it.
+Last words from the terminal:
+${ev:-<no death note - the container was killed rather than exiting>}
+Full log: the mt5-boom service log (the Logs tab, or docker logs)."
+  set -e
+  set -o pipefail
+  return 0
 }
 
 # Turn the EA's own CSV rows into phone pushes. The EA writes one row per event
@@ -1280,6 +1437,10 @@ main() {
   mkdir -p "$MT5DIR"
   claim_volume
   write_lease
+  # Before anything else starts: is this the third start in ten minutes? Then the
+  # phone has to hear it NOW, because this boot may not live long enough for the
+  # watcher's first minute (see boot_guard).
+  boot_guard
   # The desktop comes up BEFORE the terminal is sourced: the installer and the
   # compiler are Windows GUI programs - Wine needs a display even for /auto.
   start_desktop
@@ -1309,15 +1470,26 @@ main() {
   hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You get a buzz on every BUY, CLOSE, ADD and BLOWN, one per distinct ERROR/SKIP (not one per tick), and exactly ONE alert if the robot stops - with the reason and what was done about it - plus one when it is back. Nothing in between."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
+  #
+  # "When it dies" is not the same as "when the launcher exits": wait_terminal_gone
+  # follows the terminal process itself, because tearing the desktop down under a
+  # live terminal is a boot loop, not a restart.
+  local rc up
   set +e
-  wait "$TERMINAL_PID"
-  local rc=$?
+  wait_terminal_gone
+  rc="${TERMINAL_RC:-0}"
   set -e
-  log "terminal64.exe exited (rc=$rc) - stopping the container"
-  [ -n "$X11VNC_PID" ]    && kill "$X11VNC_PID"    2>/dev/null
-  [ -n "$WEBSOCKIFY_PID" ] && kill "$WEBSOCKIFY_PID" 2>/dev/null
-  [ -n "$WM_PID" ]        && kill "$WM_PID"        2>/dev/null
-  [ -n "$XVFB_PID" ]      && kill "$XVFB_PID"      2>/dev/null
+  up=$(( $(date +%s) - BOOT_EPOCH ))
+  log "terminal64.exe exited (rc=$rc) after ${up}s - stopping the container"
+  # Said out loud before the container goes away, and kept on the volume for the
+  # boot that comes next: a container that dies in seconds is read after it is
+  # gone, and /tmp goes with it.
+  terminal_evidence
+  write_death_note "$rc" "$up"
+  if [ -n "$X11VNC_PID" ];    then kill "$X11VNC_PID"    2>/dev/null || true; fi
+  if [ -n "$WEBSOCKIFY_PID" ]; then kill "$WEBSOCKIFY_PID" 2>/dev/null || true; fi
+  if [ -n "$WM_PID" ];        then kill "$WM_PID"        2>/dev/null || true; fi
+  if [ -n "$XVFB_PID" ];      then kill "$XVFB_PID"      2>/dev/null || true; fi
   exit "$rc"
 }
 

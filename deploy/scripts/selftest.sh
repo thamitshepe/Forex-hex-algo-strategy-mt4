@@ -448,6 +448,119 @@ ps_run '2026.11.08 09:20:42,ERROR,Volatility Boom 400 Index,9980.17,buy failed: 
 check_eq "a different fault is its own buzz" "2" "$(wc -l < "$SHAPE_SENT" | tr -d ' ')"
 check_eq "and the stamps live on the volume, so a restart does not replay them" "1" \
   "$([ -d "$MT5DIR/.hex-seen" ] && echo 1 || echo 0)"
+echo "boot loop: a container that dies in ten seconds still rings the phone once"
+# The one fault alert_watcher cannot see: its first pass is a minute away, and a
+# boot is not a state change (so a boot loop is deliberately quiet). The starts
+# themselves are the evidence, and they are on the volume, together with the
+# terminal's last words - which is why those are copied out of /tmp on the way.
+MT5DIR="$TMP/boot"; mkdir -p "$MT5DIR"
+BOOT_SENT="$TMP/boot-sent"; : > "$BOOT_SENT"
+HEX_CRASHLOOP_BOOTS=3; HEX_CRASHLOOP_WINDOW_MIN=10; HEX_ALERT_REPEAT_HOURS=6
+load_fn "$ENTRYPOINT" push_once_shape >/dev/null
+load_fn "$ENTRYPOINT" boot_guard >/dev/null
+hex_push() { printf '%s|%s\n' "$1" "$2" >> "$BOOT_SENT"; }
+bg_run() { boot_guard >/dev/null; }
+bg_run
+check_eq "one start is a start, not a loop" "0" "$(grep -c '^CRASHLOOP|' "$BOOT_SENT" || true)"
+printf 'the container was up 10s and exited rc=1\n  [term] err:module:import_dll Library not found\n' \
+  > "$MT5DIR/.hex-last-death"
+bg_run
+bg_run
+check_eq "three starts inside the window are ONE push" "1" \
+  "$(grep -c '^CRASHLOOP|' "$BOOT_SENT" || true)"
+check_contains "that says how many starts, and why" \
+  "3 starts in 10 minutes" "$(cat "$BOOT_SENT")"
+check_contains "and quotes the terminal's own last words" \
+  "Library not found" "$(cat "$BOOT_SENT")"
+bg_run
+check_eq "a fourth start does not repeat it inside the window" "1" \
+  "$(grep -c '^CRASHLOOP|' "$BOOT_SENT" || true)"
+: > "$MT5DIR/.hex-boots"; rm -rf "$MT5DIR/.hex-seen"; : > "$BOOT_SENT"
+for _ in 1 2 3; do printf '%s\n' $(( $(date +%s) - 7200 )) >> "$MT5DIR/.hex-boots"; done
+bg_run
+check_eq "starts from hours ago are not a loop" "0" \
+  "$(grep -c '^CRASHLOOP|' "$BOOT_SENT" || true)"
+check_eq "and the list of starts stays bounded" "4" \
+  "$(wc -l < "$MT5DIR/.hex-boots" | tr -d ' ')"
+
+echo "the terminal, not the wine launcher, decides when the container stops"
+# `wait $TERMINAL_PID` waits on what the shell started - `wine terminal64.exe` -
+# and wine can hand the work to wine64/terminal64 and exit while the terminal is
+# still painting. Tearing the desktop down there kills a live terminal: a
+# container that restarts every ten seconds and never trades.
+load_fn "$ENTRYPOINT" wait_terminal_gone >/dev/null
+FOLLOW_N="$TMP/follow"; printf '0' > "$FOLLOW_N"
+WAITLOG="$TMP/wait.log"
+TERMINAL_PID=999999        # not a child, so `wait` returns at once, like a launcher
+sleep() { :; }             # the follow loop's tick, without the ten real seconds
+terminal_up() {            # "still up" twice, then gone
+  local n
+  n=$(( $(cat "$FOLLOW_N") + 1 ))
+  printf '%s' "$n" > "$FOLLOW_N"
+  [ "$n" -le 2 ] && { printf '1234'; return 0; }
+  return 1
+}
+wait_terminal_gone > "$WAITLOG" 2>&1
+unset -f sleep terminal_up
+check_contains "a launcher that exits under a live terminal is not the terminal dying" \
+  "following the terminal, not the launcher" "$(cat "$WAITLOG")"
+check_contains "and the container only stops once terminal64.exe is gone" \
+  "terminal64.exe is gone" "$(cat "$WAITLOG")"
+check_eq "with the launcher's own status recorded" "127" "$TERMINAL_RC"
+check_contains "the check is a live pid, and a zombie tini has not reaped is not one" \
+  "Z*) continue" "$(cat "$ENTRYPOINT")"
+
+echo "the terminal's last words survive the restart"
+MT5DIR="$TMP/death"; mkdir -p "$MT5DIR/logs" "$MT5DIR/MQL5/Logs"
+TERM_LOG="$TMP/death-term.out"
+printf 'wine: cannot find L"terminal64.exe"\n' > "$TERM_LOG"
+printf '0  09:00:00  Experts  terminal64.exe: 0 bytes\n' > "$MT5DIR/logs/20261108.log"
+load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
+load_fn "$ENTRYPOINT" write_death_note >/dev/null
+write_death_note 1 10 >/dev/null 2>&1
+check_contains "the death note is on the volume, where the next boot reads it" \
+  "cannot find" "$(cat "$MT5DIR/.hex-last-death")"
+check_contains "with the exit code and how long it lived" "up 10s and exited rc=1" \
+  "$(cat "$MT5DIR/.hex-last-death")"
+check_contains "and the terminal's own journal is quoted with it" "0 bytes" \
+  "$(cat "$MT5DIR/.hex-last-death")"
+check_contains "the loop threshold is configurable, and the compose file sets it" \
+  "HEX_CRASHLOOP_BOOTS" "$(cat "$COMPOSE")"
+
+
+echo "main: the way out says why, and cannot die before saying it"
+# The tail of main is the one place a `set -e` landmine is fatal: `[ -n "$X" ] &&
+# kill "$X"` returns 1 when VNC is off, and the shell then exits BEFORE `exit $rc`
+# - a container that stops without a line saying why. Everything main touches is
+# stubbed inside a subshell, so this is the SEQUENCE, not Wine.
+MT5DIR="$TMP/main"; mkdir -p "$MT5DIR"
+TERM_LOG="$TMP/main-term.out"; printf 'wine: crashed in style\n' > "$TERM_LOG"
+BOOT_EPOCH=$(( $(date +%s) - 42 ))
+MAINLOG="$TMP/main.log"
+load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
+load_fn "$ENTRYPOINT" write_death_note >/dev/null
+load_fn "$ENTRYPOINT" main >/dev/null
+(
+  X11VNC_PID=""; WEBSOCKIFY_PID=""; WM_PID=""; XVFB_PID=""; TERMINAL_PID=4242
+  check_instance_env() { :; }; banner() { :; }; claim_volume() { :; }; write_lease() { :; }
+  boot_guard() { :; }; start_desktop() { :; }; ensure_terminal() { :; }
+  repair_symbol_bases() { :; }; sync_ea() { :; }; compile_ea() { :; }
+  ensure_single_chart() { :; }; write_mt5_ini() { :; }; launch_terminal() { :; }
+  wait_for_terminal() { :; }; report_isolation() { :; }; lease_keeper() { :; }
+  mirror_dir() { :; }; journal_hints() { :; }; ea_watchdog() { :; }
+  desktop_keeper() { :; }; push_watcher() { :; }; alert_watcher() { :; }
+  hex_push() { :; }
+  wait_terminal_gone() { TERMINAL_RC=7; }   # the terminal died, rc 7
+  main
+) > "$MAINLOG" 2>&1
+main_rc=$?
+check_eq "the container leaves with the terminal's own status" "7" "$main_rc"
+check_contains "and says so, with how long it lived" \
+  "terminal64.exe exited (rc=7) after 4" "$(cat "$MAINLOG")"
+check_contains "with the evidence printed before it goes" "[term]" "$(cat "$MAINLOG")"
+check_contains "and left on the volume for the boot after it" \
+  "crashed in style" "$(cat "$MT5DIR/.hex-last-death")"
+
 echo "alert_watcher: a container that has only just booted is not an incident"
 MT5DIR="$TMP/aw2"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
@@ -553,6 +666,14 @@ check_contains "liveness is a pid, not only a name match" "kill -0 \"\$WM_PID\""
 check_contains "the keeper adopts an openbox it did not start" "wm_alive" "$(cat "$ENTRYPOINT")"
 check_not_contains "so it can no longer start a second WM" \
   "if ! pgrep -x openbox" "$(cat "$ENTRYPOINT")"
+# A dead X display is the one fault that makes a healthy terminal exit a second
+# after it starts: openbox says "Failed to open the display", MT5 cannot draw,
+# and it is gone. Restarting Xvfb there would pull the display out from under a
+# live terminal, so the keeper names it instead.
+check_contains "a dead Xvfb is named as the fault, not silently tolerated" \
+  "Xvfb is gone" "$(cat "$ENTRYPOINT")"
+check_contains "and it is not relaunched under a terminal that is using it" \
+  "not relaunched under a live terminal" "$(cat "$ENTRYPOINT")"
 
 echo "a chart that cannot be ticked says which of the two faults it is"
 check_contains "the EA asks the server for its symbol list" 'SymbolsTotal(false)' "$(cat "$EA")"
