@@ -1201,7 +1201,7 @@ alert_watcher() {
       reps=$(( now + ${repeat_h:-6} * 3600 ))
     else
       case "$st" in online|blown) continue ;; esac
-      if [ "$tries" -ge 3 ] && [ "$restart" = "0" ]; then
+      if [ "$tries" -eq 3 ] && [ "$restart" = "0" ]; then
         # Three restarts did not help, and this pass did not spend another. Say
         # it ONCE ("4" in the file means it was said), then stop: a fourth kill
         # would only cost another boot.

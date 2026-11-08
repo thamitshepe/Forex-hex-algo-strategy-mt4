@@ -312,6 +312,14 @@ check_eq "the third attempt is spent quietly, with nothing new said" "0" \
   "$(grep -c '^push ' "$ACTIONS")"
 check_not_contains "and does not page on top of the alert" "NEEDS-YOU" "$(cat "$ACTIONS")"
 check_eq "while still restarting the terminal" "1" "$(grep -c '^kill 999999' "$ACTIONS")"
+# ...and having said it, it does not say it again on the next pass or the next
+# boot: "4" in the budget means "already told you".
+: > "$ACTIONS"
+printf '4 %s offline:no-ticks\n' "$(date +%s)" > "$MT5DIR/.hex-alert-tries"
+aw_run
+check_eq "and it does not repeat the escalation" "0" "$(grep -c '^push ' "$ACTIONS")"
+check_eq "nor restart what it has already given up on" "0" \
+  "$(grep -c '^kill' "$ACTIONS" || true)"
 : > "$ACTIONS"
 printf '2026.11.02 22:04:19|tick_age=5|equity=9994.29|trades=1|sel=1|spread=7\n' > "$AW"
 aw_run
