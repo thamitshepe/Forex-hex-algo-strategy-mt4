@@ -46,6 +46,10 @@ RUN dpkg --add-architecture i386 \
 
 COPY MQL5/Experts/HEX-BoomRider.mq5 /opt/ea/HEX-BoomRider.mq5
 COPY MQL5/Presets/ /opt/ea/presets/
+# The distro download has two routes (the release front door, then GitHub's API
+# asset endpoint); see the script for the 504 that made this necessary.
+COPY deploy/scripts/fetch-distro.sh /opt/hex/fetch-distro.sh
+RUN chmod 0755 /opt/hex/fetch-distro.sh
 
 ARG MT5_DISTRO_URL=""
 RUN set -eux; \
@@ -57,8 +61,7 @@ RUN set -eux; \
         > /opt/ea-built/compile.log; \
       exit 0; \
     fi; \
-    curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 600 --retry-all-errors \
-         --connect-timeout 20 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
+    sh /opt/hex/fetch-distro.sh "$MT5_DISTRO_URL" /tmp/distro.tar; \
     mkdir -p /tmp/distro; \
     case "$MT5_DISTRO_URL" in \
       *.zst|*.tzst) tar --use-compress-program=unzstd -xf /tmp/distro.tar -C /tmp/distro ;; \
@@ -165,6 +168,8 @@ RUN set -eux; \
     ls -l /opt/ea/
 COPY deploy/scripts/entrypoint.sh /opt/hex/entrypoint.sh
 COPY deploy/scripts/healthcheck.sh /opt/hex/healthcheck.sh
+# Used by the distro RUN below and by the entrypoint when it seeds a fresh volume.
+COPY deploy/scripts/fetch-distro.sh /opt/hex/fetch-distro.sh
 RUN chmod 0755 /opt/hex/*.sh
 
 # Which commit this image is; printed as the banner's first line.
@@ -176,8 +181,7 @@ ENV HEX_BUILD="${HEX_BUILD}"
 ARG MT5_DISTRO_URL=""
 RUN set -eux; \
     if [ -n "$MT5_DISTRO_URL" ]; then \
-      curl -fsSL --retry 8 --retry-delay 5 --retry-max-time 600 --retry-all-errors \
-           --connect-timeout 20 -o /tmp/distro.tar "$MT5_DISTRO_URL"; \
+      sh /opt/hex/fetch-distro.sh "$MT5_DISTRO_URL" /tmp/distro.tar; \
       mkdir -p /opt/mt5-distro; \
       case "$MT5_DISTRO_URL" in \
         *.zst|*.tzst) tar --use-compress-program=unzstd -xf /tmp/distro.tar -C /opt/mt5-distro ;; \

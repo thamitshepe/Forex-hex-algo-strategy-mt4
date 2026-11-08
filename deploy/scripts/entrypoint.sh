@@ -207,9 +207,18 @@ seed_distro_from_url() { # URL
   case "$url" in
     file:///*) tarball="${url#file://}" ;;
     *) tarball="${TMPDIR:-/tmp}/hex-distro.tar"
-       curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
-         -o "$tarball" "$url" \
-         || die "download failed: $url" ;;
+       # fetch-distro.sh retries the release front door and then falls back to
+       # GitHub's API asset endpoint: on 2026-11-08 the front door answered 504 to
+       # every attempt for over an hour while the asset was fine, and two image
+       # builds died on it. The plain curl below is the fallback for a build that
+       # does not carry the script (a dev machine).
+       if [ -x /opt/hex/fetch-distro.sh ]; then
+         /opt/hex/fetch-distro.sh "$url" "$tarball" || die "download failed: $url"
+       else
+         curl -fsSL --retry 8 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+           -o "$tarball" "$url" \
+           || die "download failed: $url"
+       fi ;;
   esac
   case "$tarball" in
     *.zst|*.tzst) tar --use-compress-program=unzstd -xf "$tarball" -C "$dir" ;;

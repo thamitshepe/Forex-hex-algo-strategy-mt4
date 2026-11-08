@@ -553,6 +553,15 @@ Four things worth knowing, all of them checked rather than assumed:
   at first start instead (slower to boot, same result). The stage decodes
   metaeditor's UTF-16 log before reading it, so a real compile error prints as an
   error instead of a mystery failure.
+- **The distro download has two routes**, because on 2026-11-08 the first one went
+  down for hours: `https://github.com/<owner>/<repo>/releases/download/…` answered
+  HTTP 504 to every attempt (from a laptop and from CI) while the asset itself was
+  fine — the release API listed it and the API's asset endpoint served the same
+  129 MB. Two image builds died there and no fix reached the server, so
+  `deploy/scripts/fetch-distro.sh` retries the front door and then fetches the
+  asset through `api.github.com/repos/…/releases/assets/<id>`. The build log says
+  `the release front door refused the download; fetching asset <id> through the
+  API instead` when it takes that route; a real failure still fails the build.
 - **It is `linux/amd64` only**, which is what a normal VPS is. The published
   manifest is an OCI index holding one `linux/amd64` image plus buildkit's
   provenance attestation.

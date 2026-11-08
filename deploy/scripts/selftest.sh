@@ -747,14 +747,72 @@ check_contains "the EA compile log is decoded before it is read" \
   "tr -d '\\000' < " "$(cat "$DOCKERFILE")"
 check_contains "a distro without the include tree is named as such" \
   "refusing to blame the EA for a distro problem" "$(cat "$DOCKERFILE")"
-# GitHub's release CDN answered 504 to every attempt on 2026-11-08 and two image
-# builds - and with them two deploys - never happened, while the terminal on the
-# server was already stale. One transient gateway error is not a reason to lose a
-# deploy, so every download of the distro retries instead of giving up.
-check_eq "the distro download survives a flaky CDN in the build" "2" \
-  "$(grep -c -- '--retry-all-errors' "$DOCKERFILE" || true)"
-check_eq "and so does the one at container start" "2" \
-  "$(grep -c -- '--retry-all-errors' "$ENTRYPOINT" || true)"
+# GitHub's release front door answered 504 to every attempt on 2026-11-08 - from a
+# laptop and from CI, for over an hour - while the asset itself was fine: the API
+# reported it uploaded and the API's own asset endpoint served the same bytes. Two
+# image builds died on that 504 and no fix reached the server. So the download has
+# two routes now, and the fallback is the one that has to be tested: a stub curl
+# plays the broken front door, the release API and the asset endpoint.
+echo "the distro download has a second route (the front door 504s)"
+FD="$HERE/fetch-distro.sh"
+check_eq "the helper ships and is executable" "1" "$([ -x "$FD" ] && echo 1)"
+check_contains "the image build downloads through it" \
+  'sh /opt/hex/fetch-distro.sh "$MT5_DISTRO_URL" /tmp/distro.tar' "$(cat "$DOCKERFILE")"
+check_contains "and so does the container's own seeding" \
+  '/opt/hex/fetch-distro.sh "$url" "$tarball"' "$(cat "$ENTRYPOINT")"
+FB="$TMP/fd"
+mkdir -p "$FB/bin"
+cat > "$FB/rel.json" <<'JSON'
+{
+  "id": 111,
+  "name": "MT5 portable distro",
+  "uploader": { "login": "owner", "id": 333 },
+  "assets": [
+    { "id": 222, "name": "mt5-portable.tar.gz", "uploader": { "id": 444 } }
+  ]
+}
+JSON
+cat > "$FB/bin/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$STUB_LOG"
+out=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  prev="$a"
+done
+case "$*" in
+  */releases/tags/*)   cat "$STUB_JSON"; exit 0 ;;
+  */releases/assets/*) [ -n "$out" ] && printf 'DISTRO-BYTES\n' > "$out"; exit 0 ;;
+  *front-door-ok*)     [ -n "$out" ] && printf 'FRONT-DOOR\n'  > "$out"; exit 0 ;;
+esac
+exit 22
+STUB
+chmod +x "$FB/bin/curl"
+FDURL="https://github.com/owner/repo/releases/download/tag/mt5-portable.tar.gz"
+: > "$FB/log1"
+out="$(STUB_LOG="$FB/log1" STUB_JSON="$FB/rel.json" PATH="$FB/bin:$PATH" \
+        sh "$FD" "$FDURL" "$FB/out1.tar" 2>&1)" && rc=0 || rc=$?
+check_eq "a 504 on the front door does not fail the download" "0" "$rc"
+check_eq "the bytes are on disk" "DISTRO-BYTES" "$(cat "$FB/out1.tar" 2>/dev/null)"
+check_contains "it takes the ASSET's id, not the release's" "releases/assets/222" "$(cat "$FB/log1")"
+check_not_contains "and not the release id" "releases/assets/111" "$(cat "$FB/log1")"
+check_not_contains "and not the uploader's id" "releases/assets/444" "$(cat "$FB/log1")"
+check_contains "it says which route it used" "through the API instead" "$out"
+: > "$FB/log2"
+STUB_LOG="$FB/log2" STUB_JSON="$FB/rel.json" PATH="$FB/bin:$PATH" \
+  sh "$FD" "https://github.com/owner/repo/releases/download/tag/front-door-ok.tar.gz" "$FB/out2.tar" \
+  >/dev/null 2>&1
+check_eq "a healthy front door is used as it is" "FRONT-DOOR" "$(cat "$FB/out2.tar" 2>/dev/null)"
+check_eq "with no API call at all" "0" "$(grep -c 'releases/tags' "$FB/log2" || true)"
+: > "$FB/log3"
+out="$(STUB_LOG="$FB/log3" STUB_JSON="$FB/rel.json" PATH="$FB/bin:$PATH" \
+        sh "$FD" "https://example.com/somewhere.tar.gz" "$FB/out3.tar" 2>&1)" && rc=0 || rc=$?
+check_eq "a URL with no second route fails loudly" "1" "$rc"
+check_contains "and says there is no fallback for it" "no API fallback" "$out"
+mkdir -p "$FB/local"
+printf 'LOCAL\n' > "$FB/local/distro.tar.gz"
+sh "$FD" "file://$FB/local/distro.tar.gz" "$FB/out4.tar" >/dev/null 2>&1
+check_eq "a file:// distro is copied, not downloaded" "LOCAL" "$(cat "$FB/out4.tar" 2>/dev/null)"
 
 
 echo "dokploy-apply"
