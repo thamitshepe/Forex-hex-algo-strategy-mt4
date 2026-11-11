@@ -64,6 +64,14 @@ die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; SAID_BYE
 # leave the evidence on the volume for the boot that comes next. Only SIGKILL and
 # a dead host stay silent, and they cannot be helped from inside.
 SAID_BYE=""
+# WHICH command could not run. `set -e` leaves on the first failure and names no
+# victim: the 2026-11-11 log had `rc=1` and bash's own `fork: Cannot allocate
+# memory` and no way to tell which fork that was - the terminal, a watcher, the
+# push - so nothing could be acted on. Assignments only: a trap that needs a
+# process is a trap that cannot run in the one situation it exists for.
+ERR_AT=""
+trap 'ERR_AT="${BASH_COMMAND}"' ERR
+
 say_bye() { # RC
   local rc="${1:-?}" up="?"
   # main() and die() say why they leave. This is only for the ways out that
@@ -78,6 +86,9 @@ say_bye() { # RC
     write_death_note "$rc" "$up"
   fi
   log "the entrypoint ended without reaching its shutdown (rc=$rc) - this run was killed from outside (a stop, a redeploy, the kernel): not the feed and not the EA, and no restart inside the container can fix it"
+  if [ -n "${ERR_AT:-}" ]; then
+    log "the command that failed last was: $ERR_AT"
+  fi
 }
 on_signal() { # NAME RC
   log "$1 received after ${SECONDS}s - the container is being stopped from outside (docker stop, a redeploy), not by a fault of its own"
@@ -732,6 +743,76 @@ wait_for_terminal() {
   log "HINT: a terminal64.exe that dies in seconds under wine is usually a font or a prefix problem - the [term] lines above name it"
 }
 
+# ------------------------------------------------------ what the ceiling is ---
+# `fork: Cannot allocate memory` is the kernel refusing to create a process: the
+# container has reached the memory its cgroup allows, or the host has nothing
+# left - two different faults with two different owners. One line tells them
+# apart, and it is the line the 2026-11-11 loop was missing:
+#
+#   mem: limit=1024 MB current=1009 MB (98% of the limit) pids=312/4096 host: 210 MB free of 1966 MB oom_kills=0
+#
+# Everything in here is a BUILTIN - `read` from a file, `printf`, integer
+# arithmetic - because the moment it matters is the moment `$(cat …)`, `sed` and
+# `awk` cannot run: there is no process left to run them in.
+#
+# MEM_CGROUP / MEM_INFO exist so the selftest can put a cgroup tree on disk and
+# check the arithmetic, including v1's 19-digit "unlimited" sentinel, without
+# being inside a container.
+mem_report() {
+  local root="${MEM_CGROUP:-/sys/fs/cgroup}" info="${MEM_INFO:-/proc/meminfo}"
+  local lim="" cur="" pmax="" pcur="" oom="" k v rest="" total="" avail=""
+  local lims curs pcts hosts pct=""
+  # cgroup v2 (Docker on a current host), then v1, then nothing at all.
+  if { read -r lim < "$root/memory.max"; } 2>/dev/null; then
+    { read -r cur < "$root/memory.current"; } 2>/dev/null || cur=""
+    while read -r k v rest; do
+      case "$k" in oom_kill) oom="$v" ;; esac
+    done 2>/dev/null < "$root/memory.events" || true
+  elif { read -r lim < "$root/memory/memory.limit_in_bytes"; } 2>/dev/null; then
+    { read -r cur < "$root/memory/memory.usage_in_bytes"; } 2>/dev/null || cur=""
+  fi
+  { read -r pmax < "$root/pids.max"; } 2>/dev/null || pmax=""
+  { read -r pcur < "$root/pids.current"; } 2>/dev/null || pcur=""
+  while read -r k v rest; do
+    case "$k" in
+      MemTotal:)     total="$v" ;;
+      MemAvailable:) avail="$v" ;;
+    esac
+  done 2>/dev/null < "$info" || true
+
+  # Bytes to MB with integer arithmetic: no bc, no awk, and no 64-bit overflow on
+  # cgroup v1's "unlimited" sentinel (9223372036854771712 - nineteen digits).
+  case "$lim" in
+    ''|max) lims="unlimited" ;;
+    *) if [ "${#lim}" -ge 19 ]; then lims="unlimited"
+       else lims="$(( lim / 1048576 )) MB"; fi ;;
+  esac
+  case "$cur" in
+    ''|*[!0-9]*) cur="" ; curs="?" ;;
+    *) curs="$(( cur / 1048576 )) MB" ;;
+  esac
+  # The percentage is the sentence: "98% of the limit" is an answer, "1009 MB" is
+  # a number. It is only printed when both halves are real numbers.
+  if [ -n "$lim" ] && [ -n "$cur" ] && [ "${#lim}" -lt 19 ]; then
+    case "$lim" in
+      ''|*[!0-9]*) : ;;
+      *) if [ "$lim" -gt 0 ]; then pct=" ($(( cur * 100 / lim ))% of the limit)"; fi ;;
+    esac
+  fi
+  if [ -n "$pcur" ]; then
+    case "$pmax" in ''|max) pcts="$pcur (unlimited)" ;; *) pcts="$pcur/$pmax" ;; esac
+  else
+    pcts="?"
+  fi
+  case "$total$avail" in
+    ''|*[!0-9]*) hosts="not readable here" ;;
+    *) hosts="$(( avail / 1024 )) MB free of $(( total / 1024 )) MB" ;;
+  esac
+  printf 'mem: limit=%s current=%s%s pids=%s host: %s oom_kills=%s\n' \
+    "$lims" "$curs" "$pct" "$pcts" "$hosts" "${oom:-?}"
+  return 0
+}
+
 # Everything the container knows about why the terminal is not there, in one
 # place, printed for a human reading `docker logs`.
 #
@@ -740,7 +821,20 @@ wait_for_terminal() {
 # not carry. So it is both printed here and copied to the volume
 # (write_death_note), because a container that dies in ten seconds is read AFTER
 # it is gone.
+#
+# The memory line goes FIRST, and it is the only part with no process in it: on
+# 2026-11-11 a boot died of `fork: Cannot allocate memory` and every sed/tail
+# below went down with the fork, so the one figure that explained the death was
+# the one piece of evidence that could not be printed.
 terminal_evidence() {
+  mem_report || true
+  terminal_tails
+}
+
+# The tails themselves: what the terminal, the X server, the window manager and
+# the last journal/Experts lines said. All of it needs a process, so none of it
+# may be the only evidence a dying boot leaves behind.
+terminal_tails() {
   local f last
   sed 's/^/  [term] /' "$TERM_LOG" 2>/dev/null | tail -12 || true
   sed 's/^/  [xvfb] /' /tmp/xvfb.log 2>/dev/null | tail -4 || true
@@ -766,21 +860,36 @@ terminal_evidence() {
     printf '  [experts] %s\n' "$(basename "$last")"
     tail -8 "$last" 2>/dev/null | sed 's/^/    /' || true
   fi
-  # A container that is restarted by the kernel looks exactly like one that
-  # exited: no exit code, no message, nothing. Memory is the one figure that
-  # separates the two.
-  awk '/^(MemTotal|MemAvailable):/ { printf "  [mem] %s %s KB\n", $1, $2 }' /proc/meminfo 2>/dev/null || true
   return 0
 }
 
 # The same evidence, on the volume, for the NEXT boot to quote: /tmp is empty
 # when the container comes back, and a boot loop is precisely the case where the
 # answer is in the boot before this one.
+#
+# The head of the note is written with BUILTINS ON PURPOSE (printf, read): this
+# runs at exactly the moment the container may have no room to create a process,
+# and on 2026-11-11 the note itself was lost to `fork: Cannot allocate memory` -
+# the next boot then had nothing to quote and the loop said only "20 starts".
+# The tails below need sed/tail/awk and are therefore a bonus, not the record.
+#
+# A NUL is stripped on the way out: the terminal's log carries them (UTF-16), and
+# a note with a NUL in it made the next boot print bash's
+# `warning: command substitution: ignored null byte in input` instead of the note.
 write_death_note() { # RC UPTIME_SECONDS
-  {
-    printf 'the container was up %ss and exited rc=%s\n' "${2:-?}" "${1:-?}"
-    terminal_evidence | tail -20
-  } > "$MT5DIR/.hex-last-death" 2>/dev/null || true
+  local note="$MT5DIR/.hex-last-death"
+  : > "$note" 2>/dev/null || true
+  printf 'the container was up %ss and exited rc=%s\n' "${2:-?}" "${1:-?}" \
+    >> "$note" 2>/dev/null || true
+  if [ -n "${ERR_AT:-}" ]; then
+    printf 'the command that failed last was: %s\n' "$ERR_AT" >> "$note" 2>/dev/null || true
+  fi
+  mem_report >> "$note" 2>/dev/null || true
+  terminal_tails 2>/dev/null | tail -20 >> "$note" 2>/dev/null || true
+  if [ -s "$note" ]; then
+    tr -d '\000' < "$note" > "$note.tmp" 2>/dev/null \
+      && mv "$note.tmp" "$note" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -1206,7 +1315,10 @@ boot_guard() {
   fi
   ev=""
   if [ -f "$note" ]; then
-    ev=$(head -c 380 "$note") || ev=""
+    # `tr` first: a NUL in the note makes the shell print
+    # `warning: command substitution: ignored null byte in input` instead of
+    # quoting what the last boot said (notes written before this fix have them).
+    ev=$(head -c 380 "$note" | tr -d '\000') || ev=""
   fi
   log "BOOTLOOP: $n starts in $(( win / 60 )) min - the terminal is dying seconds after it comes up"
   push_once_shape "CRASHLOOP" \
@@ -1590,6 +1702,10 @@ report_isolation() {
 main() {
   check_instance_env
   banner
+  # The one line a restart loop is usually missing, said before anything can die:
+  # the ceiling this container may use, what it is using, and what the host has
+  # left. A boot that ends in `fork: Cannot allocate memory` is answered here.
+  log "$(mem_report)"
   mkdir -p "$MT5DIR"
   claim_volume
   write_lease

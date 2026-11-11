@@ -516,6 +516,8 @@ TERM_LOG="$TMP/death-term.out"
 printf 'wine: cannot find L"terminal64.exe"\n' > "$TERM_LOG"
 printf '0  09:00:00  Experts  terminal64.exe: 0 bytes\n' > "$MT5DIR/logs/20261108.log"
 load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
+load_fn "$ENTRYPOINT" terminal_tails >/dev/null
+load_fn "$ENTRYPOINT" mem_report >/dev/null
 load_fn "$ENTRYPOINT" openbox_log_tail >/dev/null
 load_fn "$ENTRYPOINT" write_death_note >/dev/null
 write_death_note 1 10 >/dev/null 2>&1
@@ -539,6 +541,8 @@ TERM_LOG="$TMP/main-term.out"; printf 'wine: crashed in style\n' > "$TERM_LOG"
 BOOT_EPOCH=$(( $(date +%s) - 42 ))
 MAINLOG="$TMP/main.log"
 load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
+load_fn "$ENTRYPOINT" terminal_tails >/dev/null
+load_fn "$ENTRYPOINT" mem_report >/dev/null
 load_fn "$ENTRYPOINT" write_death_note >/dev/null
 load_fn "$ENTRYPOINT" main >/dev/null
 (
@@ -805,6 +809,8 @@ check_contains "and is named instead of being silent" \
   "ended without reaching its shutdown (rc=1)" "$(cat "$TMP/sete.out")"
 check_eq "the line after the failure never ran" "0" \
   "$(grep -c unreachable "$TMP/sete.out" || true)"
+check_contains "and WHICH command failed is named, not left to guesswork" \
+  "the command that failed last was: false" "$(cat "$TMP/sete.out")"
 probe_script deliberate 'log "terminal64.exe exited (rc=7) after 7s - stopping the container"
 SAID_BYE=1
 exit 7'
@@ -812,6 +818,72 @@ exit 7'
 check_eq "a deliberate exit keeps the terminal's status" "7" "$bye_rc"
 check_eq "and is not reported as a kill" "0" \
   "$(grep -c 'ended without reaching' "$TMP/bye.out" || true)"
+
+echo "a boot that runs out of memory says which ceiling it hit"
+# `fork: Cannot allocate memory` is the kernel refusing to create a process, and
+# the line that explains it has to be built from BUILTINS ONLY: it prints
+# precisely when sed, awk and $(cat …) cannot run. So the arithmetic is checked
+# against a cgroup tree on disk rather than a real container.
+EPI="$(cat "$ENTRYPOINT")"
+check_contains "the failing command is recorded by an ERR trap" \
+  "trap 'ERR_AT=\"\${BASH_COMMAND}\"' ERR" "$EPI"
+check_contains "the ceiling is printed on every boot, before anything can die" \
+  'log "$(mem_report)"' "$EPI"
+check_contains "and the evidence prints it FIRST, because it needs no process" \
+  'terminal_evidence() {
+  mem_report || true' "$EPI"
+check_not_contains "nothing in the evidence needs awk any more" \
+  "awk '/^(MemTotal" "$EPI"
+check_contains "the note is stripped of NULs on the way out" \
+  "tr -d '\\000' < \"\$note\"" "$EPI"
+load_fn "$ENTRYPOINT" mem_report >/dev/null || true
+CR="$TMP/cgroup-v2"; mkdir -p "$CR"
+printf '1073741824\n' > "$CR/memory.max"
+printf '1059061760\n' > "$CR/memory.current"
+printf 'low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\n' > "$CR/memory.events"
+printf '4096\n' > "$CR/pids.max"
+printf '312\n'  > "$CR/pids.current"
+printf 'MemTotal:       2013280 kB\nMemFree:   1024 kB\nMemAvailable:    215040 kB\n' \
+  > "$TMP/meminfo"
+check_eq "limit, usage, the share of the limit, pids and what the host has left" \
+  "mem: limit=1024 MB current=1010 MB (98% of the limit) pids=312/4096 host: 210 MB free of 1966 MB oom_kills=1" \
+  "$(MEM_CGROUP="$CR" MEM_INFO="$TMP/meminfo" mem_report)"
+CR2="$TMP/cgroup-v1"; mkdir -p "$CR2/memory"
+printf '9223372036854771712\n' > "$CR2/memory/memory.limit_in_bytes"
+printf '536870912\n'          > "$CR2/memory/memory.usage_in_bytes"
+check_eq "cgroup v1's 19-digit 'unlimited' is not printed as a limit" \
+  "mem: limit=unlimited current=512 MB pids=? host: 210 MB free of 1966 MB oom_kills=?" \
+  "$(MEM_CGROUP="$CR2" MEM_INFO="$TMP/meminfo" mem_report)"
+CR3="$TMP/cgroup-max"; mkdir -p "$CR3"
+printf 'max\n' > "$CR3/memory.max"
+printf '268435456\n' > "$CR3/memory.current"
+check_eq "cgroup v2's literal 'max' means no limit, and no percentage of one" \
+  "mem: limit=unlimited current=256 MB pids=? host: 210 MB free of 1966 MB oom_kills=?" \
+  "$(MEM_CGROUP="$CR3" MEM_INFO="$TMP/meminfo" mem_report)"
+check_eq "with no cgroup and no /proc at all it still answers, and still succeeds" \
+  "0 mem: limit=unlimited current=? pids=? host: not readable here oom_kills=?" \
+  "$(r="$(MEM_CGROUP=/nonexistent MEM_INFO=/nonexistent mem_report)"; printf '%s %s' "$?" "$r")"
+
+echo "the death note lands when no process can be started"
+load_fn "$ENTRYPOINT" terminal_tails >/dev/null || true
+load_fn "$ENTRYPOINT" write_death_note >/dev/null || true
+ND="$TMP/note-nofork"; mkdir -p "$ND"
+# PATH points at nothing: every external tool is gone, which is as close to "the
+# container cannot fork" as a test can get without forcing ENOMEM. The head of
+# the note must still be written - that is what the next boot quotes.
+( MT5DIR="$ND" TERM_LOG="$TMP/no-term.log" \
+    ERR_AT="tail -F /data/mt5/logs/20261111.log" \
+    MEM_CGROUP="$CR" MEM_INFO="$TMP/meminfo" PATH=/nonexistent \
+    write_death_note 1 2 ) >/dev/null 2>&1
+note="$(cat "$ND/.hex-last-death" 2>/dev/null || true)"
+check_contains "how long it lived and how it left" "up 2s and exited rc=1" "$note"
+check_contains "which command could not run" \
+  "the command that failed last was: tail -F /data/mt5/logs/20261111.log" "$note"
+check_contains "and the ceiling it hit, with no PATH to find a single tool in" \
+  "mem: limit=1024 MB current=1010 MB (98% of the limit)" "$note"
+qout="$({ ev=$(head -c 380 "$ND/.hex-last-death" | tr -d '\000'); printf '%s' "$ev"; } 2>"$TMP/nul.err")"
+check_contains "the note is text, so a push can quote it" "up 2s and exited rc=1" "$qout"
+check_eq "and bash has no null-byte warning to print over it" "" "$(cat "$TMP/nul.err")"
 
 echo "a chart that cannot be ticked says which of the two faults it is"
 check_contains "the EA asks the server for its symbol list" 'SymbolsTotal(false)' "$(cat "$EA")"
