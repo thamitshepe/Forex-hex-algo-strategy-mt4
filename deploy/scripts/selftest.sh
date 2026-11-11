@@ -516,6 +516,7 @@ TERM_LOG="$TMP/death-term.out"
 printf 'wine: cannot find L"terminal64.exe"\n' > "$TERM_LOG"
 printf '0  09:00:00  Experts  terminal64.exe: 0 bytes\n' > "$MT5DIR/logs/20261108.log"
 load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
+load_fn "$ENTRYPOINT" openbox_log_tail >/dev/null
 load_fn "$ENTRYPOINT" write_death_note >/dev/null
 write_death_note 1 10 >/dev/null 2>&1
 check_contains "the death note is on the volume, where the next boot reads it" \
@@ -657,8 +658,7 @@ echo "a desktop with no window manager is why the noVNC tab froze"
 # openbox exits at once if Xvfb is not accepting clients yet; a desktop with no WM
 # draws the charts and cannot be clicked. And two WMs on one display is the same
 # freeze from the other side, so the keeper adopts instead of double-starting.
-check_contains "the WM starts only after the display publishes its socket" \
-  'X11-unix/X${DISPLAY#:}' "$(cat "$ENTRYPOINT")"
+# (What "Xvfb is accepting clients" means is the next block's question.)
 check_contains "a WM that died within a second is reported, with its own log" \
   "openbox did not stay up" "$(cat "$ENTRYPOINT")"
 check_contains "and that log is printed" '[openbox]' "$(cat "$ENTRYPOINT")"
@@ -674,6 +674,144 @@ check_contains "a dead Xvfb is named as the fault, not silently tolerated" \
   "Xvfb is gone" "$(cat "$ENTRYPOINT")"
 check_contains "and it is not relaunched under a terminal that is using it" \
   "not relaunched under a live terminal" "$(cat "$ENTRYPOINT")"
+
+echo "a socket file is not a display"
+# 2026-11-11: `[ -S /tmp/.X11-unix/X99 ]` was true on every boot - the socket
+# outlives the killed server - so 'virtual desktop: Xvfb on :99' was printed over
+# a display nobody served, openbox said "Failed to open the display", and MT5 died
+# a second after it started, forever. The display is now judged by a client.
+SD="$(sed -n '/^start_desktop() {/,/^}/p' "$ENTRYPOINT")"
+check_contains "the desktop waits for a client, not for the socket file" \
+  "while ! display_up" "$SD"
+check_eq "and starts the WM only after that probe" "1" \
+  "$([ "$(printf '%s' "$SD" | grep -n 'while ! display_up' | cut -d: -f1)" \
+      -lt "$(printf '%s' "$SD" | grep -n 'start_wm || true' | cut -d: -f1)" ] && echo 1 || echo 0)"
+check_contains "when it never comes up, that IS the sentence, with Xvfb's own log" \
+  "Xvfb never came up on" "$SD"
+check_contains "and the socket path is still what a stale display is recognised by" \
+  'X11-unix/X${DISPLAY#:}' "$(cat "$ENTRYPOINT")"
+check_contains "the probe uses a client that is actually in the image" \
+  "xdotool getdisplaygeometry" "$(cat "$ENTRYPOINT")"
+check_contains "the lock a killed container leaves is cleared" \
+  'X${DISPLAY#:}-lock' "$(cat "$ENTRYPOINT")"
+check_contains "but never under a server that is still serving" \
+  'if pgrep -x Xvfb >/dev/null 2>&1 || display_up; then' "$(cat "$ENTRYPOINT")"
+check_contains "the keeper will not put a WM back onto a dead display" \
+  'if ! display_up; then' "$(cat "$ENTRYPOINT")"
+
+load_fn "$ENTRYPOINT" display_up >/dev/null
+load_fn "$ENTRYPOINT" x_clear_stale_display >/dev/null
+DISPLAY=":77"; XVFB_PID=""
+mkdir -p /tmp/.X11-unix
+rm -f /tmp/.X11-unix/X77 /tmp/.X77-lock
+# A real unix socket, exactly the kind Xvfb leaves behind when it is killed.
+python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' /tmp/.X11-unix/X77
+printf '4242\n' > /tmp/.X77-lock
+if display_up; then
+  bad "a socket with no server must not read as a display"
+else
+  ok "a socket with no server is not a display"
+fi
+out="$(x_clear_stale_display 2>&1)"
+check_contains "a display left behind by a killed container is cleared" \
+  "cleared a stale :77" "$out"
+check_eq "and both files go with it" "no" \
+  "$([ -e /tmp/.X11-unix/X77 ] && echo yes || echo no)"
+# ...but adopting a live server is the keeper's rule, so a live Xvfb keeps it.
+printf '4242\n' > /tmp/.X77-lock
+out="$( ( pgrep() { return 0; }; x_clear_stale_display ) 2>&1)"
+check_eq "a live Xvfb keeps its display" "yes" \
+  "$([ -e /tmp/.X77-lock ] && echo yes || echo no)"
+check_eq "and nothing is said about clearing it" "0" \
+  "$(printf '%s' "$out" | grep -c 'cleared a stale' || true)"
+rm -f /tmp/.X11-unix/X77 /tmp/.X77-lock
+
+echo "openbox's menu complaint is not the reason it exited"
+OPENBOX_LOG="$TMP/openbox.log"
+printf '%s\n' \
+  'Openbox-Message: Unable to find a valid menu file "/var/lib/openbox/debian-menu.xml"' \
+  'Openbox-Message: Failed to open the display from the DISPLAY environment variable.' \
+  'Openbox-Message: Unable to find a valid menu file "/var/lib/openbox/debian-menu.xml"' \
+  > "$OPENBOX_LOG"
+out="$(OPENBOX_LOG="$OPENBOX_LOG"; load_fn "$ENTRYPOINT" openbox_log_tail >/dev/null; openbox_log_tail 8 2>&1)"
+check_contains "the reason is printed" \
+  "Failed to open the display from the DISPLAY environment variable" "$out"
+check_eq "the menu noise is not" "0" \
+  "$(printf '%s\n' "$out" | grep -c 'Unable to find a valid menu file')"
+check_contains "and it is named, not silently dropped" "harmless" "$out"
+
+echo "the wine launcher is not the terminal"
+load_fn "$ENTRYPOINT" terminal_pid >/dev/null
+check_eq "the launcher's own pid is skipped" "222" \
+  "$( ( TERMINAL_PID=111; pgrep() { printf '111\n222\n'; }; terminal_pid ) )"
+check_eq "with only the launcher there is no terminal yet" "1" \
+  "$( ( TERMINAL_PID=111; pgrep() { printf '111\n'; }; terminal_pid >/dev/null; echo $? ) )"
+check_contains "so the poll says which pid it found, and never calls the launcher 'up'" \
+  "not calling that 'up'" "$(cat "$ENTRYPOINT")"
+
+echo "a run that is killed says so"
+EP="$(cat "$ENTRYPOINT")"
+check_contains "SIGTERM is trapped and named" "trap 'on_signal SIGTERM 143' TERM" "$EP"
+check_contains "so a stop from outside reads as a stop from outside" \
+  "the container is being stopped from outside" "$EP"
+check_contains "an exit main did not write is named too, whatever it was" \
+  "trap 'say_bye \$?'  EXIT" "$EP"
+check_contains "and it leaves the death note for the boot after it" \
+  'write_death_note "$rc" "$up"' "$EP"
+check_contains "a deliberate exit is not reported as a kill" 'SAID_BYE=1' "$EP"
+check_contains "the FATAL path counts as deliberate" \
+  'die()  { printf' "$EP"
+# ...and the traps do it, exercised for real rather than grepped: a SIGTERM, a
+# `set -e` death (the silent way out), and a deliberate exit that must stay quiet.
+TRAPS="$TMP/traps.sh"
+sed -n '/^SAID_BYE=""/,/^trap .on_signal SIGHUP 129.  HUP$/p' "$ENTRYPOINT" > "$TRAPS"
+check_contains "the trap block is what the entrypoint runs" \
+  "trap 'say_bye \$?'  EXIT" "$(cat "$TRAPS")"
+KD="$TMP/killed"; mkdir -p "$KD"
+# shellcheck disable=SC2016  # the ${1..} and $(..) belong to the probe script
+probe_script() { # NAME BODY
+  cat > "$TMP/$1.sh" <<EOF
+log() { printf '[log] %s\n' "\$*"; }
+MT5DIR='$KD'
+BOOT_EPOCH=\$(( \$(date +%s) - 3 ))
+write_death_note() { printf 'note rc=%s up=%s\n' "\$1" "\$2" > "\$MT5DIR/.hex-last-death"; }
+. '$TRAPS'
+$2
+EOF
+}
+probe_script sigterm ': > "'"$KD"'/ready"; while :; do sleep 1; done'
+# The signal has to reach THE SHELL THAT SOURCED THE TRAPS, so the background job
+# is that shell itself and not a wrapper around it.
+"$BASH" "$TMP/sigterm.sh" > "$TMP/sigterm.out" 2>&1 &
+sig_pid=$!
+n=0
+while [ ! -f "$KD/ready" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+kill -TERM "$sig_pid" 2>/dev/null
+wait "$sig_pid" 2>/dev/null; sig_rc=$?
+kill "$sig_pid" 2>/dev/null || true
+check_eq "a SIGTERM leaves with the signal's own status" "143" "$sig_rc"
+check_contains "and says it was a stop from outside" \
+  "SIGTERM received" "$(cat "$TMP/sigterm.out")"
+check_contains "and that this run did not reach its shutdown" \
+  "ended without reaching its shutdown (rc=143)" "$(cat "$TMP/sigterm.out")"
+check_contains "and the death note the next boot quotes says so too" \
+  "note rc=143" "$(cat "$KD/.hex-last-death")"
+probe_script seterr 'set -e
+false
+log unreachable'
+"$BASH" "$TMP/seterr.sh" > "$TMP/sete.out" 2>&1; set_rc=$?
+check_eq "a set -e death keeps its status" "1" "$set_rc"
+check_contains "and is named instead of being silent" \
+  "ended without reaching its shutdown (rc=1)" "$(cat "$TMP/sete.out")"
+check_eq "the line after the failure never ran" "0" \
+  "$(grep -c unreachable "$TMP/sete.out" || true)"
+probe_script deliberate 'log "terminal64.exe exited (rc=7) after 7s - stopping the container"
+SAID_BYE=1
+exit 7'
+"$BASH" "$TMP/deliberate.sh" > "$TMP/bye.out" 2>&1; bye_rc=$?
+check_eq "a deliberate exit keeps the terminal's status" "7" "$bye_rc"
+check_eq "and is not reported as a kill" "0" \
+  "$(grep -c 'ended without reaching' "$TMP/bye.out" || true)"
 
 echo "a chart that cannot be ticked says which of the two faults it is"
 check_contains "the EA asks the server for its symbol list" 'SymbolsTotal(false)' "$(cat "$EA")"

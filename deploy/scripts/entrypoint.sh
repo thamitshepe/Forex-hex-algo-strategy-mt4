@@ -50,7 +50,44 @@ fi
 
 log()  { printf '%s [hex] %s\n'  "$(date -u +%H:%M:%S)" "$*"; }
 warn() { printf '%s [hex] WARN: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
-die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; exit 1; }
+die()  { printf '%s [hex] FATAL: %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; SAID_BYE=1; exit 1; }
+
+# ------------------------------------------------------ how this run ended ---
+# The 2026-11-11 log had twelve banners, `terminal64.exe is up` in every one, and
+# NOT ONE line between them. main() prints `terminal64.exe exited (rc=…) after Ns
+# - stopping the container` before it leaves on purpose, and a deliberate exit
+# (die, main) sets SAID_BYE. So a run with no such line did not leave on purpose:
+# it was killed - by docker stop, by a redeploy, or by the kernel - and nothing
+# said so, which is why the next boot could only offer "3 starts in 10 minutes".
+#
+# These two traps make every ending that a shell can still see name itself, and
+# leave the evidence on the volume for the boot that comes next. Only SIGKILL and
+# a dead host stay silent, and they cannot be helped from inside.
+SAID_BYE=""
+say_bye() { # RC
+  local rc="${1:-?}" up="?"
+  # main() and die() say why they leave. This is only for the ways out that
+  # cannot say anything themselves.
+  if [ -n "$SAID_BYE" ]; then
+    return 0
+  fi
+  if [ "${BOOT_EPOCH:-0}" -gt 0 ] 2>/dev/null; then
+    up=$(( $(date +%s) - BOOT_EPOCH ))
+  fi
+  if declare -F write_death_note >/dev/null 2>&1 && [ -n "${MT5DIR:-}" ]; then
+    write_death_note "$rc" "$up"
+  fi
+  log "the entrypoint ended without reaching its shutdown (rc=$rc) - this run was killed from outside (a stop, a redeploy, the kernel): not the feed and not the EA, and no restart inside the container can fix it"
+}
+on_signal() { # NAME RC
+  log "$1 received after ${SECONDS}s - the container is being stopped from outside (docker stop, a redeploy), not by a fault of its own"
+  SAID_BYE=""
+  exit "$2"
+}
+trap 'say_bye $?'  EXIT
+trap 'on_signal SIGTERM 143' TERM
+trap 'on_signal SIGINT 130'  INT
+trap 'on_signal SIGHUP 129'  HUP
 
 # ---------------------------------------------------------------------------
 # Instances. One container is one instance: one account, one chart, one expert.
@@ -502,6 +539,77 @@ write_mt5_ini() {
 
 # ------------------------------------------------------- desktop and launch --
 
+# ------------------------------------------------------------- the display ---
+# A socket file is not a display. `/tmp/.X11-unix/X99` and `/tmp/.X99-lock`
+# survive a container restart (Docker keeps the writable layer), so after any
+# hard kill the old socket is still sitting there while nothing listens on it -
+# and `[ -S "$sock" ]` therefore answered "ready" instantly, 'virtual desktop:
+# Xvfb on :99' was printed, and Xvfb itself had already exited at once. What came
+# next, on every boot, is verbatim the 2026-11-11 log:
+#
+#   13:26:23 WARN: openbox did not stay up - this desktop has no window manager
+#     [openbox] Openbox-Message: Failed to open the display from the DISPLAY
+#   environment variable.
+#
+# ...with MT5 dying a second after it was started, forever - a boot loop that
+# could never recover, because the test that was supposed to prove the display
+# never once failed. So ask a CLIENT: if it can open the display, the display is
+# there. xdotool is in the image (x11-utils is not guaranteed), the other two are
+# used when a distro has them.
+display_up() {
+  local sock="/tmp/.X11-unix/X${DISPLAY#:}"
+  if command -v xdpyinfo >/dev/null 2>&1; then
+    xdpyinfo >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  if command -v xset >/dev/null 2>&1; then
+    xset q >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  if command -v xdotool >/dev/null 2>&1; then
+    xdotool getdisplaygeometry >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  # Nothing to ask with: the socket AND a live server is the best evidence left.
+  [ -S "$sock" ] || return 1
+  if [ -n "$XVFB_PID" ] && kill -0 "$XVFB_PID" 2>/dev/null; then
+    return 0
+  fi
+  pgrep -x Xvfb >/dev/null 2>&1
+}
+
+# The lock and socket a killed container leaves for the next one. Xvfb refuses a
+# display whose lock names a pid that is alive - and after a restart the pid
+# namespace starts again at 1, so the old number lands on somebody. Never taken
+# from a server that is still serving it: adopting a live Xvfb is deliberate (the
+# keeper does the same with openbox).
+x_clear_stale_display() {
+  local sock="/tmp/.X11-unix/X${DISPLAY#:}" lock="/tmp/.X${DISPLAY#:}-lock"
+  [ -e "$lock" ] || [ -e "$sock" ] || return 0
+  if pgrep -x Xvfb >/dev/null 2>&1 || display_up; then
+    return 0
+  fi
+  rm -f "$lock" "$sock" 2>/dev/null || true
+  log "cleared a stale $DISPLAY (a lock and socket left behind by a container that was killed) - Xvfb can take the display again"
+}
+
+# Debian's openbox ships without /var/lib/openbox/debian-menu.xml and says so on
+# EVERY start. That is not why the WM exits, and on 2026-11-11 the complaint
+# filled all eight lines printed for the real reason ("Failed to open the display
+# from the DISPLAY environment variable"). Filtered by name, and said - never
+# silently dropped.
+openbox_log_tail() { # [LINES]
+  local n="${1:-8}" kept="" f="${OPENBOX_LOG:-/tmp/openbox.log}"
+  kept=$(grep -v 'Unable to find a valid menu file' "$f" 2>/dev/null | tail -n "$n") || kept=""
+  if [ -n "$kept" ]; then
+    printf '%s\n' "$kept" | sed 's/^/  [openbox] /'
+  fi
+  if grep -q 'Unable to find a valid menu file' "$f" 2>/dev/null; then
+    printf '  [openbox] (a "no menu file" complaint is also in there: Debian ships openbox without a menu - harmless, not the reason it exited)\n'
+  fi
+  return 0
+}
+
 # The window manager, started the one way that can fail loudly. openbox exits at
 # once if the display is not accepting connections yet, and a desktop with no
 # window manager is the noVNC tab that "freezes": the charts are drawn, but no
@@ -516,24 +624,27 @@ start_wm() {
   fi
   WM_PID=""
   warn "openbox did not stay up - this desktop has no window manager (that is the frozen noVNC tab). Its own log:"
-  tail -n 8 /tmp/openbox.log 2>/dev/null | sed 's/^/  [openbox] /' || true
+  openbox_log_tail
   return 1
 }
 
 start_desktop() {
+  x_clear_stale_display
   Xvfb "$DISPLAY" -screen 0 "$SCREEN" -nolisten tcp >/tmp/xvfb.log 2>&1 &
   XVFB_PID=$!
-  # Xvfb publishes /tmp/.X11-unix/X<n> when it is ready to accept clients. A WM
-  # started before that exits immediately - which is how this desktop ended up
-  # with none at all. sleep 1 was a guess; the socket is the signal.
-  local sock="/tmp/.X11-unix/X${DISPLAY#:}" waited=0
-  while [ ! -S "$sock" ] && [ "$waited" -lt 40 ]; do
+  # Xvfb publishes /tmp/.X11-unix/X<n> when it is ready to accept clients - but
+  # the socket outlives the server, so the socket is a hint and the client is the
+  # proof (see display_up). 40 x 0.25 s is the budget the socket used to get.
+  local waited=0
+  while ! display_up && [ "$waited" -lt 40 ]; do
     sleep 0.25
     waited=$((waited + 1))
   done
-  if [ ! -S "$sock" ]; then
-    warn "Xvfb never published $sock - the desktop will not come up. Its own log:"
+  if ! display_up; then
+    warn "Xvfb never came up on $DISPLAY - nothing can be drawn here, so MT5 will exit a second after it starts. Its own log:"
     tail -n 8 /tmp/xvfb.log 2>/dev/null | sed 's/^/  [xvfb] /' || true
+    log "no window manager and no VNC: there is no display to put them on (the lines above are the fault, not the EA)"
+    return 0
   fi
   start_wm || true
   log "virtual desktop: Xvfb on $DISPLAY ($SCREEN)"
@@ -569,15 +680,49 @@ launch_terminal() {
   log "terminal64.exe started (pid $TERMINAL_PID)"
 }
 
+# The terminal's OWN pid, which is not the launcher's.
+#
+# `pgrep -f 'terminal64[.]exe'` matches wine's command line too (`wine
+# terminal64.exe /portable /config:mt5.ini`), so the "is it up yet" poll was
+# answered by the launcher 8-17 ms after every start - in all twelve boots of the
+# 2026-11-11 log - and the terminal it claimed was up had not even created a
+# window. Any OTHER pid carrying the name is the terminal wine spawned.
+terminal_pid() {
+  local p
+  for p in $(pgrep -f 'terminal64[.]exe' 2>/dev/null); do
+    [ "$p" = "$TERMINAL_PID" ] && continue
+    printf '%s' "$p"
+    return 0
+  done
+  return 1
+}
+
 wait_for_terminal() {
-  # The bracket class matters: 'terminal64\\.exe' means a literal BACKSLASH in
-  # the ERE pgrep applies to the command line, and no command line has one - a
-  # perfectly healthy terminal was invisible to this check. [.] cannot be
-  # misread. 150 x 2s = patient for a first boot after seeding.
-  for _ in $(seq 1 150); do
-    if pgrep -f 'terminal64[.]exe' >/dev/null; then
-      log "terminal64.exe is up"
+  # The bracket class matters: 'terminal64\.exe' would demand a literal BACKSLASH
+  # in the command line (an ERE), and no command line has one - a perfectly
+  # healthy terminal was invisible to this check. [.] cannot be misread.
+  # 150 x 2s = patient for a first boot after seeding.
+  local p waited said=0
+  for waited in $(seq 1 150); do
+    if p=$(terminal_pid); then
+      log "terminal64.exe is up (pid $p)"
       return 0
+    fi
+    p=$(pgrep -f 'terminal64[.]exe' 2>/dev/null | head -1 || true)
+    if [ -n "$p" ]; then
+      # Only the launcher answers so far. Waiting for a second pid is right -
+      # until it is not: a wine build that execs the terminal in place never
+      # produces one, and five minutes of silence would be a worse lie than this.
+      if [ "$said" -eq 0 ]; then
+        log "the only process carrying the name so far is the wine launcher itself (pid $p) - not calling that 'up'"
+        said=1
+      fi
+      if [ "$waited" -ge 10 ]; then
+        log "terminal64.exe is up (pid $p - wine's own process; this build execs the terminal in place)"
+        return 0
+      fi
+      sleep 2
+      continue
     fi
     sleep 2
   done
@@ -599,7 +744,10 @@ terminal_evidence() {
   local f last
   sed 's/^/  [term] /' "$TERM_LOG" 2>/dev/null | tail -12 || true
   sed 's/^/  [xvfb] /' /tmp/xvfb.log 2>/dev/null | tail -4 || true
-  sed 's/^/  [openbox] /' /tmp/openbox.log 2>/dev/null | tail -4 || true
+  # `|| true`: this function is the one thing that must always print, and a
+  # helper it cannot see (an older copy on a half-updated volume) is not a reason
+  # for the evidence to take the shell down with it.
+  openbox_log_tail 4 || true
   last=""
   for f in "$MT5DIR"/logs/*.log; do
     [ -f "$f" ] || continue
@@ -905,18 +1053,26 @@ desktop_keeper() {
     want_vnc=1
   fi
   while :; do
-    if ! wm_alive; then
-      log "WATCHDOG: openbox is gone - relaunching (without a window manager the noVNC desktop cannot be clicked)"
-      start_wm || true
-    fi
-    # A dead Xvfb looks like everything at once: a frozen noVNC tab, openbox
-    # failing to open the display, and a terminal that exits a second after it
-    # starts. Relaunching Xvfb under a live terminal is worse (it is the display
-    # that terminal is drawing on), so this only says it - once, because the
-    # cleared pid is what makes it once.
+    # The display first. A dead Xvfb looks like everything at once: a frozen
+    # noVNC tab, openbox failing to open the display, and a terminal that exits a
+    # second after it starts. Relaunching Xvfb under a live terminal is worse (it
+    # is the display that terminal is drawing on), so this only says it - once,
+    # because the cleared pid is what makes it once.
     if [ -n "$XVFB_PID" ] && ! kill -0 "$XVFB_PID" 2>/dev/null && ! pgrep -x Xvfb >/dev/null 2>&1; then
       log "WATCHDOG: Xvfb is gone - the terminal has no display and will exit a second after it starts. That is the fault, not the EA (not relaunched under a live terminal)"
       XVFB_PID=""
+    fi
+    # Neither a window manager nor a VNC bridge can be relaunched onto a display
+    # that is not there - and every attempt wrote two more openbox lines, none of
+    # them the reason (the 2026-11-11 log is 8 of them per boot). Nothing below
+    # can help until the display is back, so say nothing more and wait.
+    if ! display_up; then
+      sleep 20
+      continue
+    fi
+    if ! wm_alive; then
+      log "WATCHDOG: openbox is gone - relaunching (without a window manager the noVNC desktop cannot be clicked)"
+      start_wm || true
     fi
     if [ "$want_vnc" -eq 1 ] && ! pgrep -f 'x11vnc' >/dev/null; then
       log "WATCHDOG: x11vnc died - relaunching (the noVNC tab stays blank until it is back)"
@@ -1490,6 +1646,10 @@ main() {
   if [ -n "$WEBSOCKIFY_PID" ]; then kill "$WEBSOCKIFY_PID" 2>/dev/null || true; fi
   if [ -n "$WM_PID" ];        then kill "$WM_PID"        2>/dev/null || true; fi
   if [ -n "$XVFB_PID" ];      then kill "$XVFB_PID"      2>/dev/null || true; fi
+  # This run said, above, why it is leaving - so the exit trap must not add
+  # "ended without reaching its shutdown" over the top of it. Every OTHER way out
+  # (a signal, a SIGKILL the shell could not trap, set -e) now says something.
+  SAID_BYE=1
   exit "$rc"
 }
 
