@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# HEX-BoomRider on a server: MetaTrader 5 under Wine, headless, in a container.
+# HEX-FVG-Breaker on a server: MetaTrader 5 under Wine, headless, in a container.
 #
 # The robot runs on the server, not on your laptop, and keeps running when your
 # laptop is closed. Two stages:
 #
-#   ea-check  compiles MQL5/Experts/HEX-BoomRider.mq5 with a real
+#   ea-check  compiles MQL5/Experts/HEX-FVG-Breaker.mq5 with a real
 #             metaeditor64.exe, so a commit whose MQL5 does not compile cannot
 #             produce an image. It needs a terminal to compile with, and
 #             MetaTrader has to be supplied: MetaQuotes' own mt5setup.exe is a
@@ -44,7 +44,7 @@ RUN dpkg --add-architecture i386 \
  && apt-get install -y --no-install-recommends winehq-stable fonts-wine \
  && rm -rf /var/lib/apt/lists/*
 
-COPY MQL5/Experts/HEX-BoomRider.mq5 /opt/ea/HEX-BoomRider.mq5
+COPY MQL5/Experts/HEX-FVG-Breaker.mq5 /opt/ea/HEX-FVG-Breaker.mq5
 COPY MQL5/Presets/ /opt/ea/presets/
 # The distro download has two routes (the release front door, then GitHub's API
 # asset endpoint); see the script for the 504 that made this necessary.
@@ -80,19 +80,19 @@ RUN set -eux; \
       echo "[ea-check] refusing to blame the EA for a distro problem"; \
       exit 1; \
     fi; \
-    cp /opt/ea/HEX-BoomRider.mq5 "$md/MQL5/Experts/"; \
+    cp /opt/ea/HEX-FVG-Breaker.mq5 "$md/MQL5/Experts/"; \
     mkdir -p "$md/MQL5/Presets"; cp /opt/ea/presets/*.set "$md/MQL5/Presets/" 2>/dev/null || true; \
-    rm -f "$md/MQL5/Experts/HEX-BoomRider.ex5"; \
+    rm -f "$md/MQL5/Experts/HEX-FVG-Breaker.ex5"; \
     # /portable: resolve includes inside the tree itself (MQL5\\Include); without \
     # it metaeditor looks in the Wine roaming data folder, which is empty. Belt: \
     # if the portable run still misses, copy the tree's Include into whatever \
     # roaming Terminal hash folder the first run created and compile again. \
     cd "$md" \
-    && xvfb-run -a wine metaeditor64.exe /portable "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
+    && xvfb-run -a wine metaeditor64.exe /portable "/compile:MQL5\\Experts\\HEX-FVG-Breaker.mq5" "/log:MQL5\\Experts\\compile.log" \
        > /tmp/metaeditor.out 2>&1 \
     || true; \
     wineserver -w || true; \
-    if [ ! -f "$md/MQL5/Experts/HEX-BoomRider.ex5" ]; then \
+    if [ ! -f "$md/MQL5/Experts/HEX-FVG-Breaker.ex5" ]; then \
       td="$(find /tmp/wine/drive_c/users -maxdepth 7 -type d -name 'Terminal' -path '*MetaQuotes/Terminal' -print -quit)"; \
       for h in "$td"/*/; do \
         [ -d "$h" ] || continue; \
@@ -100,7 +100,7 @@ RUN set -eux; \
         cp -a "$md/MQL5/Include" "$h/MQL5/" || true; \
       done; \
       cd "$md" \
-      && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-BoomRider.mq5" "/log:MQL5\\Experts\\compile.log" \
+      && xvfb-run -a wine metaeditor64.exe "/compile:MQL5\\Experts\\HEX-FVG-Breaker.mq5" "/log:MQL5\\Experts\\compile.log" \
          > /tmp/metaeditor.out 2>&1 \
       || true; \
       wineserver -w || true; \
@@ -109,13 +109,13 @@ RUN set -eux; \
     # metaeditor writes compile.log in UTF-16; cat alone prints NULs and CI greps
     # for "error" find nothing, which is how a compile error once looked like a
     # mystery failure. Decode it before anyone has to read it.
-    test -f "$md/MQL5/Experts/HEX-BoomRider.ex5" || { \
+    test -f "$md/MQL5/Experts/HEX-FVG-Breaker.ex5" || { \
       tr -d '\000' < "$md/MQL5/Experts/compile.log" 2>/dev/null | tail -40 || true; \
       exit 1; \
     }; \
-    cp "$md/MQL5/Experts/HEX-BoomRider.ex5" /opt/ea-built/; \
+    cp "$md/MQL5/Experts/HEX-FVG-Breaker.ex5" /opt/ea-built/; \
     cp "$md/MQL5/Experts/compile.log" /opt/ea-built/; \
-    echo "[ea-check] HEX-BoomRider.ex5 compiled clean"
+    echo "[ea-check] HEX-FVG-Breaker.ex5 compiled clean"
 
 # ------------------------------------------------------------------ runtime --
 
@@ -151,15 +151,15 @@ RUN useradd --create-home --uid 1000 trader \
  && mkdir -p /data /opt/ea/presets \
  && chown -R trader:trader /home/trader /data
 
-COPY MQL5/Experts/HEX-BoomRider.mq5 /opt/ea/HEX-BoomRider.mq5
+COPY MQL5/Experts/HEX-FVG-Breaker.mq5 /opt/ea/HEX-FVG-Breaker.mq5
 COPY MQL5/Presets/ /opt/ea/presets/
 # The CI-checked .ex5 and its compiler log, when the build had a terminal to
 # compile with: the entrypoint falls back to this binary when a runtime compile
 # cannot run, and the log is the audit trail.
 COPY --from=ea-check /opt/ea-built/ /opt/ea-built/
 RUN set -eux; \
-    if [ -f /opt/ea-built/HEX-BoomRider.ex5 ]; then \
-      cp -f /opt/ea-built/HEX-BoomRider.ex5 /opt/ea/HEX-BoomRider.ex5; \
+    if [ -f /opt/ea-built/HEX-FVG-Breaker.ex5 ]; then \
+      cp -f /opt/ea-built/HEX-FVG-Breaker.ex5 /opt/ea/HEX-FVG-Breaker.ex5; \
       echo "[build] shipped the .ex5 compiled during the build"; \
     else \
       echo "[build] no .ex5 in this build: the container compiles the EA from source at start"; \

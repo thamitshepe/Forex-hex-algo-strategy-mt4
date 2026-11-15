@@ -1,5 +1,5 @@
 #!/bin/bash
-# HEX-BoomRider on a server: MetaTrader 5 under Wine, headless, in a container.
+# HEX-FVG-Breaker on a server: MetaTrader 5 under Wine, headless, in a container.
 #
 # Every start does the same five things, in this order:
 #
@@ -20,10 +20,11 @@
 # "prefix" is the Wine C: drive. In portable mode all editable data - config,
 # MQL5, logs - lives in $MT5DIR itself, which is what makes it a volume.
 #
-# Strategy context: Boom 400 on Deriv, long-only spike rider sized against an
-# effective bankroll of Equity - BaselineEquity, with a hard blow line that
-# alerts and halts. The EA (MQL5/Experts/HEX-BoomRider.mq5) carries the rules;
-# this script's only trading opinion is which symbol is on the chart.
+# Strategy context: Fair-Value-Gap trend trading (Breaker + Mitigation blocks),
+# on the symbol the volume is set up for - Volatility Boom 400 Index on Deriv by
+# default. The EA (MQL5/Experts/HEX-FVG-Breaker.mq5) carries the rules, including
+# its own equity guards (daily loss, total drawdown, blown marker); this script's
+# only trading opinion is which symbol is on the chart.
 set -euo pipefail
 
 # ---------------------------------------------------------------- gosu drop --
@@ -154,7 +155,7 @@ MT5_SERVER="$(inst_var MT5_SERVER)"
 # expert after five minutes without ever calling OnInit. Default M15.
 MT5_SYMBOL="$(inst_var MT5_SYMBOL "Volatility Boom 400 Index")"
 MT5_PERIOD="$(inst_var MT5_PERIOD "M15")"
-MT5_EXPERT="$(inst_var MT5_EXPERT "HEX-BoomRider")"
+MT5_EXPERT="$(inst_var MT5_EXPERT "HEX-FVG-Breaker")"
 MT5_PRESET="$(inst_var MT5_PRESET "$MT5_EXPERT")"
 # A portable MT5 tarball (see prepare-distro.sh). MetaQuotes' own mt5setup.exe is
 # a 64-bit web installer that installs nothing under Wine, so like MT4 the
@@ -1236,7 +1237,7 @@ hex_push() { # TITLE BODY
       ;;
   esac
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-    -H "Title: HEX-BoomRider $title" \
+    -H "Title: HEX-FVG-Breaker $title" \
     -H "Content-Type: text/plain" \
     -H "Tags: chart_with_upwards_trend" \
     --data-binary "$body" "$MT5_NOTIFY_URL" 2>/dev/null) || code=000
@@ -1333,13 +1334,14 @@ Full log: the mt5-boom service log (the Logs tab, or docker logs)."
 }
 
 # Turn the EA's own CSV rows into phone pushes. The EA writes one row per event
-# (INIT / BUY / CLOSE / ADD / LOCKIN / TRAIL / EPISODE / BLOWN / SKIP / ERROR /
-# FEED / DEINIT). The ones worth a buzz:
+# (INIT / BUY / CLOSE / BLOWN / SKIP / ERROR / FEED / DEINIT). The ones worth a
+# buzz:
 #
-#   BUY, CLOSE, ADD, BLOWN   once each, and never held - a trade notification that
+#   BUY, CLOSE, BLOWN        once each, and never held - a trade notification that
 #                            arrives late is worse than a duplicate
-#   ADD                      the spike being multiplied: another leg on a trade
-#                            that is already in profit
+#   ADD                      a pyramid leg (HEX-BoomRider's vocabulary; the FVG
+#                            EA never emits it - kept so an older volume's rows
+#                            still read correctly)
 #   ERROR, SKIP              once per distinct message shape per 6h
 #                            (push_once_shape) - they repeat on every tick
 #   FEED                     ticks came back: the end of a feed stall
@@ -1505,8 +1507,8 @@ alert_facts() { # STATUS FILE
 # The watcher. One pass a minute: that is the resolution of "is it back yet", and
 # the only thing a pass costs is a `stat`.
 alert_watcher() {
-  local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-  local blown="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+  local hb="$MT5DIR/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-heartbeat.txt"
+  local blown="$MT5DIR/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-BLOWN.txt"
   local statef="$MT5DIR/.hex-alert" budget="$MT5DIR/.hex-alert-tries"
   local silence="${HEX_SILENCE_MIN:-20}" grace="${HEX_SILENCE_GRACE_MIN:-10}"
   local stall="${HEX_TICK_STALL_MIN:-15}" repeat_h="${HEX_ALERT_REPEAT_HOURS:-6}"
@@ -1684,7 +1686,7 @@ lease_keeper() {
 banner() {
   local build="${HEX_BUILD:-unknown}"
   echo "=================================================================="
-  echo " HEX-BoomRider (MetaTrader 5, Wine, portable)  build: $build"
+  echo " HEX-FVG-Breaker (MetaTrader 5, Wine, portable)  build: $build"
   echo " account : ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}"
   echo " chart   : $MT5_SYMBOL $MT5_PERIOD   expert: $MT5_EXPERT ($MT5_PRESET.set)"
   echo " data dir: $MT5DIR   instance: $MT5_INSTANCE"
@@ -1739,7 +1741,7 @@ main() {
   # It replaces silence_watcher + feed_watchdog, which each buzzed about the same
   # incident on their own timer (see "one alert" above).
   alert_watcher &
-  hex_push "UP" "HEX-BoomRider container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You get a buzz on every BUY, CLOSE, ADD and BLOWN, one per distinct ERROR/SKIP (not one per tick), and exactly ONE alert if the robot stops - with the reason and what was done about it - plus one when it is back. Nothing in between."
+  hex_push "UP" "HEX-FVG-Breaker container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You get a buzz on every BUY, CLOSE, ADD and BLOWN, one per distinct ERROR/SKIP (not one per tick), and exactly ONE alert if the robot stops - with the reason and what was done about it - plus one when it is back. Nothing in between."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   #

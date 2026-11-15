@@ -1,0 +1,133 @@
+; HEX-FVG-Breaker preset - the MT4 strategy (v3.00) running on MT5.
+;
+; This is the recovered FVG/Breaker/Mitigation engine, unchanged, with two
+; deliberate differences in how a WINNER is handled, because the old exits capped
+; every win short: TP1 banked half at 1R and the rest died at 2.5R, so a full
+; run paid 1.75R while a loss cost 1R. On a $10k demo that grows an account by
+; rounding error. Now:
+;
+;   * TP1 banks 30% at 1R (was 50%) - the banked third pays for the losses;
+;   * the runner targets 4R (was 2.5R);
+;   * once the stop is locked at >= 1R the fixed target is REMOVED and the ATR
+;     trail carries the runner, so one good trade can print 6R-10R;
+;   * a profit-lock ladder protects what was won: +0.30R at 1R seen, +1R at 2R,
+;     +2R at 3R, +3R at 4R - the stop only ever ratchets forward, and a spike
+;     can no longer round-trip a 3R winner back to break-even.
+;
+; A full 4R run now pays 0.30*1R + 0.70*4R = 3.1R (and more when released to the
+; trail). Break-even win rate at 3.1R is ~24%; at the old 1.75R it was ~36%.
+;
+; ---- Why ScaleMode=1 (ATR) and not the MT4 $/oz numbers -------------------
+; The MT4 file was tuned for XAUUSD: its "Dollars" inputs are $/oz distances.
+; This container trades Volatility Boom 400 Index, where 1.20 of a 15000-priced
+; index is inside the noise - no swing would qualify and the EA would never
+; trade. In SCALE_ATR mode the same inputs are read as MULTIPLES OF THE M15 ATR,
+; which is symbol-independent and keeps every rule (gap size, displacement,
+; swing, chase guard) exactly as intended.
+;
+; ---- The one thing to know about this symbol -------------------------------
+; Deriv Boom indices spike UP only. A short is positioned against the only move
+; that cannot be stopped out cleanly, so TradeDirection=+1 (long only) is the
+; safer setting on this chart. It is left at 0 (both, as in the MT4 original) so
+; the strategy trades as it was written - change it to 1 if the log shows shorts
+; being run over by spikes.
+MagicNumber=20261015
+TradeSymbol=
+MaxSpreadDollars=0.50
+MaxSlippagePoints=30.0
+MaxOpenTrades=1
+DryRun=0
+MaxSignalsPerDay=6
+RequireNewBar=1
+CloseOnWeekend=1
+StopTradingHourUTC=21
+StartTradingHourUTC=1
+TradeDirection=0
+TrendTimeframe=60
+TrendMode=2
+FastEMAPeriod=21
+SlowEMAPeriod=50
+TrendSwingLookback=5
+MinTrendSlopeDollars=0.10
+TrendSlopeBars=6
+MaxDistFromEmaDollars=3.50
+SwingLookback=3
+MinSwingRangeDollars=0.50
+MinDisplacementPct=55.0
+MinDisplacementAtr=1.10
+UseFVG=1
+FvgMinSizeAtrPct=55
+FvgMaxSizeAtrPct=420
+MitigatePct=50.0
+EntryZonePct=62.0
+MaxZoneAgeBars=180
+RequireFVGConfluence=1
+ConfluenceLookback=60
+UseBreaker=1
+BreakerMinAtr=0.70
+BreakerMaxAtr=6.0
+UseMitigation=1
+MitigConsolBars=4
+MitigConsolAtrMax=0.65
+MitigBreakAtr=1.20
+EntryModel=0
+MaxEntryDistanceDollars=2.00
+MinRejectionWickPct=30.0
+MinTriggerRangeAtr=0.35
+MinTriggerClosePct=45.0
+MaxBarsSinceTouch=6
+AllowMarketEntry=1
+LimitExpiryBars=4
+; ---- risk: 1% of equity per trade, never more than $100, never more than 0.20
+; lots, and never more than 30% of equity in margin. The stop distance drives the
+; lot, so a wide zone trades smaller instead of risking more.
+RiskPercent=1.0
+FixedLot=0.01
+MaxLot=0.20
+MaxMarginUsagePct=30.0
+StopBufferAtrPct=25.0
+MinStopDollars=0.35
+MaxStopDollars=4.00
+MaxRiskAmount=100.0
+ScaleMode=1
+; ---- exits: the change the account needed ----
+ExitMode=0
+Tp1RR=1.00
+Tp1Percent=30.0
+Tp2RR=4.00
+LetWinnersRun=1
+UseProfitLock=1
+LockTrigger1=1.0
+LockFloor1=0.30
+LockTrigger2=2.0
+LockFloor2=1.00
+LockTrigger3=3.0
+LockFloor3=2.00
+LockTrigger4=4.0
+LockFloor4=3.00
+BreakEvenTriggerRR=0.80
+BreakEvenOffsetDollars=0.02
+UseAtrTrail=1
+TrailAtrMult=2.20
+TrailStartRR=1.00
+TrailFromPeak=1
+TrailMinStepAtr=0.25
+MinHoldBars=2
+MaxDailyLossPct=5.0
+MaxTotalDrawdownPct=15.0
+MinFreeMarginUsd=40.0
+FlattenOnKill=1
+WriteCsvLogs=1
+LogEveryNTicks=300
+ShowDashboard=1
+DrawZones=1
+ZoneMaxDraw=12
+Prefix=HEX
+; ---- container plumbing: leave these alone ----
+; The status line is written from a terminal TIMER (never from OnTick), so its
+; age means "the EA is not being called" - and the age of the last tick travels
+; inside it, which is how healthcheck.sh tells "EA gone" from "feed dead".
+InpHeartbeatSec=60
+InpTickStallSec=300
+InpSkipLogSec=60
+InpLogDir=HEX-Logs

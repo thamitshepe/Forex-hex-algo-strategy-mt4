@@ -57,7 +57,7 @@ echo "archiving (logs, tester, sounds and the other brokers' bases are left out)
 # selection. Leaving it out was a bug with a 5-minute cost: the container then
 # opened a chart whose symbol had no data at all, the terminal waited for the
 # symbol to synchronize, gave up and DELETED the expert before OnInit ever ran
-# ("initializing of HEX-BoomRider failed with code 0 (symbol synchronization
+# ("initializing of HEX-FVG-Breaker failed with code 0 (symbol synchronization
 # timeout)" and then "expert ... removed" - with an empty Experts tab and no
 # trading). The other brokers' bases (and ticks/trades/mail/news, which the
 # server re-fetches) stay out: they are the bulk and change nothing.

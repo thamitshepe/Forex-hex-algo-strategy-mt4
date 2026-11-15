@@ -59,7 +59,7 @@ echo "mt5.ini"
 # shellcheck disable=SC2034  # read by the extracted function
 MT5DIR="$TMP/mt5"; MT5_LOGIN=41311895; MT5_PASSWORD=secret
 MT5_SERVER=Deriv-Demo; MT5_SYMBOL="Volatility Boom 400 Index"; MT5_PERIOD=M15
-MT5_EXPERT=HEX-BoomRider; MT5_PRESET=HEX-BoomRider; MT5_INSTANCE=1
+MT5_EXPERT=HEX-FVG-Breaker; MT5_PRESET=HEX-FVG-Breaker; MT5_INSTANCE=1
 mkdir -p "$MT5DIR"   # main() creates this in the real container
 load_fn "$ENTRYPOINT" write_mt5_ini >/dev/null
 write_mt5_ini >/dev/null 2>&1
@@ -72,8 +72,8 @@ if [ -f "$ini" ]; then
   check_contains "autotrading on at start"  "Enabled=1"           "$(cat "$ini")"
   check_contains "live trading allowed"     "AllowLiveTrading=1"  "$(cat "$ini")"
   check_contains "expert section"           "[StartUp]"           "$(cat "$ini")"
-  check_contains "expert"    "Expert=HEX-BoomRider"                 "$(cat "$ini")"
-  check_contains "preset"    "ExpertParameters=HEX-BoomRider.set"   "$(cat "$ini")"
+  check_contains "expert"    "Expert=HEX-FVG-Breaker"                 "$(cat "$ini")"
+  check_contains "preset"    "ExpertParameters=HEX-FVG-Breaker.set"   "$(cat "$ini")"
   check_contains "symbol with spaces" "Symbol=Volatility Boom 400 Index" "$(cat "$ini")"
   check_contains "period"    "Period=M15"              "$(cat "$ini")"
   check_eq "no unexpanded \${}" "0" "$(grep -c '\\${' "$ini")"
@@ -166,12 +166,12 @@ LOGDIR="$MT5DIR/MQL5/Files/HEX-Logs"
 mkdir -p "$MT5DIR/logs" "$LOGDIR"
 : > "$MT5DIR/mt5.ini"
 if pgrep -f 'terminal64[.]exe' >/dev/null 2>&1; then
-  date +%s > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+  date +%s > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
   out="$("$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
   check_eq "a fresh status line is healthy" "0" "$rc"
   check_contains "and says so" "EA status line" "$out"
   touch -t "$(date -v-4H +%Y%m%d%H%M 2>/dev/null || date -d '4 hours ago' +%Y%m%d%H%M)" \
-    "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+    "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
   out="$("$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
   check_eq "a stale status line is unhealthy" "1" "$rc"
   check_contains "with the age in the sentence" "min old" "$out"
@@ -183,31 +183,31 @@ fi
 mkdir -p "$TMP/bin"
 printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/pgrep"
 chmod +x "$TMP/bin/pgrep"
-date +%s > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
-: > "$LOGDIR/HEX-BoomRider-BLOWN.txt"
+date +%s > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
+: > "$LOGDIR/HEX-FVG-Breaker-BLOWN.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" HEX_HEARTBEAT_MAX_AGE_MIN=180 bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "blown-but-alive reports healthy" "0" "$rc"
 check_contains "and explains the halt" "by design" "$out"
-rm -f "$LOGDIR/HEX-BoomRider-BLOWN.txt"
+rm -f "$LOGDIR/HEX-FVG-Breaker-BLOWN.txt"
 
 # An attached EA on a chart that is not being ticked traded nothing for six
 # hours on 2026-11-02 while every other signal said "running". The beat now
 # carries the age of the last tick, so the healthcheck can say which half is
 # broken instead of calling a live EA detached.
 echo "healthcheck: a live EA on a dead feed"
-printf '2026.11.02 22:04:19|tick_age=12|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+printf '2026.11.02 22:04:19|tick_age=12|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "a beating EA with live quotes is healthy" "0" "$rc"
 check_contains "and reports the age of the last tick" "last tick 0 min ago" "$out"
-printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "a beating EA with a dead feed is unhealthy" "1" "$rc"
 check_contains "and says how long nothing has quoted" "no quotes for 62 min" "$out"
 check_contains "not that the EA is gone" "chart is not being ticked" "$out"
-printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+printf '2026.11.02 22:04:19|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "a beat from a build without tick_age is unknown, not a stall" "0" "$rc"
-printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1\n' > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" HEX_TICK_STALL_MIN=120 bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "the stall limit is a knob, not a constant" "0" "$rc"
 
@@ -216,18 +216,18 @@ check_eq "the stall limit is a knob, not a constant" "0" "$rc"
 # different fault from "the feed stalled", and the beat now carries it.
 echo "healthcheck: an unsubscribed symbol is not a stalled feed"
 printf '2026.11.08 09:20:40|tick_age=660|equity=10000.00|trades=0|sel=0|spread=0\n' \
-  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+  > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "an unsubscribed symbol is unhealthy" "1" "$rc"
 check_contains "and the sentence names the subscription, not the feed" "NOT SUBSCRIBED" "$out"
 printf '2026.11.08 09:20:40|tick_age=3720|equity=10000.00|trades=0|sel=1|spread=12\n' \
-  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+  > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "a subscribed symbol with old quotes is still unhealthy" "1" "$rc"
 check_contains "but then it blames the feed" "chart is not being ticked" "$out"
 check_not_contains "and not the subscription" "NOT SUBSCRIBED" "$out"
 printf '2026.11.08 09:20:40|tick_age=0|equity=10000.00|trades=0|sel=1|spread=12\n' \
-  > "$LOGDIR/HEX-BoomRider-heartbeat.txt"
+  > "$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 out="$(PATH="$TMP/bin:$PATH" MT5DIR="$MT5DIR" bash "$HEALTHCHECK" 2>&1)" && rc=0 || rc=$?
 check_eq "subscribed and ticking is healthy" "0" "$rc"
 
@@ -261,8 +261,8 @@ check_eq "a missing file is not an error either" "" "$(hb_field "$TMP/nope.txt" 
 echo "alert_watcher: one alert per state change, and only one"
 MT5DIR="$TMP/aw"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
-AW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
-BLOWN="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt"
+AW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-heartbeat.txt"
+BLOWN="$MT5DIR/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-BLOWN.txt"
 ACTIONS="$TMP/aw-actions"
 MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=999999
 HEX_TICK_STALL_MIN=15; HEX_SILENCE_GRACE_MIN=0; HEX_ALERT_REPEAT_HOURS=6
@@ -356,7 +356,7 @@ WLOGS="$TMP/ew-logs"; mkdir -p "$WLOGS"
 ACTIONS="$TMP/ew-actions"
 MT5_SYMBOL="Volatility Boom 400 Index"
 NEWEST="$WLOGS/20261106.log"
-printf '0\t03:40:41.000\tExperts\texpert HEX-BoomRider (Volatility Boom 400 Index,M15) loaded successfully\n' > "$NEWEST"
+printf '0\t03:40:41.000\tExperts\texpert HEX-FVG-Breaker (Volatility Boom 400 Index,M15) loaded successfully\n' > "$NEWEST"
 # A journal from another day whose NAME sorts last and which never grows again:
 # picking the newest by name makes this the file under watch, and its silence is
 # indistinguishable from a healthy evening.
@@ -370,7 +370,7 @@ ew_run() {
       case "${1:-}" in
         5) i=$((i + 1))
            # the removal lands between two passes, the way a live journal does
-           [ "$i" -eq 1 ] && printf '0\t03:53:50.142\tExperts\texpert HEX-BoomRider (Volatility Boom 400 Index,M15) removed\n' >> "$NEWEST"
+           [ "$i" -eq 1 ] && printf '0\t03:53:50.142\tExperts\texpert HEX-FVG-Breaker (Volatility Boom 400 Index,M15) removed\n' >> "$NEWEST"
            [ "$i" -ge 3 ] && exit 0
            ;;
       esac
@@ -569,7 +569,7 @@ check_contains "and left on the volume for the boot after it" \
 echo "alert_watcher: a container that has only just booted is not an incident"
 MT5DIR="$TMP/aw2"
 mkdir -p "$MT5DIR/MQL5/Files/HEX-Logs"
-SW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt"
+SW="$MT5DIR/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-heartbeat.txt"
 ACTIONS="$TMP/aw2-actions"
 MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=4242
 HEX_SILENCE_MIN=20; HEX_SILENCE_GRACE_MIN=10; HEX_ALERT_REPEAT_HOURS=6
@@ -617,7 +617,7 @@ echo "one chart: the desktop MT5 saved is cleared before every start"
 # MT5 restores the charts it saved on exit and THEN applies [StartUp], so every
 # restart adds one. 2026-11-08: the noVNC desktop carried several charts, each one
 # reloading its own copy of the expert on the same magic number, and the tab froze.
-EA="$HERE/../../MQL5/Experts/HEX-BoomRider.mq5"
+EA="$HERE/../../MQL5/Experts/HEX-FVG-Breaker.mq5"
 CH="$TMP/chart-vol"
 mkdir -p "$CH/profiles/default" "$CH/profiles/Charts"
 : > "$CH/profiles/default/chart01.chr"
@@ -889,7 +889,7 @@ echo "a chart that cannot be ticked says which of the two faults it is"
 check_contains "the EA asks the server for its symbol list" 'SymbolsTotal(false)' "$(cat "$EA")"
 check_contains "and says so when the name is not on it" \
   "is NOT in the server's symbol list" "$(cat "$EA")"
-check_contains "naming the names that do exist" 'SimilarSymbols("Boom", 400)' "$(cat "$EA")"
+check_contains "naming the names that do exist" 'SimilarSymbols(SymbolFamily(), 400)' "$(cat "$EA")"
 check_contains "an unselected symbol is selected, not just reported" \
   'SymbolSelect(_Symbol, true)' "$(cat "$EA")"
 check_contains "a symbol disabled for trading is named too" \
@@ -918,7 +918,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   check_contains "on its own fresh volume" "hex-mt5-boom-data" "$out"
   check_not_contains "no MT4 variable reaches the container" "MT4_" "$out"
   check_contains "the account's Boom symbol is the default" "Volatility Boom 400 Index" "$out"
-  check_contains "the EA the image ships is attached" "HEX-BoomRider" "$out"
+  check_contains "the EA the image ships is attached" "HEX-FVG-Breaker" "$out"
   check_contains "the port a domain proxies to" '6080' "$out"
   check_contains "the dead-feed limit reaches the container" "HEX_TICK_STALL_MIN" "$out"
   check_contains "and the silence limit, which restarts the terminal" "HEX_SILENCE_MIN" "$out"
@@ -958,102 +958,102 @@ check_contains "the journal under watch is chosen by mtime, not by name" \
   'file_mtime "$cur"' "$(cat "$ENTRYPOINT")"
 
 
-echo "the EA carries the bankroll rule"
-EA="$HERE/../../MQL5/Experts/HEX-BoomRider.mq5"
-SET="$HERE/../../MQL5/Presets/HEX-BoomRider.set"
+echo "the EA carries the FVG strategy and its guards"
+# This block asserts the strategy is still in the file, not that the code looks a
+# certain way: the three detectors, the trend agreement, the confluence gate, the
+# two kill switches, and the exit geometry that makes a winner worth having.
+EA="$HERE/../../MQL5/Experts/HEX-FVG-Breaker.mq5"
+SET="$HERE/../../MQL5/Presets/HEX-FVG-Breaker.set"
 if [ -f "$EA" ]; then
-  check_contains "blow line defaults to 9980 (\$20 of headroom)" \
-    "InpBaselineEquity = 9980.0" "$(cat "$EA")"
-  check_contains "effective bankroll is equity - baseline" "equity - InpBaselineEquity" "$(cat "$EA")"
-  check_contains "the blow alert pushes to the phone" "SendNotification" "$(cat "$EA")"
-  check_contains "and writes a marker so the halt survives restarts" "BlownMarkerExists" "$(cat "$EA")"
+  check_contains "fair value gaps are detected" "void DetectFvg(double atr)" "$(cat "$EA")"
+  check_contains "breaker blocks are detected" "void DetectBreaker(double atr)" "$(cat "$EA")"
+  check_contains "mitigation blocks are detected" "void DetectMitigation(double atr)" "$(cat "$EA")"
+  check_contains "a zone must be traded INTO before it can be traded" \
+    "if(!g_zones[i].touched) continue;" "$(cat "$EA")"
+  check_contains "an FVG alone is not enough unless confluence is required" \
+    "if(isFvg && RequireFVGConfluence && confl == 0)" "$(cat "$EA")"
+  # TREND_BOTH means EMA direction AND market structure have to agree.
+  check_contains "the trend filter needs EMA and structure to agree" \
+    "if(emaDir != 0 && emaDir == strDir) return(emaDir);" "$(cat "$EA")"
+  check_contains "entries go with the trend only" "if(dir != g_trend) continue;" "$(cat "$EA")"
+  check_contains "the direction can be restricted for a one-sided symbol" \
+    "if(TradeDirection > 0 && dir < 0) continue;" "$(cat "$EA")"
+  # One chart, one robot: two copies on one magic would double-size every trade.
+  check_contains "a second copy of the EA refuses to start" "bool ClaimChart()" "$(cat "$EA")"
+  # Guards.
+  check_contains "the total-drawdown kill switch exists" \
+    "MaxTotalDrawdownPct > 0.0 && g_ddPeak > 0.0" "$(cat "$EA")"
+  check_contains "and it leaves a marker a restart cannot clear" \
+    "void WriteBlownMarker(string msg)" "$(cat "$EA")"
+  check_contains "the daily loss halt is NOT a permanent kill" \
+    "if(!g_killed && !g_dayKilled && MaxDailyLossPct > 0.0" "$(cat "$EA")"
+  check_contains "and it is cleared by the day roll" \
+    "g_dayKilled   = false;" "$(cat "$EA")"
   check_contains "no entry is priced off a one-sided or missing quote" \
-    "ask <= 0.0 || bid <= 0.0" "$(cat "$EA")"
-  # The $20 unit of risk is what the bracket was chosen against: a 0.30% stop on
-  # a 0.10 lot costs ~$4.54, so four losses fit the headroom, and the 50% cap
-  # ($10) admits that minimum lot with 2.2x of margin. A cap the minimum lot
-  # cannot satisfy refuses every entry forever (the loop of 2026-11-02).
-  check_contains "the min-lot cap admits the broker's 0.10 minimum with margin" \
-    "InpMaxRiskPct     = 50.0" "$(cat "$EA")"
-  check_contains "and the bracket breaks even below 60%" \
-    "InpTakeProfitPct  = 0.25" "$(cat "$EA")"
-  check_contains "with a stop four losses can absorb" \
-    "InpStopLossPct    = 0.30" "$(cat "$EA")"
-  # A 0.30% stop is ~45 points; the broker can refuse anything tighter than its
-  # stops level, and this EA has never placed an order yet, so log the floor and
-  # widen rather than fail the first entry.
-  check_contains "the broker's own stops level is logged at init" \
+    "if(ask <= 0.0 || bid <= 0.0)" "$(cat "$EA")"
+  check_contains "the broker's own stops level is asked for, not assumed" \
     "SYMBOL_TRADE_STOPS_LEVEL" "$(cat "$EA")"
-  check_contains "and a bracket tighter than it is widened, not failed" \
-    "double stopsDist = (double)SymbolInfoInteger" "$(cat "$EA")"
-  check_eq "preset exists beside it" "1" \
-    "$([ -f "$SET" ] && echo 1)"
-  # EA default and preset have to agree, or the preset silently wins.
-  for kv in "InpBaselineEquity=9980.0" "InpRiskPct=20.0" "InpMaxRiskPct=50.0" \
-            "InpTakeProfitPct=0.25" "InpStopLossPct=0.30"; do
-    check_contains "preset carries $kv" "$kv" "$(cat "$SET")"
-  done
-  check_contains "and the preset is honest about which lot is traded at \$20" \
-    "FOUR losses fit in \$20" "$(cat "$SET")"
-  # A SKIP repeated twice a second for hours is how "nothing is trading" stayed
-  # invisible for a night; and a refusal has to name what would fix it.
+  check_contains "margin is measured, not guessed" \
+    "OrderCalcMargin(type, _Symbol, lots, price, m)" "$(cat "$EA")"
+  check_contains "and a refused size names the bankroll it would need" \
+    "needs a bankroll of >= " "$(cat "$EA")"
   check_contains "repeated SKIPs are throttled to one per reason per minute" \
     "InpSkipLogSec" "$(cat "$EA")"
   check_contains "the throttle keys on the reason, not the changing risk figure" \
     "void LogSkip(string key, string detail)" "$(cat "$EA")"
-  check_contains "and a refused size names the bankroll it would need" \
-    "needs a bankroll of >= " "$(cat "$EA")"
-  # Position management. On this symbol a spike is a single-tick jump, so an
-  # early break-even / mid-target partial measures identical (nothing acts on it)
-  # and an early cut loses 32% of the profit rate; what pays is keeping the base
-  # target and adding legs out of profit behind a shared stop that only rises.
-  # The base leg's target is taken by the EA, not the broker: a broker TP on a
-  # netting account would close the whole ladder at the target and kill the ride.
-  check_contains "the base leg banks its target in the EA, not at the broker" \
-    "void BankBaseLeg()" "$(cat "$EA")"
-  check_contains "closing the partial by ticket works on netting and hedging" \
-    "trade.PositionClosePartial(ticket" "$(cat "$EA")"
-  check_contains "a distant broker TP still exists as a backstop" \
-    "InpBackstopTPPct  = 1.00" "$(cat "$EA")"
-  check_contains "the ladder stop can only ever tighten" \
-    "never loosen a stop" "$(cat "$EA")"
-  check_contains "one shared stop for every leg of the ladder" \
-    "double SharedStop(double bid, double pct)" "$(cat "$EA")"
-  check_contains "a break-even floor sits ABOVE entry, not at it" \
-    "episodeBase * (1.0 + InpLockInPct / 100.0)" "$(cat "$EA")"
-  # ...but that alone WAS the 2026-11-02 bug: armed before the target is banked,
-  # the floor sits on the price and stops the trade out at +0.05% instead of
-  # letting the spike reach 0.25%. Every winner left at +0.05%, no winner ever
-  # reached the target, no add ever fired. The gate and the minimum gap are the fix.
-  check_contains "the floor arms only once the target has been banked" \
-    "episodeBanked && pct >= InpLockInPct" "$(cat "$EA")"
-  check_contains "no stop is ever placed inside the minimum gap of the price" \
-    "bid * InpMinStopGapPct / 100.0" "$(cat "$EA")"
-  check_contains "and that gap floors every stop the ladder moves" \
-    "if(gapDist > floorDist)" "$(cat "$EA")"
-  check_contains "a stop move reports how far below the price it landed" \
-    "%% below the price" "$(cat "$EA")"
-  check_contains "an add the profit cannot afford is logged, not silenced" \
-    "add-small" "$(cat "$EA")"
-  check_contains "adds are sized from profit already made" \
-    "(episodeBooked + LadderFloat()) * InpAddRiskPct / 100.0" "$(cat "$EA")"
-  check_contains "an add that the trade cannot pay for is skipped, not forced" \
-    "the episode has not made enough to pay for another leg" "$(cat "$EA")"
-  check_contains "the ladder has a hard lot cap" \
-    "InpMaxLadderLots - LadderLots()" "$(cat "$EA")"
-  check_contains "and a risk cap inside the 3-loss budget" \
-    "InpMaxLadderRiskPct" "$(cat "$EA")"
+  # ---- the reason this build exists: winners are given room --------------
+  # The MT4 v3 exits banked half at 1R and closed the rest at 2.5R, so a full run
+  # paid 1.75R against a 1R loss. TP1 now banks a third, the runner targets 4R,
+  # and once the stop is locked at >= 1R the fixed target is removed so the trail
+  # can carry the trade past it.
+  check_contains "TP1 banks a third, not half" \
+    "Tp1Percent           = 30.0;" "$(cat "$EA")"
+  check_contains "the runner target is 4R, not 2.5R" \
+    "Tp2RR                = 4.0;" "$(cat "$EA")"
+  check_contains "the target is removed once the stop is locked" \
+    "if(lockedR >= Tp1RR) newTp = 0.0;" "$(cat "$EA")"
+  check_contains "no target is ever placed below 1R" \
+    "if(tp > 0.0 && MathAbs(tp - entry) < riskPts * _Point)" "$(cat "$EA")"
+  # ---- and open profit is protected -------------------------------------
+  check_contains "a profit-lock ladder ratchets the stop" \
+    "double LockFloorR(double rPeak)" "$(cat "$EA")"
+  check_contains "the first rung locks +0.30R at 1R seen" \
+    "LockFloor1           = 0.30;" "$(cat "$EA")"
+  check_contains "the ATR trail rides the peak, not the last bar" \
+    "TrailFromPeak ? g_rec[slot].peak :" "$(cat "$EA")"
+  check_contains "the trail only ever moves forward" \
+    "if(dir > 0 && trailSl > targetSl + step) targetSl = trailSl;" "$(cat "$EA")"
+  check_contains "break-even, lock and trail are submitted as ONE stop move" \
+    "if(IsBetterStop(dir, targetSl, slNow) || newTp != tp)" "$(cat "$EA")"
+  check_contains "a partial close is done by position ticket" \
+    "trade.PositionClosePartial(tk, closeLots)" "$(cat "$EA")"
   check_contains "positions are found by magic, so netting and hedging both work" \
-    "if(PositionGetString(POSITION_SYMBOL) != _Symbol)" "$(cat "$EA")"
-  for kv in "InpLockInPct=0.05" "InpMinStopGapPct=0.15" "InpTrailPct=0.30" \
-            "InpTrailStartPct=0.40" "InpMaxAdds=3" "InpAddAtPct=0.20" \
-            "InpAddRiskPct=100.0" "InpMaxLadderLots=0.40" \
-            "InpMaxLadderRiskPct=30.0"; do
+    "if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;" "$(cat "$EA")"
+  # The distance gates are ATR-relative on a symbol that is not gold; without
+  # this the $/oz defaults make "1.20" smaller than the noise and nothing trades.
+  check_contains "the distance gates can be ATR-relative" \
+    "input ENUM_SCALE_MODE ScaleMode    = SCALE_PRICE;" "$(cat "$EA")"
+  check_eq "preset exists beside it" "1" \
+    "$([ -f "$SET" ] && echo 1)"
+  for kv in "Tp1Percent=30.0" "Tp2RR=4.00" "LetWinnersRun=1" "UseProfitLock=1" \
+            "LockFloor1=0.30" "LockFloor2=1.00" "LockFloor3=2.00" "LockFloor4=3.00" \
+            "TrailStartRR=1.00" "ScaleMode=1" "RiskPercent=1.0" "MaxLot=0.20"; do
     check_contains "preset carries $kv" "$kv" "$(cat "$SET")"
   done
+  check_contains "and the preset says what the change is worth in R" \
+    "one good trade can print 6R-10R" "$(cat "$SET")"
+  # Two mechanical checks that need no compiler: the preset must name exactly the
+  # inputs the EA has (a stray key is silently ignored by the terminal, a missing
+  # one silently falls back to the code default), and the port must contain no
+  # MQL4-only API - which is a compile error, not a style issue.
+  check_eq "the preset covers every input and names nothing extra" "0" \
+    "$(python3 "$HERE/../../Tools/check_preset.py" "$EA" "$SET" >/dev/null 2>&1; echo $?)"
+  check_eq "the MQL5 port has no MQL4-only API left in it" "0" \
+    "$(python3 "$HERE/../../Tools/lint_mql5.py" "$EA" >/dev/null 2>&1; echo $?)"
 else
-  bad "EA exists at MQL5/Experts/HEX-BoomRider.mq5"
+  bad "EA exists at MQL5/Experts/HEX-FVG-Breaker.mq5"
 fi
+
 
 echo "a live EA on a dead feed is a different fault, with its own fix"
 # 2026-11-02: the chart stopped being ticked at 21:54, the EA wrote nothing for

@@ -1,161 +1,101 @@
 # Deploy — the robot runs on a server, not on your laptop
 
-> ## ⚠️ MT5 MIGRATION (2026-11-01) — the sections below describe the RETIRED MT4 stack
+> ## ⚠️ STRATEGY CHANGE (2026-11-15) — the MT4 engine is back, now on MT5
 >
-> The robot is now **HEX-BoomRider** on **MetaTrader 5**, trading
-> **Volatility Boom 400** on a Deriv demo. The MT4 stack (HEX-FVG-Breaker, its
-> containers, volumes and `MQL4/` tree) is **retired and removed** — everything
-> below the line in this file is kept only as history of the patterns the MT5
-> port reuses (GHCR image, Dokploy compose app, Wine/Xvfb, volume guard, lease,
-> mirrors, noVNC). The MT5 entrypoint is a fresh
-> `deploy/scripts/entrypoint.sh`; the old one is in git history.
+> The robot on MetaTrader 5 is **HEX-FVG-Breaker** again: the MT4 EA
+> (`MQL4/Experts/HEX-FVG-Breaker.mq4`, v3.00, recovered from git history) carried
+> to MQL5 as `MQL5/Experts/HEX-FVG-Breaker.mq5`. **HEX-BoomRider is retired** -
+> both of its files are gone; `git show 8664f3c:MQL5/Experts/HEX-BoomRider.mq5`
+> still has it.
 >
-> ### What changed, in one table
+> The strategy engine is the MT4 code, rule for rule: Fair Value Gaps + Breaker
+> blocks + Mitigation blocks on M15, an H1 trend filter that needs the EMA stack
+> AND market structure to agree, a confluence gate on the FVG entries, limit
+> orders 62% deep into the zone (or a rejection-candle trigger), and every guard
+> the MT4 file had.
 >
-> | | MT4 (retired) | MT5 (current) |
+> ### What is different, on purpose
+>
+> Two things, both about the exit, because the MT4 exits capped every winner:
+> TP1 banked **half** at 1R and the rest closed at **2.5R**, so a trade that ran
+> its full course paid `0.5 x 1R + 0.5 x 2.5R = 1.75R` while a loss cost 1R -
+> which is why the account grew by rounding error.
+>
+> | | MT4 v3 | now |
 > |---|---|---|
-> | EA | HEX-FVG-Breaker | HEX-BoomRider (long-only spike rider) |
-> | Symbol | XAUUSD / DOGEUSD | **Volatility Boom 400 Index** (the exact broker name), M15 |
-> | Terminal | `terminal.exe` /portable `startup.ini` | `terminal64.exe` /portable `/config:mt5.ini` |
-> | First login | manual on the VNC desktop | **automated** — `[Common] Login/Password/Server` autologins |
-> | Chart + EA attach | profile templates | `[StartUp]` in mt5.ini (one chart, EA + preset) |
-> | AutoTrading at start | startup.ini key | `[Experts] Enabled=1` |
-> | Bankroll rule | — | effective bankroll = **Equity − 9980** ($20 of headroom); risk 20%/trade of it |
-> | Blow guard | — | equity ≤ **9980** → Alert + phone push + marker file + permanent halt |
-> | Data dir | `/data/mt4` | `/data/mt5` (fresh volume) |
-> | Logs | `/data/mt4/MQL4/Files/Common/HEX-Logs` | `/data/mt5/MQL5/Files/HEX-Logs` |
+> | TP1 | 50% at 1R | **30% at 1R** |
+> | runner target | 2.5R | **4R** |
+> | once the stop is locked at >= 1R | target stays | **target removed** - the trail carries the runner |
+> | profit protection | break-even + ATR trail from 1R | **plus a lock ladder**: +0.30R at 1R seen, +1R at 2R, +2R at 3R, +3R at 4R |
+> | trail anchor | last closed bar's high/low | **the peak price reached** (a bar lags a runner) |
 >
-> ### The migration checklist (what to click, once)
+> A full 4R run now pays `0.3 x 1R + 0.7 x 4R = 3.1R`, and more once the target
+> is released to the trail. Break-even win rate at 3.1R is ~24%; at 1.75R it was
+> ~36%. The loss side is unchanged.
 >
-> 1. **Delete the old Dokploy app** (`hex-mt4` / `forex-hex-mt4` project) and its
->    volumes: `docker volume ls | grep hex-mt4` → `docker volume rm <name>`.
-> 2. The new app (`hex-mt5`, project `forex-hex-mt5`) is created by CI on the
->    next push to `main` — or provision it by hand with
->    `DOKPLOY_ENV_FILE=deploy/.env deploy/scripts/dokploy-apply.sh`.
-> 3. **In the new app's Environment tab (Dokploy only — never in git, never in
->    GitHub secrets):**
->    ```
->    MT5_LOGIN=41311895
->    MT5_PASSWORD=<the Deriv demo password>
->    MT5_SERVER=Deriv-Demo
->    ```
->    CI pushes never overwrite these: `dokploy-apply.sh` merges the stored
->    environment and only updates the keys CI itself sends (image tag, distro
->    URL, VNC switch, TZ). Delete `MT4_*` from any env file — nothing reads them.
-> 4. **Supply a terminal — or don't.** The compose file defaults
->    `MT5_SETUP_URL` to MetaQuotes' full MT5 installer
->    (`https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe`,
->    verified live, 23.8MB), which the container runs under Wine with `/auto`
->    and copies into the volume — so a fresh volume needs no tarball. The
->    installer's tree carries MetaQuotes' server list; if `Deriv-Demo` is not in
->    it, add the server once through File → Open an Account on the VNC desktop.
->    A tarball via `MT5_DISTRO_URL` (prepared with `prepare-distro.sh` from a
->    Deriv MT5 install) still works and wins when both are set — it is also what
->    lets CI's `ea-check` stage compile `HEX-BoomRider.mq5` at build time.
-> 5. First boot: watch the noVNC desktop once to confirm the login and that
->    Volatility Boom 400 Index is ticking; the chart, EA and autotrading all come from
->    `mt5.ini` now, so there is nothing else to click.
-> 6. **The blow rule, and the weekly $20.** The halt is `equity ≤ 9980` — the $20
->    of headroom is gone. That $20 is the unit of risk: four losses of ~$4.54
->    (the 0.30% stop on a 0.10 lot) fit inside it, and the survivors are meant to
->    compound. When the phone says BLOWN: reset the demo account in Deriv's
->    portal (or deposit $20 more), delete
->    `/data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-BLOWN.txt` (via the desktop or a
->    fresh volume), and it trades again. The halt survives restarts by design, so
->    a blown run cannot quietly resume on the next reboot.
-> 7. **Sizing, and the skip that is not a fault.** Risk is 20% of the headroom,
->    but this broker's minimum lot is 0.10 and the headroom starts at $20, so the
->    first trades are the *minimum lot* at ~22.7% of the headroom ($4.54 against
->    the 0.30% stop). That is the price of the lot step, not a misconfiguration:
->    once the run profits, sizing scales with the headroom (0.20 lots at ~$45 of
->    headroom, 0.30 at ~$68) because `CalcLots` sizes off equity and floors to the
->    0.10 step. `InpMaxRiskPct` is 50 (=$10), which admits the minimum lot with
->    2.2x of headroom margin; at a smaller cap the EA logs
->    `min lot 0.10 would risk ... > cap ...` and refuses every entry forever (the
->    loop of 2026-11-02), and that refusal now names the bankroll it would need.
->    `Tools/boom_backtest.py` floors to `min_lot` too, so it always assumed the
->    minimum lot was the trade.
-> 8. **Compounding a winner instead of just taking it.** The base trade keeps
->    the 0.25% target, so it banks ~$3.78 the moment a spike reaches it. A spike
->    on Boom 400 is a single-tick *jump*, though, so anything beyond the target
->    used to be lost. The EA now adds legs while it is happening:
->    - the base leg still takes the 0.25% target, but the **EA** takes it
->      (closing exactly the base volume, oldest ticket first) instead of a broker
->      TP: on a netting account a broker TP would close the whole ladder at the
->      target and kill the ride. A distant `InpBackstopTPPct=1.00` remains, so no
->      position is ever target-less if the terminal dies;
->    - at +0.20% (before the target: the spike is still in progress) it may add
->      one leg, then one more every further +0.20%, up to `InpMaxAdds=3`, i.e.
->      0.10 → 0.20 → 0.30 → 0.40 lots;
->    - every leg is sized from profit the episode has *already* made
->      (`InpAddRiskPct=100` of booked + floating profit divided by the distance to
->      the shared stop), so an add the trade cannot pay for is skipped, never
->      forced: at a sustained 50% risk fraction no add ever reaches the 0.10 lot
->      step, which is why the preset says 100;
->    - all legs share **one** stop, which never loosens: **after** the base leg has
->      banked its target it moves to entry **+0.05%** (a winner can no longer
->      lose), and from +0.40% it trails 0.30% behind the price. Never earlier:
->      armed before the bank, that floor sits *on* the price and becomes a +0.05%
->      take-profit - the live failure of 2026-11-02 (see below).
->      `InpMinStopGapPct=0.15` is a second floor under every move, so no stop can
->      ever be placed inside 0.15% of the price. `LOCKIN`/`TRAIL` rows in the CSV
->      show every move and how far below the price it landed; `ADD` rows (and
->      phone pushes) show every leg, and an add the profit cannot afford logs
->      `add-small` instead of failing silently;
->    - the ladder is capped twice: `InpMaxLadderLots=0.40` and
->      `InpMaxLadderRiskPct=30` (=$6 of stop risk at $20 of headroom), so one bad
->      episode stays inside the same 3-loss budget as one base stop-out.
->    Measured by `Tools/boom_backtest.py` (100k ticks × 4 seeds, $20 headroom, and
->    per-tick volatility now calibrated to the live tape of 2026-11-02): the base
->    engine (bank 0.25%, no adds) runs `$15.93/h`, WR `0.776`, PF `2.79`, median
->    win exactly `+0.250%` - the target - and no run blown. The ladder itself does
->    nothing at $20: one add at the 0.10 minimum lot needs ~`$4.50` of the
->    episode's profit in hand, which the base lot only generates around `$68` of
->    headroom. Under the *pessimistic* calibration (spikes 0.15% mean instead of
->    0.25%) the ladder can be a net negative, which is what the caps and the
->    `InpMaxAdds=0` kill switch are for: set it to 0 and the EA is exactly the
->    base strategy again.
-> 9. **What was measured and rejected.** An early break-even at +0.08%, a partial
->    at +0.12%, and a time-stop that cuts a bleeding trade all look sensible and
->    are all wrong on this symbol: the price *jumps*, so it never rests between
->    the entry and the target, and break-even and mid-target partials change
->    nothing at all (bit-identical results), while cutting a trade early throws
->    away the spike it was waiting for (−32% $/h). Do not "improve" the EA by
->    adding them back.
-> ### Where a deploy stands today (verified 2026-11-02)
+> ### The one symbol-specific setting
 >
-> The pipeline is `git push` → Actions builds `deploy/Dockerfile` (compiling the EA
-> against a real MetaEditor on the way) → GHCR → Dokploy pulls and recreates the
-> container. Two things gate the last hop, and both live *outside* the repo:
+> The MT4 inputs are `$/oz` distances, tuned for XAUUSD. This container trades
+> **Volatility Boom 400 Index**, where `1.20` of a 15000-priced index is smaller
+> than the noise - no swing would qualify, so a straight port would never trade.
+> The preset therefore sets `ScaleMode=1` (ATR): the same inputs are read as
+> **multiples of the M15 ATR**. Every rule keeps its meaning and the EA stops
+> depending on one instrument's price scale.
 >
-> | | state now | what it takes |
-> |---|---|---|
-> | which remote gets the push | `origin` = `thamitshepe/Forex-hex-algo-strategy-mt4`; the read-only `Manged3/...` is kept as `upstream` | nothing — `git push` is the whole gesture |
-> | repo **variables** | only `MT5_DISTRO_URL` is set | `DOKPLOY_URL` (the instance URL, no trailing slash); optionally `ENABLE_VNC`, `TZ` |
-> | repo **secret** | **`DOKPLOY_API_TOKEN` is not set** | add it from Dokploy → *Settings → API Keys* |
-> | GHCR package `forex-hex-mt5` | **private** — an anonymous pull answers `401` | flip it Public, or give Dokploy a `read:packages` credential |
+> Worth knowing: Deriv Boom indices spike **up** only, so a short sits against
+> the only move that cannot be stopped out cleanly. `TradeDirection=+1` makes the
+> EA long-only on this chart. It ships at `0` (both directions, as the MT4
+> original) - flip it to 1 if the log shows shorts being run over by spikes.
 >
-> Without those two Dokploy values the deploy job does not fail: it prints
-> `DOKPLOY_URL or DOKPLOY_API_TOKEN is unset - image published, nothing deployed`
-> and exits **green**. So a push can look fully successful while the server keeps
-> running the previous build. That notice is the line to look for when a deploy
-> "worked" and the EA on the chart did not change.
+> ### Risk, and the two kill switches
 >
-> **Nothing has to be copied.** `deploy/scripts/dokploy-apply.sh` sends
-> `deploy/docker-compose.yml` into the Dokploy app as a raw compose file on every
-> push, sets the environment and recreates the container — the server runs exactly
-> the file in the commit, and nothing is built on the server. There is no compose
-> file to paste and no `.env` to keep in sync. The only Dokploy-side values that
-> can go stale are the account credentials in the app's *Environment* tab
-> (`MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER`), which CI deliberately never touches
-> — and the registry credential, if the package stays private.
+> `RiskPercent=1.0` of equity per trade, never more than `MaxRiskAmount=$100`,
+> never more than `MaxLot=0.20` lots, never more than 30% of equity in margin. A
+> wide zone trades smaller instead of risking more.
+> `MaxDailyLossPct=5` halts until the next day (cleared by the day roll - it is
+> not permanent). `MaxTotalDrawdownPct=15` is permanent: it writes
+> `/data/mt5/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-BLOWN.txt`, and deleting that
+> file is the only thing that resumes it.
 >
-> **Naming, after the MT5 port.** The live names are `forex-hex-mt5` (image and
-> project) and `hex-mt5` (the Compose app). Where this document still says
-> `MT4_*` or `forex-hex-mt4` — the §4 distro, the §5/§6 tables, the troubleshooting
-> rows — read `MT5_*` and `forex-hex-mt5`: the workflow sends the MT5 names and
-> `deploy/docker-compose.yml` interpolates them. `dokploy-apply.sh` defaults to
-> the MT5 pair, so leaving `DOKPLOY_PROJECT` / `DOKPLOY_APP` unset is correct.
+> ### The files to know
+>
+> | | |
+> |---|---|
+> | EA | `MQL5/Experts/HEX-FVG-Breaker.mq5` |
+> | preset | `MQL5/Presets/HEX-FVG-Breaker.set` |
+> | status line | `HEX-Logs/HEX-FVG-Breaker-heartbeat.txt` |
+> | events (what the phone reads) | `HEX-Logs/HEX-FVG-Breaker-<date>.csv` |
+> | research tables | `HEX-Logs/analysis/{trades,signals,rejections,zones,partials,equity,daily}.csv` |
+> | halt marker | `HEX-Logs/HEX-FVG-Breaker-BLOWN.txt` |
+>
+> The research tables keep the MT4 column layout, so `Tools/hex_report.py` still
+> reads them. The event CSV is a separate file on purpose: the container's push
+> watcher globs `HEX-Logs/*.csv` and matches `,BUY,` anywhere in a row, so the
+> tables live one level down or a `trades.csv` row would buzz twice.
+>
+> ### Checks that run without a compiler
+>
+> `python3 Tools/lint_mql5.py MQL5/Experts/HEX-FVG-Breaker.mq5` proves the port
+> has no MQL4-only API left in it, and
+> `python3 Tools/check_preset.py <ea> <set>` proves the preset names exactly the
+> EA's inputs (a stray key is silently ignored by the terminal; a missing one
+> silently falls back to the code default). Both run inside
+> `deploy/scripts/selftest.sh`, and CI's `ea-check` stage still compiles the EA
+> with a real MetaEditor, so "deployed" and "compiles" cannot drift apart.
+>
+> ---
+>
+> Everything below this banner was written for the **retired MT4 stack**, and
+> then for HEX-FVG-Breaker. The patterns it documents - GHCR image, Dokploy
+> compose app, Wine/Xvfb, volume guard, one-chart lease, log mirrors, noVNC, the
+> alert vocabulary, the offline state machine - are exactly the ones the current
+> container still uses, so it remains the runbook for everything except the
+> trading rules. For those, read the EA and the preset.
+>
+> **§2 is the one section kept current for the MT5 stack.** The identifiers in
+> §6's tables (`mt4`, `mt4-doge`, `MT4_LOGIN`, `forex-hex-mt4`, DOGEUSD) are the
+> retired ones: what is live is `mt5-boom`, `MT5_LOGIN`, `forex-hex-mt5` and the
+> `HEX-FVG-Breaker` preset, and §2 has them in one block to paste.
 
 
 
@@ -232,26 +172,67 @@ compiled and checked in CI — see `deploy/scripts/entrypoint.sh`.
 
 ## 2. The 30-second version
 
-**One push, then one click.** The push to `main` builds `deploy/Dockerfile` and
-publishes `ghcr.io/<owner>/forex-hex-mt4:live` plus the commit SHA, and fails if the
-MQL4 does not compile. Then, in Dokploy:
+**One push, then one click.** The push to `main` that touches `MQL5/**` or
+`deploy/**` builds `deploy/Dockerfile` and publishes
+`ghcr.io/thamitshepe/forex-hex-mt5:live` plus the commit SHA. The build's
+`ea-check` stage compiles `MQL5/Experts/HEX-FVG-Breaker.mq5` with a real
+`metaeditor64.exe`, so a commit whose MQL5 does not compile cannot produce an
+image. Then, in Dokploy:
 
-1. **Create Project** `forex-hex-mt4` → **Create Service** → **Compose**.
-2. Paste `deploy/docker-compose.yml` into the compose editor (provider: raw).
-   It defines one service — `mt4-doge` (DOGEUSD) — from
-   `ghcr.io/thamitshepe/forex-hex-mt4:live`, attached to `dokploy-network`
-   because that is the only network Traefik can reach it on.
-3. Paste **all of** `dist/dokploy.env` into the **Environment** tab: one place,
-   nothing per service. Fill `MT4_LOGIN2`/`MT4_PASSWORD2` and the
-   `MT4_DISTRO_URL` from §4.
-4. **Deploy**, then watch the log until `terminal.exe is up` (§7) — the log has a
-   service selector, so `mt4-doge` is read directly.
-5. **Domains** tab: `trade2.thami.dev` → service `mt4-doge` → port `6080`
-   → HTTPS.
-6. **Deploy again.** A domain becomes a Traefik label on the *container*, and labels
-   are written when the container is created — so a domain added to a running app
-   routes nowhere (`app not found`) until the next deploy. Add the domain first,
-   then deploy once; from then on the domain survives every later deploy.
+1. **Create Project** `forex-hex-mt5` → **Create Service** → **Compose**.
+2. Paste the whole of `deploy/docker-compose.yml` into the compose editor
+   (provider: **raw**). It defines **one** service — `mt5-boom`, instance 1, the
+   `HEX-FVG-Breaker` expert — from
+   `${MT5_IMAGE:-ghcr.io/thamitshepe/forex-hex-mt5:live}`, on
+   `dokploy-network` (the only network Traefik can reach it on), with
+   `cap_add: SYS_PTRACE`, `shm_size: 512m` and `pull_policy: always`. Those three
+   keys are the reason this has to be a **Compose** app and not an Application:
+   Dokploy's Application type has no field for any of them (§6).
+3. **Environment** tab — one place, nothing per service, nothing in git. CI
+   **merges** into this block rather than replacing it, so the account survives
+   every later push:
+
+   ```dotenv
+   MT5_LOGIN=...
+   MT5_PASSWORD=...
+   MT5_SERVER=Deriv-Demo
+   # What to trade. The name must match the broker's exactly, character for
+   # character: a name that does not exist opens a chart that never syncs, and
+   # MT5 then deletes the expert after five minutes without running it.
+   # XAUUSD is what this strategy was written for; leaving this unset uses the
+   # compose default, "Volatility Boom 400 Index", which the preset's ATR
+   # scaling (ScaleMode=1) handles as well.
+   MT5_SYMBOL=XAUUSD
+   MT5_PERIOD=M15
+   MT5_EXPERT=HEX-FVG-Breaker
+   MT5_PRESET=HEX-FVG-Breaker
+   # The remote desktop: the one-time look, and the one manual step a fresh
+   # terminal needs when the broker is not in MetaQuotes' server list.
+   ENABLE_VNC=1
+   VNC_PASSWORD=...
+   # Where the pushes go (nuisance-free: one per state change, never per tick).
+   MT5_NOTIFY_URL=https://ntfy.sh/<your-topic>
+   TZ=UTC
+   ```
+
+   Everything else the compose file interpolates has a default and may be left
+   out — `deploy/.env.example` lists each one with the reason for it.
+4. **Deploy**, then watch the log for `terminal64.exe is up` and the EA's `INIT`
+   line (§7). The log has a service selector, so `mt5-boom` is read directly.
+5. **Domains** tab: `boom.thami.dev` → service `mt5-boom` → port **`6080`**
+   (noVNC) → HTTPS.
+6. **Deploy again.** A domain becomes a Traefik label on the *container*, and
+   labels are written when the container is created — so a domain added to a
+   running app routes nowhere (`app not found`) until the next deploy. Add the
+   domain first, then deploy once; from then on the domain survives every later
+   deploy.
+
+**The pull is the step that fails first.** A package created by the workflow
+starts **private**, so `ghcr.io/thamitshepe/forex-hex-mt5:live` answers `401`
+until it is flipped to Public (repo → **Packages** → the package → *Package
+settings* → *Change visibility*), or a credential is added in Dokploy (registry
+`ghcr.io`, user = the GitHub account, password = a PAT with `read:packages`).
+There is no API field for that credential, so it is a click either way.
 
 
 Everything site-specific lives in that one Environment tab: that is the one place to
@@ -278,7 +259,7 @@ redeploy — `up -d` against a new image — replaces the *container*, never the
 volume. Kept across every deploy: the account login, the balance and open
 positions (they live at the broker anyway), the desktop profile MT5 saved (cleared
 before each start, kept in `.profile-orig`), the CSV logs
-(`HEX-BoomRider-*.csv`, `equity.csv`, …), and the WebRequest allow-list. Reset on every
+(`HEX-FVG-Breaker-*.csv`, `equity.csv`, …), and the WebRequest allow-list. Reset on every
 deploy, on purpose: the EA is recompiled from the commit being deployed, the
 presets are re-copied from the image (`sync_ea`), and `startup.ini` is rewritten —
 which is why hand-edits inside the container do not survive. The preset the EA
@@ -600,39 +581,40 @@ variable edited in Dokploy's UI and nowhere else is overwritten by the next push
 
 ## 6. Dokploy
 
-**The compose route is §2** — one application, one service (the `mt4-doge`
-DOGEUSD instance; the gold `mt4` service was retired 2026-10-30 and its
-service block removed from the compose file). What follows describes the same image
+**The compose route is §2** — one application, one service (`mt5-boom`,
+instance 1, `HEX-FVG-Breaker`; the MT4 services were retired with that stack and
+their blocks are gone from the compose file). What follows describes the same image
 run as a **Docker-Image application** instead, which is one container per app; it
 is the route to take if you would rather keep a standalone app than a compose
 app, or when growing a second account (§“A second instance”).
 
 **By hand, in the UI — the Docker-Image route.** Everything the container needs is
-one of eleven environment variables, and setting them here keeps every credential
-out of git. Create **Project** `forex-hex-mt4` → **Create Service** → **Application**,
+one of a dozen environment variables, and setting them here keeps every credential
+out of git. Create **Project** `forex-hex-mt5` → **Create Service** → **Application**,
 then:
 
-- **Provider → Docker**: image `ghcr.io/thamitshepe/forex-hex-mt4:live`. The package
-  is public, so leave the registry credentials empty.
+- **Provider → Docker**: image `ghcr.io/thamitshepe/forex-hex-mt5:live`. The package
+  is public only once it has been flipped to Public (§2), so check that first;
+  the registry credentials stay empty when it is.
 - **Environment**: paste this, with your own demo account and a VNC password.
 
 ```dotenv
-MT4_LOGIN=12345678
-MT4_PASSWORD=...
-MT4_SERVER=MetaQuotes-Demo
-MT4_SYMBOL=XAUUSD
-MT4_PRESET=100usd-demo
-MT4_PROFILE=default
-MT4_DISTRO_URL=https://github.com/<you>/<repo>/releases/download/mt4-distro/mt4-portable.tar.gz
+MT5_LOGIN=12345678
+MT5_PASSWORD=...
+MT5_SERVER=Deriv-Demo
+MT5_SYMBOL=XAUUSD
+MT5_EXPERT=HEX-FVG-Breaker
+MT5_PRESET=HEX-FVG-Breaker
+MT5_DISTRO_URL=https://github.com/<you>/<repo>/releases/download/mt5-portable-distro/mt5-portable.tar.gz
 ENABLE_VNC=1
 VNC_PASSWORD=...
 TZ=UTC
-# MT4_IMAGE=ghcr.io/<owner>/forex-hex-mt4:<sha>    # pin an older build to roll back
+# MT5_IMAGE=ghcr.io/<owner>/forex-hex-mt5:<sha>    # pin an older build to roll back
 ```
 
-- **Advanced → Mounts**: add a **Volume** mount, name `hex-mt4-data`, mount path
-  `/data`. Without it every redeploy re-downloads 36 MB and loses the profile — and
-  with it the seeded chart.
+- **Advanced → Mounts**: add a **Volume** mount, name `hex-mt5-boom-data`, mount path
+  `/data`. Without it every redeploy re-seeds the terminal and loses the profile —
+  and with it the chart, the account session and the trade CSVs.
 
 **This route is one instance per application.** A Docker-Image application runs one
 container from one image, so it can hold `trade.thami.dev` *or* `trade2.thami.dev`,
@@ -1176,7 +1158,7 @@ there is no such `.srv` and that the list lives in `servers.ini`, which is norma
 ```bash
 docker inspect --format '{{.State.Health.Status}}' <container>   # ok / unhealthy
 ls -l /data/mt5/MQL5/Files/HEX-Logs/                              # status line + history
-cat /data/mt5/MQL5/Files/HEX-Logs/HEX-BoomRider-heartbeat.txt      # <time>|tick_age=<s>|equity|trades|sel|spread
+cat /data/mt5/MQL5/Files/HEX-Logs/HEX-FVG-Breaker-heartbeat.txt      # <time>|tick_age=<s>|equity|trades|sel|spread
 cat /data/mt5/.hex-alert /data/mt5/.hex-alert-tries                # the state the phone was last told about
 grep -hE ',SUB,|,ERROR,' /data/mt5/MQL5/Files/HEX-Logs/*.csv | tail -5   # is the symbol on the server, and subscribed?
 docker compose stop                                              # SIGTERM -> wineserver -k -> clean flush
@@ -1358,8 +1340,8 @@ shows the EA's prints, and a rebuild is a `git push`.
 | no trades on a small account, and `SIZE` in `rejections.csv` ("margin: only … lots affordable, broker minimum 0.01") | `RiskPercent` of a small balance cannot buy the broker's minimum lot — `doge-scalp` needs roughly $100 for that, and `CalcLots` blocks the trade rather than over-risk it | use the `doge-10` preset for a $10 account (§6, "Sizing follows the account"), or fund the account past the minimum-lot threshold |
 | every entry push says `R:R 0.00` | a build older than 2026-10-30: the planned-R:R arithmetic divided a price distance by a point count, so every push and every `signals.csv` row showed 0.00 | redeploy; the fixed build prints the real planned R:R (e.g. `R:R 2.00`), and never places a target closer than 1R |
 | **more losses than wins**, and every winner closed at exactly `+0.05%` (0.73 on 0.10 lots) while every loser paid `-0.30%` (`-4.5`), with no `BANK` and no `ADD` row in the CSV | a build before 2026-11-03. `InpLockInPct=0.05` armed the shared stop at `entry + 0.05%`, which is *at the price* the moment it armed, so the "break-even floor" was really a 0.05% take-profit: no winner ever reached the 0.25% target and no add was ever reachable. Measured live: 4 wins / 4 losses, `-$14.59` in 75 minutes | redeploy the fixed build. The floor now arms only after the base leg has **banked** its target (`episodeBanked`), and `InpMinStopGapPct=0.15` refuses any stop inside 0.15% of the price. Every `LOCKIN`/`TRAIL` row now ends with the distance it landed below the price, so an at-the-money stop is visible by inspection |
-| no trades at all, and `SKIP minlot-cap` in `HEX-Logs/HEX-BoomRider-<date>.csv`, with equity just above the blow line (e.g. `9985` against `InpBaselineEquity=9980`) | the EA is **not** halted and nothing is broken: `$5` of headroom cannot buy the broker's 0.10 minimum lot at the 0.30% stop (`$4.54`), and `InpMaxRiskPct=50` caps it at `$2.71`, so every entry is refused by design. The SKIP line names the equity it would need | reset the demo balance in the Deriv portal (or deposit `$20` more) to restore the `$20` headroom — the same gesture as a blown run. The blow *hard* stop is the file `HEX-BoomRider-BLOWN.txt`; this is not that |
-| the ladder never places an add (`add-small` SKIP rows, no `ADD` rows) | at `$20` of headroom one add at the 0.10 minimum lot needs about `$4.50` of *this episode's* profit already in hand (0.10 lots × the distance to the shared stop), and a 0.10-lot base leg only generates that around `$68` of headroom. Below that the add is unaffordable, not broken | nothing — this is the base engine working. The ladder turns on by itself as the headroom compounds through `~$68`; `InpMaxAdds=0` makes the choice explicit either way |
+| no trades at all, and `SKIP ... margin: only N lots affordable, broker minimum M` in `HEX-Logs/HEX-FVG-Breaker-<date>.csv` | the EA is **not** halted and nothing is broken: the stop distance on that setup needs more margin (or a bigger risk budget) than `MaxRiskAmount` / `MaxLot` / `MaxMarginUsagePct` allow, so the entry was refused *by design* | the SKIP line names the bankroll it would need. Either raise `RiskPercent`/`MaxLot`/`MaxRiskAmount`, or lower `MaxMarginUsagePct`, and commit the preset. The permanent halt is the file `HEX-FVG-Breaker-BLOWN.txt`; this is not that |
+| every winner closes around `+0.3R`-`+1R` and nothing ever runs | the stop is being locked early: either `UseProfitLock=1` with rungs that arm too soon, or `TrailAtrMult` is small enough that the trail sits one tick behind the price | check `Key_allow`/`LockFloor*` in the preset and the `runner released` print. With the shipped preset the first rung is `+0.30R` **at 1R seen**, then `+1R` at 2R - a trade that only ever printed 1R *should* exit near +0.3R |
 
 ---
 

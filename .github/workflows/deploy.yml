@@ -2,7 +2,7 @@ name: Build and push to GHCR
 
 # This workflow is what puts the robot on the server: it builds deploy/Dockerfile
 # and publishes it to GHCR, where the Dokploy app pulls it from. The build's
-# ea-check stage compiles MQL5/Experts/HEX-BoomRider.mq5 with the real
+# ea-check stage compiles MQL5/Experts/HEX-FVG-Breaker.mq5 with the real
 # MetaEditor, so a commit whose MQL5 does not compile cannot produce an image -
 # "deployed" and "compiles" cannot drift apart.
 on:

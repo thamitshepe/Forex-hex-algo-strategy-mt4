@@ -9,6 +9,13 @@ logs/
 # MetaQuotes binaries and it is what MT4_DISTRO_URL points at - never committed.
 dist/
 
+# A real account. Only deploy/.env.example is committed: CI sends credentials to
+# Dokploy and nothing else, and a live login must never reach the repository -
+# it would be in the history long after the account was rotated.
+.env
+deploy/.env
+dist/*.env
+
 # Python
 __pycache__/
 *.pyc

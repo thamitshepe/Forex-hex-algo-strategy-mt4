@@ -1,5 +1,5 @@
 #!/bin/bash
-# Docker HEALTHCHECK for the HEX-BoomRider (MT5) container.
+# Docker HEALTHCHECK for the HEX-FVG-Breaker (MT5) container.
 #
 # Three questions, in order of how often they go wrong:
 #   1. is MetaTrader still running?  (a dead terminal is a dead robot)
@@ -19,7 +19,7 @@ set -uo pipefail
 
 MT5DIR="${MT5DIR:-/data/mt5}"
 LOGDIR="$MT5DIR/MQL5/Files/HEX-Logs"
-HB="$LOGDIR/HEX-BoomRider-heartbeat.txt"
+HB="$LOGDIR/HEX-FVG-Breaker-heartbeat.txt"
 MAX_AGE_MIN="${HEX_HEARTBEAT_MAX_AGE_MIN:-180}"
 TICK_MAX_MIN="${HEX_TICK_STALL_MIN:-15}"
 
@@ -35,15 +35,15 @@ mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; 
 pgrep -f 'terminal64[.]exe' >/dev/null || fail "terminal64.exe is not running"
 [ -f "$MT5DIR/mt5.ini" ] || fail "mt5.ini is missing - MT5 was not started by the entrypoint"
 
-# HEX-BoomRider-heartbeat.txt is the EA's status line (the file name is
+# HEX-FVG-Breaker-heartbeat.txt is the EA's status line (the file name is
 # historical - nothing about it is a notification), rewritten every
 # InpHeartbeatSec seconds (60 by default) from a terminal TIMER - not from OnTick,
 # which is the whole point: the timer fires even when the chart is not being fed,
 # so a status line that stops moving means the EA is not being called at all. The
-# EA's BLOWN marker is not a failure: a blown account is the strategy working as
-# designed - it says so, loudly, and halts on purpose.
-if [ -f "$LOGDIR/HEX-BoomRider-BLOWN.txt" ]; then
-  echo "ok: terminal up, EA is BLOWN (equity <= baseline) - halting by design, reset the demo account to resume"
+# EA's BLOWN marker is not a failure: the kill switch fired on purpose (total
+# drawdown), it says so loudly, halts, and only a human clearing it resumes.
+if [ -f "$LOGDIR/HEX-FVG-Breaker-BLOWN.txt" ]; then
+  echo "ok: terminal up, EA is halted by design (kill switch: total drawdown) - clear HEX-FVG-Breaker-BLOWN.txt to resume"
   exit 0
 fi
 if [ -f "$HB" ]; then
