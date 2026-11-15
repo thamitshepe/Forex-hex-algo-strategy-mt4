@@ -547,6 +547,11 @@ load_fn "$ENTRYPOINT" write_death_note >/dev/null
 load_fn "$ENTRYPOINT" main >/dev/null
 (
   X11VNC_PID=""; WEBSOCKIFY_PID=""; WM_PID=""; XVFB_PID=""; TERMINAL_PID=4242
+  # main() reports the uptime from $SECONDS, not from `$(date +%s) - BOOT_EPOCH`:
+  # the one measurement the exit path makes must not need a process, because the
+  # path is reached exactly when the container cannot fork (2026-11-15). Assigning
+  # SECONDS is how a test supplies that number without waiting 42 seconds.
+  SECONDS=42
   check_instance_env() { :; }; banner() { :; }; claim_volume() { :; }; write_lease() { :; }
   boot_guard() { :; }; start_desktop() { :; }; ensure_terminal() { :; }
   repair_symbol_bases() { :; }; sync_ea() { :; }; compile_ea() { :; }
@@ -863,6 +868,57 @@ check_eq "cgroup v2's literal 'max' means no limit, and no percentage of one" \
 check_eq "with no cgroup and no /proc at all it still answers, and still succeeds" \
   "0 mem: limit=unlimited current=? pids=? host: not readable here oom_kills=?" \
   "$(r="$(MEM_CGROUP=/nonexistent MEM_INFO=/nonexistent mem_report)"; printf '%s %s' "$?" "$r")"
+
+echo "the ceiling that refuses a fork is the one the cgroup never shows"
+# 2026-11-15, six boots in a row: `terminal64.exe is up`, then rc=1 with bash's own
+# `fork: Cannot allocate memory` - while mem_report said limit=unlimited, current=2
+# MB, pids=3/57715, 36950 MB free on the host and 0 oom kills. Every figure was true
+# and none of them was the limit, because the refusal comes from layers a cgroup
+# never reports: rlimits (per-UID, so a second container running as uid 1000 spends
+# this one's budget), vm.max_map_count (dup_mmap fails when the parent already holds
+# that many VMAs - Wine's terminal64 carries thousands), the host's overcommit
+# accounting, and an ANCESTOR cgroup's pids.max. And it was read 19 seconds too
+# early, before the terminal's threads and mappings existed.
+check_eq "the ceiling is printed at boot, again at full load, and from the exit trap" \
+  "3" "$(printf '%s\n' "$EPI" | grep -c 'log "$(limits_report)"')"
+check_contains "the command it could not START is recorded, not just the one that failed" \
+  "trap 'LASTC=\"\${BASH_COMMAND}\"' DEBUG" "$EPI"
+check_contains "and it is named on the way out" \
+  "the command it could not start was" "$EPI"
+check_contains "a refused fork cannot take down a terminal that is already up" \
+  'set +e
+  lease_keeper &' "$EPI"
+check_contains "and the exit path measures elapsed time without forking" \
+  'up="$SECONDS"' "$EPI"
+load_fn "$ENTRYPOINT" limits_report >/dev/null || true
+CRL="$TMP/limits"; mkdir -p "$CRL/sys/vm" "$CRL/sys/kernel" "$CRL/cg/docker/abc"
+printf 'Limit                     Soft Limit           Hard Limit           Units\nMax processes             512                  512                  processes\nMax address space         1073741824           1073741824           bytes\nMax resident set          unlimited            unlimited            bytes\n' \
+  > "$CRL/limits"
+printf '7f00-7f01 r-xp 0 0:0 0 /a\n7f01-7f02 rw-p 0 0:0 0 /b\n7f02-7f03 rw-p 0 0:0 0 /c\n' \
+  > "$CRL/maps"
+printf '65530\n'   > "$CRL/sys/vm/max_map_count"
+printf '57715\n'   > "$CRL/sys/kernel/threads-max"
+printf '4194304\n' > "$CRL/sys/kernel/pid_max"
+printf '0::/docker/abc\n' > "$CRL/cgroup"
+printf '3\n'     > "$CRL/cg/docker/abc/pids.current"
+printf '57715\n' > "$CRL/cg/docker/abc/pids.max"
+printf '120\n'   > "$CRL/cg/docker/pids.current"
+printf '512\n'   > "$CRL/cg/docker/pids.max"
+printf 'CommitLimit:     3145728 kB\nCommitted_AS:    2097152 kB\n' > "$CRL/meminfo"
+limits_probe() {
+  PROC_LIMITS="$CRL/limits" PROC_MAPS="$CRL/maps" PROC_CGROUP="$CRL/cgroup" \
+  PROC_SYS="$CRL/sys" CGROUP_ROOT="$CRL/cg" MEM_INFO="$CRL/meminfo" limits_report
+}
+check_eq "rlimits, maps against the map ceiling, commit, and the pids of the cgroup above us" \
+  "ceiling: maxproc=512 maxas=1024 MB maxres=unlimited maps=3 max_map_count=65530 commit=2048 MB of 3072 MB threads-max=57715 pid_max=4194304 cgroup=/docker/abc up:120/512" \
+  "$(limits_probe)"
+printf '0::/\n' > "$CRL/cgroup"
+check_eq "a namespaced cgroup says so rather than inventing ancestors" \
+  "ceiling: maxproc=512 maxas=1024 MB maxres=unlimited maps=3 max_map_count=65530 commit=2048 MB of 3072 MB threads-max=57715 pid_max=4194304 cgroup=own namespace" \
+  "$(limits_probe)"
+check_eq "and with no /proc at all it still answers, and still succeeds" \
+  "0 ceiling: maxproc=unlimited maxas=unlimited maxres=unlimited maps=0 max_map_count=? commit=not readable threads-max=? pid_max=? cgroup=own namespace" \
+  "$(r="$(PROC_LIMITS=/nonexistent PROC_MAPS=/nonexistent PROC_CGROUP=/nonexistent PROC_SYS=/nonexistent MEM_INFO=/nonexistent limits_report)"; printf '%s %s' "$?" "$r")"
 
 echo "the death note lands when no process can be started"
 load_fn "$ENTRYPOINT" terminal_tails >/dev/null || true

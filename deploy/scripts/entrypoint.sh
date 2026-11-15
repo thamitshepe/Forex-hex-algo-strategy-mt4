@@ -72,6 +72,16 @@ SAID_BYE=""
 # process is a trap that cannot run in the one situation it exists for.
 ERR_AT=""
 trap 'ERR_AT="${BASH_COMMAND}"' ERR
+# The command that was STARTING when the shell died, which is not the same as the
+# one that failed: `fork: Cannot allocate memory` is raised while bash is setting
+# up the next command, the error trap never fires (bash treats a failed fork in a
+# non-interactive shell as fatal and exit(1)s straight out), and the 2026-11-15
+# loop therefore arrived with rc=1, an empty ERR_AT and no way to tell whether it
+# was a watcher, a push or the terminal. An assignment costs nothing and needs no
+# process, so it is the one record that survives having no process left to write
+# it.
+LASTC=""
+trap 'LASTC="${BASH_COMMAND}"' DEBUG
 
 say_bye() { # RC
   local rc="${1:-?}" up="?"
@@ -82,6 +92,16 @@ say_bye() { # RC
   fi
   if [ "${BOOT_EPOCH:-0}" -gt 0 ] 2>/dev/null; then
     up=$(( $(date +%s) - BOOT_EPOCH ))
+  fi
+  # FIRST, and builtin-only: the ceiling that refused the fork. The 2026-11-15 loop
+  # printed this line 19 seconds BEFORE the terminal existed, when the container was
+  # using 2 MB and 3 pids - the only moment it could not have been the answer. Here
+  # it is printed at the moment of death, with the terminal's processes and mappings
+  # in it, and it costs no fork to produce.
+  log "$(mem_report)"
+  log "$(limits_report)"
+  if [ -n "${LASTC:-}" ]; then
+    log "the command it could not start was: $LASTC"
   fi
   if declare -F write_death_note >/dev/null 2>&1 && [ -n "${MT5DIR:-}" ]; then
     write_death_note "$rc" "$up"
@@ -814,6 +834,104 @@ mem_report() {
   return 0
 }
 
+# ------------------------------------------- the ceilings above the cgroup ---
+# mem_report answers "how much may this CONTAINER use". It cannot answer "may this
+# PROCESS be created at all", and on 2026-11-15 that was the only question that
+# mattered: `fork: Cannot allocate memory` on every boot with the cgroup unlimited,
+# 36 GB free on the host, 0 oom kills and 3 pids in use. Every one of those figures
+# was true and none of them was the limit, because the refusals come from layers
+# the cgroup never shows:
+#
+#   * maxproc - RLIMIT_NPROC is per-UID and counts every THREAD of that uid across
+#     the whole host, so a second container running as uid 1000 spends this one's
+#     budget. It is also the one that looks like "plenty of pids" from inside.
+#   * maxas / maxres - RLIMIT_AS and RLIMIT_DATA cap this address space whatever the
+#     cgroup allows, and a fork inherits them.
+#   * maps vs max_map_count - `dup_mmap` is the classic reason fork answers ENOMEM
+#     with gigabytes free: it fails when the PARENT already holds that many VMAs.
+#     Wine's terminal64 carries thousands on its own.
+#   * commit - Committed_AS against CommitLimit is what a host with
+#     vm.overcommit_memory=2 enforces, and it is invisible in MemAvailable.
+#   * cgroup ancestors - a parent cgroup's pids.max is enforced even when this
+#     container's own is 57715 and it is using 3.
+#
+# All builtins (`read`, `case`, `printf`, integer arithmetic), for the same reason
+# mem_report is: this is printed from an EXIT trap, in the one situation where no
+# fork succeeds. PROC_* / MEM_INFO / CGROUP_ROOT exist so the selftest can point it
+# at a tree on disk instead of the kernel.
+limits_report() {
+  local lim="${PROC_LIMITS:-/proc/self/limits}" mapsf="${PROC_MAPS:-/proc/self/maps}"
+  local cgf="${PROC_CGROUP:-/proc/self/cgroup}" sysd="${PROC_SYS:-/proc/sys}"
+  local info="${MEM_INFO:-/proc/meminfo}" croot="${CGROUP_ROOT:-/sys/fs/cgroup}"
+  local a b c d e f rest="" maxproc="" maxas="" maxres="" maps=0
+  local mmc="" tmax="" pidm="" cl="" cas="" cpath="" cgc="" chain="" lvl=0
+  local pcur="" pcap="" dir="" lims cans cres cms
+
+  # /proc/self/limits pads with spaces, and the soft limit is the third column of a
+  # two-word name and the fourth of a three-word one ("Max processes" vs "Max
+  # address space" / "Max resident set"). Reading a fixed number of fields and
+  # matching on the name, not on the column, is what keeps those apart.
+  while read -r a b c d e f; do
+    case "$a $b $c" in
+      "Max resident set")  maxres="$d" ;;
+      "Max address space") maxas="$d" ;;
+    esac
+    case "$a $b" in
+      "Max processes") maxproc="$c" ;;
+    esac
+  done 2>/dev/null < "$lim" || true
+  while read -r rest; do maps=$(( maps + 1 )); done 2>/dev/null < "$mapsf" || true
+
+  { read -r mmc  < "$sysd/vm/max_map_count"; }    2>/dev/null || mmc="?"
+  { read -r tmax < "$sysd/kernel/threads-max"; }  2>/dev/null || tmax="?"
+  { read -r pidm < "$sysd/kernel/pid_max"; }      2>/dev/null || pidm="?"
+
+  while read -r a b c d rest; do
+    case "$a" in
+      CommitLimit:)  cl="$b" ;;
+      Committed_AS:) cas="$b" ;;
+    esac
+  done 2>/dev/null < "$info" || true
+
+  # Number of processes, or the word the kernel uses when there is no ceiling.
+  case "${maxproc:-}" in ''|*[!0-9]*) lims="unlimited" ;; *) lims="$maxproc" ;; esac
+  case "${maxas:-}"   in ''|*[!0-9]*) cans="unlimited" ;; *) cans="$(( maxas / 1048576 )) MB" ;; esac
+  case "${maxres:-}"  in ''|*[!0-9]*) cres="unlimited" ;; *) cres="$(( maxres / 1048576 )) MB" ;; esac
+  # Committed_AS in MB of CommitLimit in MB: "of 0 MB" means the host has no
+  # overcommit accounting at all, which is the normal case.
+  case "${cl}${cas}" in
+    ''|*[!0-9]*) cms="not readable" ;;
+    *) cms="$(( cas / 1024 )) MB of $(( cl / 1024 )) MB" ;;
+  esac
+
+  { read -r cpath < "$cgf"; } 2>/dev/null || cpath=""
+  cpath="${cpath##*:}"
+  case "$cpath" in
+    ''|/) cgc="own namespace" ;;                 # nothing above us is visible from here
+    *)
+      cgc="$cpath"
+      dir="$croot$cpath"
+      while [ "$lvl" -lt 3 ]; do
+        [ "$dir" = "/" ] && break
+        dir="${dir%/*}"
+        [ -n "$dir" ] || dir="/"
+        # An ancestor with no pids interface is outside the cgroup tree this
+        # container can see - stop there instead of printing "?" at it.
+        [ -r "$dir/pids.current" ] || break
+        pcur=""; pcap=""
+        { read -r pcur < "$dir/pids.current"; } 2>/dev/null || pcur="?"
+        { read -r pcap < "$dir/pids.max"; }     2>/dev/null || pcap="?"
+        chain="$chain up:$pcur/$pcap"
+        lvl=$(( lvl + 1 ))
+      done
+      ;;
+  esac
+
+  printf 'ceiling: maxproc=%s maxas=%s maxres=%s maps=%s max_map_count=%s commit=%s threads-max=%s pid_max=%s cgroup=%s%s\n' \
+    "$lims" "$cans" "$cres" "$maps" "$mmc" "$cms" "$tmax" "$pidm" "$cgc" "$chain"
+  return 0
+}
+
 # Everything the container knows about why the terminal is not there, in one
 # place, printed for a human reading `docker logs`.
 #
@@ -885,7 +1003,15 @@ write_death_note() { # RC UPTIME_SECONDS
   if [ -n "${ERR_AT:-}" ]; then
     printf 'the command that failed last was: %s\n' "$ERR_AT" >> "$note" 2>/dev/null || true
   fi
-  mem_report >> "$note" 2>/dev/null || true
+  # What it could not START, which is the one that is filled in when the failure is
+  # a refused fork: bash exit(1)s straight out of that without ever reaching the ERR
+  # trap, so ERR_AT stays empty and this is the only record of the command that
+  # could not be given a process.
+  if [ -n "${LASTC:-}" ]; then
+    printf 'the command it could not start was: %s\n' "$LASTC" >> "$note" 2>/dev/null || true
+  fi
+  mem_report   >> "$note" 2>/dev/null || true
+  limits_report >> "$note" 2>/dev/null || true
   terminal_tails 2>/dev/null | tail -20 >> "$note" 2>/dev/null || true
   if [ -s "$note" ]; then
     tr -d '\000' < "$note" > "$note.tmp" 2>/dev/null \
@@ -1708,6 +1834,7 @@ main() {
   # the ceiling this container may use, what it is using, and what the host has
   # left. A boot that ends in `fork: Cannot allocate memory` is answered here.
   log "$(mem_report)"
+  log "$(limits_report)"
   mkdir -p "$MT5DIR"
   claim_volume
   write_lease
@@ -1727,6 +1854,19 @@ main() {
   launch_terminal
   wait_for_terminal
   report_isolation
+  # The ceiling AGAIN, and this is the reading that matters: the boot line above was
+  # taken when the container held 2 MB and 3 tasks, which is the one moment a fork
+  # cannot fail. Now wine's threads and terminal64's mappings exist, and a refused
+  # fork 200 ms from here is answered by this line and nothing else.
+  log "$(mem_report)"
+  log "$(limits_report)"
+  # Each watcher below forks at least twice (subshell, then tail/sed/sleep) and nine
+  # of them start inside 200 ms. Under `set -e` one refused fork took the whole
+  # container down while the terminal was healthy and the EA was loaded - the
+  # 2026-11-15 loop: `terminal64.exe is up`, then rc=1 with no "terminal exited" and
+  # no failing command, six boots in a row. A watcher that cannot start is a lost
+  # convenience; the terminal is the product and is not allowed to be collateral.
+  set +e
   lease_keeper &
   mirror_dir "MT5" "$MT5DIR/logs" &
   # The Experts tab: this is where the terminal writes WHY it unloaded the EA
@@ -1749,17 +1889,21 @@ main() {
   # follows the terminal process itself, because tearing the desktop down under a
   # live terminal is a boot loop, not a restart.
   local rc up
-  set +e
   wait_terminal_gone
   rc="${TERMINAL_RC:-0}"
-  set -e
-  up=$(( $(date +%s) - BOOT_EPOCH ))
+  # $SECONDS, not `$(date +%s)`: this line is reached only when the terminal is
+  # gone, which is also when the container may be unable to fork. The elapsed time
+  # is the one measurement that must not need a process to make.
+  up="$SECONDS"
   log "terminal64.exe exited (rc=$rc) after ${up}s - stopping the container"
   # Said out loud before the container goes away, and kept on the volume for the
   # boot that comes next: a container that dies in seconds is read after it is
   # gone, and /tmp goes with it.
   terminal_evidence
   write_death_note "$rc" "$up"
+  # set -e was released before the watchers started and is not re-armed on the way
+  # out: an exit path that can be interrupted by a limit is an exit path that leaves
+  # the terminal running under a dead entrypoint.
   if [ -n "$X11VNC_PID" ];    then kill "$X11VNC_PID"    2>/dev/null || true; fi
   if [ -n "$WEBSOCKIFY_PID" ]; then kill "$WEBSOCKIFY_PID" 2>/dev/null || true; fi
   if [ -n "$WM_PID" ];        then kill "$WM_PID"        2>/dev/null || true; fi
