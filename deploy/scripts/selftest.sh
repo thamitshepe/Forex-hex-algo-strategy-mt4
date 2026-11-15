@@ -391,6 +391,60 @@ check_contains "and the restart is logged with the MQL5 line that caused it" \
 check_not_contains "the restart itself is not a page (the DEINIT row already was)" \
   'hex_push "EA-RESTART"' "$(cat "$ENTRYPOINT")"
 
+# Every restart kills the terminal, so the container exits and Docker starts it
+# again on the same volume with a fresh process. The budget has to survive that,
+# or "6 automatic restarts" is unreachable and the loop simply continues - which
+# is exactly what the 2026-11-15 boot did, eleven times.
+echo "ea_watchdog: the restart budget outlives the container restart it causes"
+BD="$TMP/budget"; mkdir -p "$BD/logs"
+MT5DIR="$BD"
+WLOGS="$BD/logs"
+NEWEST="$BD/logs/20261115.log"
+printf '0\t03:40:41.000\tExperts\texpert HEX-FVG-Breaker (Volatility Boom 400 Index,M15) loaded successfully\n' > "$NEWEST"
+: > "$ACTIONS"
+out1="$(ew_run)"
+check_contains "the first boot counts attempt 1" "attempt 1/6" "$out1"
+out2="$(ew_run)"
+check_contains "the boot after it counts attempt 2, not attempt 1" "attempt 2/6" "$out2"
+check_contains "and says which incident it belongs to" "the EA left the chart" "$out2"
+MT5DIR="$TMP/mt5"
+
+echo "login_report: the terminal's own journal decides whether anything downstream can work"
+LR="$TMP/lr-logs"; mkdir -p "$LR"
+MT5_SERVER=TradeMaxGlobal-Demo; MT5_LOGIN=60169775
+load_fn "$ENTRYPOINT" login_report >/dev/null
+lr_run() { # DIR
+  ( sleep() { return 0; }
+    hex_push() { printf 'push %s\n' "$1"; }
+    login_report "$1" )
+}
+printf "0\t19:04:12.100\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo through Access Server 1\n" \
+  > "$LR/20261115.log"
+out="$(lr_run "$LR" 2>&1)"
+check_contains "an authorized terminal is reported as signed in, with the journal's own line" \
+  "login: OK - account 60169775 @ TradeMaxGlobal-Demo" "$out"
+check_eq "and nothing is pushed about it" "0" \
+  "$(printf '%s' "$out" | grep -c '^push' || true)"
+
+printf "0\t19:04:12.100\tNetwork\t'60169775': no connection to TradeMaxGlobal-Demo\n" \
+  > "$LR/20261115.log"
+out="$(lr_run "$LR" 2>&1)"
+check_contains "a refusal is reported as refused" "login: REFUSED - account 60169775" "$out"
+check_contains "quoting the line that refused it" "no connection to TradeMaxGlobal-Demo" "$out"
+check_contains "and it is pushed once" "push LOGIN" "$out"
+
+# The 2026-11-15 boot, verbatim: startup lines, the expert loads, MT5 deletes it two
+# minutes later - and not one Network line anywhere, because the terminal never tried.
+# Read as "the EA is broken" that boot looped eleven times.
+printf '0\t19:04:11.333\tStartup\tsuccessfully initialized from start config\n' > "$LR/20261115.log"
+printf '0\t19:04:34.780\tExperts\texpert HEX-FVG-Breaker (XAUUSD,M15) loaded successfully\n' >> "$LR/20261115.log"
+printf '0\t19:06:45.842\tExperts\tinitializing of HEX-FVG-Breaker (XAUUSD,M15) failed with code 0 (execution canceled)\n' >> "$LR/20261115.log"
+out="$(lr_run "$LR" 2>&1)"
+check_contains "a terminal that never tried to connect is named as such, not blamed on the EA" \
+  "login: NOT ATTEMPTED" "$out"
+check_contains "and the operator is told where to look at it" "port 6080" "$out"
+check_contains "and it is pushed once" "push LOGIN" "$out"
+
 echo "journal_hints: MetaQuotes' community login is not the broker login"
 JH="$TMP/jh-logs"; mkdir -p "$JH"
 MT5_SERVER=Deriv-Demo; MT5_LOGIN=41311895; MT5_INSTANCE=1
@@ -557,7 +611,7 @@ load_fn "$ENTRYPOINT" main >/dev/null
   repair_symbol_bases() { :; }; sync_ea() { :; }; compile_ea() { :; }
   ensure_single_chart() { :; }; write_mt5_ini() { :; }; launch_terminal() { :; }
   wait_for_terminal() { :; }; report_isolation() { :; }; lease_keeper() { :; }
-  mirror_dir() { :; }; journal_hints() { :; }; ea_watchdog() { :; }
+  mirror_dir() { :; }; journal_hints() { :; }; login_report() { :; }; ea_watchdog() { :; }
   desktop_keeper() { :; }; push_watcher() { :; }; alert_watcher() { :; }
   hex_push() { :; }
   wait_terminal_gone() { TERMINAL_RC=7; }   # the terminal died, rc 7

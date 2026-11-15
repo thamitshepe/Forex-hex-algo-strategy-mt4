@@ -1195,7 +1195,68 @@ mql_tail() {
     last="$f"
   done
   [ -n "$last" ] || { printf '%s' "no MQL5 log yet"; return 0; }
-  tail -n 3 "$last" 2>/dev/null | tr -d '\r' | tr '\n' ' '
+  # tr -d '\000': the Experts log can carry a NUL, and a command substitution
+  # that meets one prints "warning: ignored null byte in input" over the line
+  # the operator is trying to read (it did, on the 2026-11-15 19:06:50 boot).
+  tail -n 3 "$last" 2>/dev/null | tr -d '\000' | tr -d '\r' | tr '\n' ' '
+}
+
+# Did the terminal actually SIGN IN?
+# Everything downstream of a terminal that never authorized looks like a broken
+# EA: an empty Market Watch, a chart that never receives a tick, and MT5 deleting
+# the expert from that chart a couple of minutes later ("initializing of X failed
+# with code 0") - which is the 2026-11-15 restart loop, six boots of it. The proof
+# is one journal line ('authorized on <server>') buried under ~95k lines, and
+# nothing printed a verdict on it. This does, once per boot, and separates the
+# three cases that need three different fixes: signed in, refused, never tried.
+login_report() { # DIR
+  local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line
+  set +e
+  set +o pipefail
+  # Up to two minutes: a first login on a cold Wine terminal legitimately takes
+  # tens of seconds, and "never tried" is only an honest verdict after that.
+  while [ "$i" -lt 40 ] && [ -z "$verdict" ]; do
+    i=$((i + 1))
+    cur=""
+    for f in "$dir"/*.log; do
+      [ -f "$f" ] || continue
+      if [ -z "$cur" ] || [ "$(file_mtime "$f")" -ge "$(file_mtime "$cur")" ]; then
+        cur="$f"
+      fi
+    done
+    if [ -n "$cur" ]; then
+      # tr -d '\000' first: one NUL makes grep call the journal a binary file and
+      # print nothing, which would read as "never tried".
+      recent=$(tail -n 400 "$cur" 2>/dev/null | tr -d '\000')
+      case "$recent" in
+        *'authorized on'*) verdict=ok ;;
+        *'no connection'*|*'failed to connect'*|*'invalid server'*|*'authorization failed'*) verdict=refused ;;
+        *'wrong login'*|*'invalid account'*|*'account disabled'*|*'account banned'*) verdict=refused ;;
+      esac
+      if printf '%s\n' "$recent" | grep -q 'Network'; then tried=1; fi
+    fi
+    [ -n "$verdict" ] || sleep 3
+  done
+  local who="account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}"
+  case "$verdict" in
+    ok)
+      line=$(printf '%s\n' "$recent" | grep 'authorized on' | tail -1 | tr -d '\r')
+      log "login: OK - ${who}: $(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+      ;;
+    refused)
+      line=$(printf '%s\n' "$recent" | grep -iE 'no connection|failed to connect|invalid server|authorization failed|wrong login|invalid account|account disabled|account banned' | tail -1 | tr -d '\r')
+      log "login: REFUSED - ${who}: $(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+      hex_push "LOGIN" "MT5 refused to sign in: ${who}. The journal says: $(printf '%s' "$line" | sed 's/^[[:space:]]*//'). Check MT5_LOGIN / MT5_PASSWORD / MT5_SERVER in Dokploy - the server name has to match the broker's list character for character."
+      ;;
+    *)
+      if [ "$tried" -eq 1 ]; then
+        log "login: PENDING - ${who} - the terminal has Network lines but no 'authorized on' yet. Until that line appears the chart gets no ticks, and MT5 removes an expert from a chart with no data after a couple of minutes."
+      else
+        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not (this volume holds a terminal that came from another broker - the synthetic indices in Market Watch give it away). Open the VNC desktop once (port 6080) and look at the terminal, and set MT5_SERVER to the exact spelling from the broker's MT5 server list."
+        hex_push "LOGIN" "MT5 never tried to log in as ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}: no Network line at all, two minutes after boot. So the chart gets no data, the EA has nothing to trade, and MT5 deletes it - which is the restart loop. Open the VNC desktop once (port 6080) and look at the terminal, or set MT5_SERVER to the exact spelling from the broker's MT5 server list."
+      fi
+      ;;
+  esac
 }
 
 ea_watchdog() { # DIR
@@ -1206,8 +1267,19 @@ ea_watchdog() { # DIR
   # terminal for either. The offset lives in memory, so no counter on disk can
   # go stale and re-fire the same restart every few seconds.
   local dir="$1" cur="" off_file="" off=0 n f line tries=0 last=0 now
+  local budget="${MT5DIR:-/data/mt5}/.hex-ea-restarts"
   set +e
   set +o pipefail
+  # The budget lives on the VOLUME, not in this process: every restart below
+  # kills the terminal, and the container then exits (rc=143) and is started
+  # again by Docker with a fresh memory and the same disk. A counter that starts
+  # at zero on every boot can never reach 6 - which is how the 2026-11-15 loop
+  # ran eleven times while this function believed it had tried once.
+  if [ -f "$budget" ]; then
+    read -r tries last < "$budget" 2>/dev/null || true
+    case "$tries" in ''|*[!0-9]*) tries=0 ;; esac
+    case "$last"  in ''|*[!0-9]*) last=0 ;; esac
+  fi
   while :; do
     # The journal the terminal is WRITING, chosen by mtime. The glob alone is
     # sorted by name, and a name is not a time: a volume that also holds a
@@ -1245,6 +1317,7 @@ ea_watchdog() { # DIR
             [ "$last" -gt 0 ] && [ $((now - last)) -gt 600 ] && tries=0
             last="$now"
             tries=$((tries + 1))
+            printf '%s %s\n' "$tries" "$now" > "$budget" 2>/dev/null || true
             log "WATCHDOG: the EA left the chart (attempt $tries/6): $line"
             if [ "$tries" -le 6 ]; then
               # No push of its own: the EA's DEINIT row already told the phone it
@@ -1874,6 +1947,10 @@ main() {
   # nothing showed.
   mirror_dir "MQL5" "$MT5DIR/MQL5/Logs" nocsv &
   journal_hints "$MT5DIR/logs" &
+  # One verdict on the only thing that decides whether anything below can work:
+  # did the terminal sign in? See login_report for why silence here was read as
+  # "the EA is broken" for six boots.
+  login_report "$MT5DIR/logs" &
   ea_watchdog "$MT5DIR/logs" &
   desktop_keeper &
   push_watcher &

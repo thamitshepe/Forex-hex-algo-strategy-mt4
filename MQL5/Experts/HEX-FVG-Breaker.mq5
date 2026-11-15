@@ -35,7 +35,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Forex-hex-algo-strategy-mt4"
 #property link      "https://github.com/Manged3/Forex-hex-algo-strategy-mt4"
-#property version   "4.00"
+#property version   "4.01"
 #property strict
 #property description "Trend trading through Fair Value Gaps, confirmed by Breaker and Mitigation blocks."
 
@@ -192,6 +192,9 @@ string    g_lastSkipKey   = "";
 datetime  lastSkipAt      = 0;
 bool      g_tickStalled   = false;
 datetime  g_stallSince    = 0;
+bool      g_notReady      = false;  // cold terminal: no symbol data yet (not logged in)
+string    g_notReadyWhy   = "";
+datetime  g_lastNotReadyLog = 0;
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                           |
@@ -617,6 +620,7 @@ bool ClaimChart()
                    "refuses to start, so the two cannot trade the same account twice. The "
                    "container keeps exactly one chart; close the duplicate on the desktop.";
       LogEvent("ERROR", msg);
+      Print(Prefix, ": ERROR - duplicate chart refused - ", msg);
       Alert("HEX-FVG-Breaker: duplicate chart refused - " + msg);
       return(false);
      }
@@ -756,9 +760,48 @@ void RetrySubscribe()
 //+------------------------------------------------------------------+
 //| Init                                                               |
 //+------------------------------------------------------------------+
+// What the terminal can see right now. This one line is the difference
+// between "the EA is broken" and "the account never signed in" - and on a
+// fresh Wine volume that is exactly what a bootloop hides.
+string TerminalState()
+  {
+   return(StringFormat("connected=%d trade_allowed=%d algo=%d account=%d server=%s symbols=%d",
+          (int)TerminalInfoInteger(TERMINAL_CONNECTED),
+          (int)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED),
+          (int)MQLInfoInteger(MQL_TRADE_ALLOWED),
+          (int)AccountInfoInteger(ACCOUNT_LOGIN),
+          AccountInfoString(ACCOUNT_SERVER),
+          SymbolsTotal(false)));
+  }
+
+// Handles, retried instead of fatal.
+// A terminal that has not logged in yet has no data for the symbol, so
+// iATR/iMA answer INVALID_HANDLE. Returning INIT_FAILED for that makes MT5
+// REMOVE the expert - and a removed expert never trades again until someone
+// re-attaches it by hand. The watchdog then sees an empty chart, restarts the
+// terminal, the container restarts, and a login that would have sorted itself
+// out in half a minute becomes a loop that trades nothing. So: create what is
+// missing, report what cannot be created, and stay attached.
+bool EnsureHandles()
+  {
+   if(g_atrHandle == INVALID_HANDLE)
+      g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, 14);
+   if(g_emaFastH == INVALID_HANDLE)
+      g_emaFastH = iMA(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_emaSlowH == INVALID_HANDLE)
+      g_emaSlowH = iMA(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   return(g_atrHandle != INVALID_HANDLE && g_emaFastH != INVALID_HANDLE && g_emaSlowH != INVALID_HANDLE);
+  }
+
 int OnInit()
   {
    EnsureFolders();
+
+   // First line out, before anything can fail: if the journal shows this and
+   // nothing after it, the fault is below; if the journal shows "loaded
+   // successfully" and never this, the terminal never called OnInit at all.
+   Print(Prefix, ": OnInit on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()),
+         " | ", TerminalState());
 
    if(StringLen(TradeSymbol) > 0 && TradeSymbol != _Symbol)
      {
@@ -773,27 +816,38 @@ int OnInit()
 
    if(FastEMAPeriod >= SlowEMAPeriod)
      {
+      Print(Prefix, ": INPUT ERROR - FastEMAPeriod (", FastEMAPeriod, ") must be < SlowEMAPeriod (",
+            SlowEMAPeriod, ")");
       Alert(Prefix, ": FastEMAPeriod must be < SlowEMAPeriod");
       return(INIT_PARAMETERS_INCORRECT);
      }
    if(!UseFVG && !UseBreaker && !UseMitigation)
      {
+      Print(Prefix, ": INPUT ERROR - all three detectors are off, nothing to trade");
       Alert(Prefix, ": all three detectors are off - nothing to trade.");
       return(INIT_PARAMETERS_INCORRECT);
      }
 
    // Indicators as HANDLES: MQL5 has no iATR(shift) call, and a handle created in
    // OnInit is what the tester can precompute (one made inside OnTick would
-   // rebuild history on every tick).
-   ENUM_TIMEFRAMES ttf = (ENUM_TIMEFRAMES)TrendTimeframe;
-   g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, 14);
-   g_emaFastH  = iMA(_Symbol, ttf, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   g_emaSlowH  = iMA(_Symbol, ttf, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_atrHandle == INVALID_HANDLE || g_emaFastH == INVALID_HANDLE || g_emaSlowH == INVALID_HANDLE)
+   // rebuild history on every tick). See EnsureHandles() for why a missing
+   // handle is NOT a reason to return INIT_FAILED.
+   if(!EnsureHandles())
      {
-      Alert(Prefix, ": could not create the ATR/EMA handles (err ", GetLastError(), ")");
-      return(INIT_FAILED);
+      g_notReady        = true;
+      g_notReadyWhy     = "no " + _Symbol + " data yet (" + TerminalState() + ")";
+      g_lastNotReadyLog = TimeLocal();
+      Print(Prefix, ": NOT READY - ", g_notReadyWhy,
+            " - the chart is attached but the terminal cannot see this symbol yet");
+      Print(Prefix, ": NOT READY - staying attached and retrying every minute. MT5 REMOVES an");
+      Print(Prefix, ": NOT READY - expert whose OnInit fails, so failing here is what turns a");
+      Print(Prefix, ": NOT READY - login that is still in progress into a restart loop.");
+      LogEvent("ERROR", "NOT READY - " + g_notReadyWhy +
+               " - check MT5_LOGIN/MT5_PASSWORD/MT5_SERVER and that the account is authorized");
      }
+   else
+      Print(Prefix, ": handles ok (atr=", g_atrHandle, " ema", FastEMAPeriod, "=", g_emaFastH,
+            " ema", SlowEMAPeriod, "=", g_emaSlowH, ")");
 
    if(!ClaimChart())
       return(INIT_FAILED);
@@ -818,14 +872,14 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.0 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
+   Print(Prefix, " v4.01 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
    // What this chart can actually SEE - before anything claims it is healthy.
    EnsureSubscribed();
 
-   LogEvent("INIT", StringFormat("v4.0 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   LogEvent("INIT", StringFormat("v4.01 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
             _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
@@ -960,6 +1014,26 @@ void OnTimer()
    RefreshClaim();
    if(g_lastHeartbeat == 0 || TimeLocal() - g_lastHeartbeat >= InpHeartbeatSec)
       WriteHeartbeat();
+
+   // A terminal that was still logging in when this chart opened: retry the
+   // handles once a minute, and say so when they arrive - that is the moment
+   // the EA starts trading, so it belongs in the CSV, not only in the journal.
+   if(g_notReady)
+     {
+      if(EnsureHandles())
+        {
+         g_notReady = false;
+         Print(Prefix, ": READY - ", _Symbol, " has data now (", TerminalState(), ")");
+         LogEvent("INIT", StringFormat("READY - recovered after %dm: %s",
+                  (int)((TimeLocal() - g_startedAt) / 60), TerminalState()));
+         ComputePointEquivalents(g_atr);
+        }
+      else if(g_lastNotReadyLog == 0 || TimeLocal() - g_lastNotReadyLog >= 300)
+        {
+         g_lastNotReadyLog = TimeLocal();
+         Print(Prefix, ": still NOT READY - ", g_notReadyWhy);
+        }
+     }
 
    if(InpTickStallSec <= 0) return;
    int idle = SecondsSinceTick();
@@ -2674,7 +2748,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.0  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
+   s += Prefix + " FVG-Breaker v4.01  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";
