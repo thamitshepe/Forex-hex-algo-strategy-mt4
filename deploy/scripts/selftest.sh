@@ -451,6 +451,54 @@ out="$(lr_run "$LR" 2>&1)"
 check_contains "and it names the servers this terminal tree actually knows" \
   "Servers this tree knows: Deriv-Demo MetaQuotes-Demo" "$out"
 
+echo "ea_watchdog: an EA that fails its OWN init does not get the container restarted forever"
+# The 2026-11-15 20:15 boot: "initializing of HEX-FVG-Breaker (XAUUSD,M15) failed
+# with code 0 (execution canceled)" then "expert ... removed", the watchdog killed
+# the terminal, the container went with it - and took the login the operator had
+# just typed in on the VNC desktop. One retry is fair (an init can fail because the
+# terminal was still starting); a second restart is a loop, so it stands still.
+IDIR="$TMP/init-logs"; mkdir -p "$IDIR"
+MT5DIR="$TMP/init-budget"; mkdir -p "$MT5DIR"
+WLOGS="$IDIR"
+NEWEST="$IDIR/20261115.log"
+printf '0\t20:12:10.417\tExperts\texpert HEX-FVG-Breaker (XAUUSD,M15) loaded successfully\n' > "$NEWEST"
+ACT="$TMP/init-actions"
+iw_run() {
+  ( i=0
+    sleep() {
+      case "${1:-}" in
+        5) i=$((i + 1))
+           if [ "$i" -eq 1 ]; then
+             printf '2\t20:15:19.046\tExperts\tinitializing of HEX-FVG-Breaker (XAUUSD,M15) failed with code 0 (execution canceled)\n' >> "$NEWEST"
+             printf '0\t20:15:19.053\tExperts\texpert HEX-FVG-Breaker (XAUUSD,M15) removed\n' >> "$NEWEST"
+           fi
+           [ "$i" -ge 3 ] && exit 0
+           ;;
+      esac
+      return 0
+    }
+    kill() { printf 'kill %s\n' "$1" >> "$ACT"; }
+    hex_push() { printf 'push %s\n' "$1" >> "$ACT"; }
+    mql_tail() { printf 'mql'; }
+    TERMINAL_PID=5555
+    ea_watchdog "$WLOGS" )
+}
+: > "$ACT"
+out1="$(iw_run)"
+check_contains "the first init failure does get one terminal restart" "attempt 1/6" "$out1"
+check_eq "and it kills the terminal once" "1" "$(grep -c '^kill 5555' "$ACT" || true)"
+check_eq "with no page of its own (the EA's own row already was one)" "0" \
+  "$(grep -c '^push EA-INIT' "$ACT" || true)"
+: > "$ACT"
+out2="$(iw_run)"
+check_not_contains "the next one does not restart the terminal" \
+  "restarting the terminal to re-attach" "$out2"
+check_contains "it says the restart would reproduce it" "reproduces that byte for byte" "$out2"
+check_contains "and that the login goes with the container" "throws away the account login" "$out2"
+check_eq "and nothing is killed" "0" "$(grep -c '^kill 5555' "$ACT" || true)"
+check_eq "and it is pushed once" "1" "$(grep -c '^push EA-INIT' "$ACT" || true)"
+MT5DIR="$TMP/mt5"
+
 echo "journal_hints: MetaQuotes' community login is not the broker login"
 JH="$TMP/jh-logs"; mkdir -p "$JH"
 MT5_SERVER=Deriv-Demo; MT5_LOGIN=41311895; MT5_INSTANCE=1

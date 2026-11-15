@@ -1270,7 +1270,7 @@ ea_watchdog() { # DIR
   # removed" line, whose reason is written only to the MQL5 log. Restart the
   # terminal for either. The offset lives in memory, so no counter on disk can
   # go stale and re-fire the same restart every few seconds.
-  local dir="$1" cur="" off_file="" off=0 n f line tries=0 last=0 now
+  local dir="$1" cur="" off_file="" off=0 n f line tries=0 last=0 now initfail=0
   local budget="${MT5DIR:-/data/mt5}/.hex-ea-restarts"
   set +e
   set +o pipefail
@@ -1324,6 +1324,24 @@ ea_watchdog() { # DIR
             printf '%s %s\n' "$tries" "$now" > "$budget" 2>/dev/null || true
             log "WATCHDOG: the EA left the chart (attempt $tries/6): $line"
             if [ "$tries" -le 6 ]; then
+              # A removal that MT5 pairs with "initializing of … failed" is the EA
+              # refusing its own OnInit - and restarting the terminal reproduces it
+              # exactly. The 2026-11-15 20:15 boot proved it: the expert had failed
+              # to init, the watchdog killed the terminal over it, that restart threw
+              # away the login the operator had just typed in on the VNC desktop, and
+              # the next boot did the same thing again. One retry (an init CAN fail
+              # because the terminal was still starting), then stand still and say
+              # why - a container that stays up with an empty chart is debuggable, a
+              # loop is not.
+              initfail=0
+              if tail -n 40 "$cur" 2>/dev/null | tr -d '\000' | grep -q 'initializing of .*failed'; then
+                initfail=1
+              fi
+              if [ "$initfail" -eq 1 ] && [ "$tries" -gt 1 ]; then
+                log "WATCHDOG: not restarting the terminal (attempt $tries): the EA failed its own OnInit, and a restart of the terminal reproduces that byte for byte - it also throws away the account login. The container stays up; the journal says why. MQL5 log: $(mql_tail)"
+                hex_push "EA-INIT" "the EA failed its own OnInit on ${MT5_SYMBOL} and MT5 removed it from the chart. Restarting the terminal reproduces exactly that, so the terminal is left running this time - the container is up and the chart is empty. MQL5 log: $(mql_tail) Open the VNC desktop, or read login: in the boot log."
+                continue
+              fi
               # No push of its own: the EA's DEINIT row already told the phone it
               # left the chart, WITH the reason, and one page per attempt here was
               # the third source of repeats for a single incident.
