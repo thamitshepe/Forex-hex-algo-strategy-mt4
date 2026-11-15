@@ -444,6 +444,12 @@ check_contains "a terminal that never tried to connect is named as such, not bla
   "login: NOT ATTEMPTED" "$out"
 check_contains "and the operator is told where to look at it" "port 6080" "$out"
 check_contains "and it is pushed once" "push LOGIN" "$out"
+# The tree's own server list is what decides whether a login is even possible, so
+# the line names it instead of asking the operator to guess a spelling.
+mkdir -p "$TMP/mt5/bases/Deriv-Demo" "$TMP/mt5/bases/MetaQuotes-Demo"
+out="$(lr_run "$LR" 2>&1)"
+check_contains "and it names the servers this terminal tree actually knows" \
+  "Servers this tree knows: Deriv-Demo MetaQuotes-Demo" "$out"
 
 echo "journal_hints: MetaQuotes' community login is not the broker login"
 JH="$TMP/jh-logs"; mkdir -p "$JH"

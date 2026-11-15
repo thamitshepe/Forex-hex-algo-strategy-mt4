@@ -1252,8 +1252,12 @@ login_report() { # DIR
       if [ "$tried" -eq 1 ]; then
         log "login: PENDING - ${who} - the terminal has Network lines but no 'authorized on' yet. Until that line appears the chart gets no ticks, and MT5 removes an expert from a chart with no data after a couple of minutes."
       else
-        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not (this volume holds a terminal that came from another broker - the synthetic indices in Market Watch give it away). Open the VNC desktop once (port 6080) and look at the terminal, and set MT5_SERVER to the exact spelling from the broker's MT5 server list."
-        hex_push "LOGIN" "MT5 never tried to log in as ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}: no Network line at all, two minutes after boot. So the chart gets no data, the EA has nothing to trade, and MT5 deletes it - which is the restart loop. Open the VNC desktop once (port 6080) and look at the terminal, or set MT5_SERVER to the exact spelling from the broker's MT5 server list."
+        local known=""
+        if [ -d "${MT5DIR:-/data/mt5}/bases" ]; then
+          known=$(ls -1 "${MT5DIR:-/data/mt5}/bases" 2>/dev/null | head -6 | tr '\n' ' ')
+        fi
+        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not. Servers this tree knows: ${known:-<none listed>} - a broker that is not in that list needs its own terminal tree (MT5_DISTRO_URL, §4C) or one manual login on the VNC desktop (port 6080) before the .ini can keep it."
+        hex_push "LOGIN" "MT5 never tried to log in as ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}: no Network line at all, two minutes after boot. So the chart gets no data, the EA has nothing to trade, and MT5 deletes it - which is the restart loop. Servers this terminal tree knows: ${known:-<none listed>}. If your broker is not in that list, open the VNC desktop once (port 6080) and add it, or reseed the volume with a distro built from that broker's own terminal."
       fi
       ;;
   esac
