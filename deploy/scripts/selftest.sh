@@ -449,9 +449,14 @@ check_contains "and it is pushed once" "push LOGIN" "$out"
 # The tree's own server list is what decides whether a login is even possible, so
 # the line names it instead of asking the operator to guess a spelling.
 mkdir -p "$TMP/mt5/bases/Deriv-Demo" "$TMP/mt5/bases/MetaQuotes-Demo"
+# MT5 also parks loose .dat files in Bases/ (alerts.dat, books.dat, ...). They are
+# not servers, and on 2026-11-16 they were listed as if they were:
+# "Servers this tree knows: Custom Default Deriv-Demo alerts.dat books.dat ...".
+: > "$TMP/mt5/bases/alerts.dat"
 out="$(lr_run "$LR" 2>&1)"
 check_contains "and it names the servers this terminal tree actually knows" \
   "Servers this tree knows: Deriv-Demo MetaQuotes-Demo" "$out"
+check_not_contains "and a loose .dat in Bases/ is not mistaken for a server" "alerts.dat" "$out"
 # 2026-11-16, the boot that made this a rule: the account was TradeMaxGlobal-Demo,
 # the tree was a Deriv one, and the terminal never dialled - not one Network line -
 # so the chart never got a tick and MT5 deleted the expert. The journal cannot
@@ -572,6 +577,16 @@ printf "2\t03:38:30.000\tNetwork\t'41311895': authorization failed\n" >> "$JH/20
 out="$(jh_run "$JH" "$TMP/jh-state-b" 2>&1)"
 check_contains "a broker refusal that names the account still gets the hint" \
   "refused login" "$out"
+# 2026-11-16, the line that answered the whole session - and produced no hint,
+# because MT5 capitalised it: "authorization on <server> failed (Invalid account)"
+# matches neither "authorization failed" nor "invalid account" case-sensitively.
+printf "2\\t09:28:34.359\\tNetwork\\t'60169775': authorization on TradeMaxGlobal-Demo failed (Invalid account)\\n" >> "$JH/20261106.log"
+out="$(jh_run "$JH" "$TMP/jh-state-c" 2>&1)"
+check_contains "a refusal worded 'authorization on <server> failed' is still a refusal" \
+  "refused login" "$out"
+check_contains "and it quotes the server's own verdict" "Invalid account" "$out"
+check_contains "and says plainly that a dead account is not a container fault" \
+  "nothing here can make a dead account live" "$out"
 
 echo "hex_push: a boot loop cannot burn the topic's quota"
 MT5DIR="$TMP/push"; mkdir -p "$MT5DIR"

@@ -35,7 +35,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Forex-hex-algo-strategy-mt4"
 #property link      "https://github.com/Manged3/Forex-hex-algo-strategy-mt4"
-#property version   "4.01"
+#property version   "4.02"
 #property strict
 #property description "Trend trading through Fair Value Gaps, confirmed by Breaker and Mitigation blocks."
 
@@ -195,6 +195,23 @@ datetime  g_stallSince    = 0;
 bool      g_notReady      = false;  // cold terminal: no symbol data yet (not logged in)
 string    g_notReadyWhy   = "";
 datetime  g_lastNotReadyLog = 0;
+
+// Indicator reads are cached per bar, and asked for only when the series is long
+// enough to answer (see IndRead). Two reasons, both from 2026-11-16:
+//  (1) MT5 writes a journal line for EVERY failed CopyBuffer on a series that is
+//      still being downloaded - "cannot load ..." - and the H1 EMAs are read on
+//      every tick, so a cold H1 series became a wall of repeating errors that
+//      buried the one line that mattered. One retry per five minutes is the most
+//      this needs; the cache makes the other ticks free.
+//  (2) A closed bar's indicator value never changes. Recomputing it twenty times
+//      per tick is waste, and it is waste on the thread that also sends orders.
+#define HEX_IND_SLOTS 12
+int       g_icHandle[HEX_IND_SLOTS];
+int       g_icShift[HEX_IND_SLOTS];
+datetime  g_icBar[HEX_IND_SLOTS];
+double    g_icVal[HEX_IND_SLOTS];
+bool      g_icValid[HEX_IND_SLOTS];
+datetime  g_lastIndWarn = 0;
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                           |
@@ -872,14 +889,14 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.01 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
+   Print(Prefix, " v4.02 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
    // What this chart can actually SEE - before anything claims it is healthy.
    EnsureSubscribed();
 
-   LogEvent("INIT", StringFormat("v4.01 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   LogEvent("INIT", StringFormat("v4.02 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
             _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
@@ -1190,23 +1207,70 @@ double   Cl(int shift) { return(iClose(_Symbol, PERIOD_CURRENT, shift)); }
 datetime Bt(int shift) { return(iTime(_Symbol, PERIOD_CURRENT, shift));  }
 int      BarsAvail()   { return(Bars(_Symbol, PERIOD_CURRENT));          }
 
+// A series that is not there yet: say so once per five minutes, with the numbers
+// that make it checkable, and ask the terminal for the history while we are here
+// (CopyRates is what starts the download of a timeframe the chart never requested).
+void IndNotReady(const ENUM_TIMEFRAMES tf, const int handle, const int shift)
+  {
+   if(g_lastIndWarn > 0 && TimeLocal() - g_lastIndWarn < 300) return;
+   g_lastIndWarn = TimeLocal();
+   MqlRates r[];
+   CopyRates(_Symbol, tf, 0, 300, r);
+   int err = GetLastError();
+   Print(Prefix, ": waiting for ", EnumToString(tf), " history on ", _Symbol,
+         " - needed ", shift + 2, " indicator values, BarsCalculated=", BarsCalculated(handle),
+         ", bars on ", EnumToString(tf), "=", iBars(_Symbol, tf),
+         ", err=", err,
+         ". The download starts here; no entry is skipped silently while it runs.");
+  }
+
+// One indicator value, cached per bar, asked for only when it can be answered.
+// MT5 logs a journal line for every failed CopyBuffer on a series that is still
+// downloading, and a strategy that reads the H1 EMAs on every tick turns one cold
+// series into a repeating wall of "cannot load ..." (2026-11-16, first live
+// session). So: nothing is asked twice per bar, nothing is asked at all while the
+// series is too short, and the one line that explains the wait comes out every
+// five minutes instead of every tick.
+double IndRead(const int handle, const ENUM_TIMEFRAMES tf, const int shift)
+  {
+   if(handle == INVALID_HANDLE || shift < 0) return(0.0);
+   datetime bar = iTime(_Symbol, tf, shift);
+   if(bar == 0) return(0.0);                 // that bar does not exist yet
+   int slot = (handle + shift) % HEX_IND_SLOTS;
+   if(slot < 0) slot = -slot;
+   // Validated on read: a slot collision costs a recompute, never a wrong value.
+   if(g_icValid[slot] && g_icHandle[slot] == handle && g_icShift[slot] == shift &&
+      g_icBar[slot] == bar)
+      return(g_icVal[slot]);
+   if(BarsCalculated(handle) < shift + 2)
+     {
+      IndNotReady(tf, handle, shift);
+      return(0.0);
+     }
+   double b[];
+   ArraySetAsSeries(b, true);
+   if(CopyBuffer(handle, 0, 0, shift + 2, b) < shift + 1)
+     {
+      IndNotReady(tf, handle, shift);
+      return(0.0);
+     }
+   g_icValid[slot]  = true;
+   g_icHandle[slot] = handle;
+   g_icShift[slot]  = shift;
+   g_icBar[slot]    = bar;
+   g_icVal[slot]    = b[shift];
+   return(g_icVal[slot]);
+  }
+
 // ATR of the chart timeframe, by shift, from the handle made in OnInit.
 double AtrVal(int shift)
   {
-   if(g_atrHandle == INVALID_HANDLE || shift < 0) return(0.0);
-   double b[];
-   ArraySetAsSeries(b, true);
-   if(CopyBuffer(g_atrHandle, 0, 0, shift + 2, b) < shift + 1) return(0.0);
-   return(b[shift]);
+   return(IndRead(g_atrHandle, PERIOD_CURRENT, shift));
   }
 
 double Ema(int handle, int shift)
   {
-   if(handle == INVALID_HANDLE || shift < 0) return(0.0);
-   double b[];
-   ArraySetAsSeries(b, true);
-   if(CopyBuffer(handle, 0, 0, shift + 1, b) < shift + 1) return(0.0);
-   return(b[shift]);
+   return(IndRead(handle, (ENUM_TIMEFRAMES)TrendTimeframe, shift));
   }
 
 double BodySize(int shift)   { return(MathAbs(Cl(shift) - Op(shift))); }
@@ -1619,6 +1683,22 @@ int DetermineTrend()
    double slowNow = Ema(g_emaSlowH, 1);
    double fastOld = Ema(g_emaFastH, 1 + TrendSlopeBars);
    double slowOld = Ema(g_emaSlowH, 1 + TrendSlopeBars);
+
+   // A zero price on a gold chart is not a price: it is an EMA that has no value
+   // yet, because the trend timeframe is still downloading (IndNotReady has
+   // already put the numbers in the journal). Write it to the CSV as one throttled
+   // SKIP row as well, so "why no trade" is answerable without the journal.
+   if(fastNow <= 0.0 || slowNow <= 0.0 || fastOld <= 0.0 || slowOld <= 0.0)
+     {
+      LogSkip("ema-no-data",
+              StringFormat("%s EMA%d/%d on %s has no value yet (bars on %s=%d) - no trend, no entry",
+                           _Symbol, FastEMAPeriod, SlowEMAPeriod,
+                           EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
+                           EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
+                           iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe)));
+      g_trendMsg = "ema=no-data";
+      return(0);
+     }
 
    // EMA direction requires the fast line above the slow AND both rising/falling:
    // a flat stack is a range, and ranges are where gap strategies bleed.
@@ -2748,7 +2828,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.01  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
+   s += Prefix + " FVG-Breaker v4.02  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";

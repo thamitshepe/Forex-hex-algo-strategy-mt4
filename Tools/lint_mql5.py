@@ -86,6 +86,7 @@ StringToCharArray StringToShortArray StringGetCharacter CharToString StringConca
 TimeCurrent TimeLocal TimeToStruct StructToTime TimeToString StringToTime PeriodSeconds Period
 Bars iBars iBarShift iTime iOpen iHigh iLow iClose iTickVolume iRealVolume iSpread iHighest iLowest
 iATR iMA iRSI iMACD iStochastic iBands iADX IndicatorRelease CopyBuffer CopyRates CopyTime CopyClose
+BarsCalculated
 CopyHigh CopyLow CopyOpen ArrayResize ArraySize ArraySetAsSeries ArrayCopy ArrayInitialize
 AccountInfoDouble AccountInfoInteger AccountInfoString AccountCurrency
 SymbolInfoDouble SymbolInfoInteger SymbolInfoString SymbolInfoTick SymbolSelect SymbolIsSynchronized

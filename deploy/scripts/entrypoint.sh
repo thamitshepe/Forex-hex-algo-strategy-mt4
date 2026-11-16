@@ -1139,7 +1139,7 @@ mirror_dir() {
 #   "wrong login or password"/"auth failed" -> credentials
 #   "invalid server data"                   -> server name spelling
 journal_hints() { # DIR
-  local dir="$1" state="${TMPDIR:-/tmp}/hex-hints" f n s p key lead line
+  local dir="$1" state="${TMPDIR:-/tmp}/hex-hints" f n s p key lead line lc
   set +e
   set +o pipefail
   mkdir -p "$state" 2>/dev/null || true
@@ -1164,16 +1164,21 @@ journal_hints() { # DIR
           # operator to retype a password that was never wrong (and the pushes
           # it spends are the alerts they did not get).
           case "$line" in *MQL5.community*) continue ;; esac
-          case "$line" in
+          # Lowercased once: MT5 capitalises where it likes - "authorization on
+          # TradeMaxGlobal-Demo failed (Invalid account)" on 2026-11-16 matched
+          # neither "authorization failed" nor "invalid account" and so produced no
+          # hint at all, on the one line that answered the whole session.
+          lc="$(printf '%s' "$line" | tr 'A-Z' 'a-z')"
+          case "$lc" in
             *"no connection"*|*"failed to connect"*)
               key=connect
-              lead="the terminal could not reach ${MT5_SERVER:-the server} with login ${MT5_LOGIN:-<none>}. This tree came from one broker's terminal - a server name it has never seen fails exactly like this, right password or not. Open the desktop (VNC) once and add the server through File -> Open an Account, or reseed with a distro prepared from a Deriv MT5 terminal." ;;
-            *"wrong login"*|*"authorization failed"*|*"auth failed"*)
+              lead="the terminal could not open a socket to ${MT5_SERVER:-the server} for ${MT5_LOGIN:-<none>}. If the same run also logs 'authorization on …' the socket opened on a later attempt and this line was transient; if it never does, nothing is reachable at that name from this host. This is NOT 'invalid account' - a refused password needs a socket that worked." ;;
+            *"authorization on"*"failed"*|*"authorization failed"*|*"wrong login"*|*"auth failed"*|*"invalid account"*)
               key=account
-              lead="the broker answered and refused login ${MT5_LOGIN:-<none>} - wrong number or password, or the demo account has expired. Check MT5_PASSWORD${MT5_INSTANCE} character by character (a trailing space counts) and whether the demo is still open." ;;
+              lead="the broker WAS reached and it refused login ${MT5_LOGIN:-<none>} on ${MT5_SERVER:-this server}: $(printf '%s' "$line" | sed 's/.*failed *(//; s/).*$//'). MT5 says 'Invalid account' for a wrong number AND for a deleted one - an unused demo is deleted by the broker after a few weeks, and a number that belongs to another server is refused the same way. Check the number and password in the broker's portal (or open a fresh demo) before changing anything in this container; nothing here can make a dead account live." ;;
             *"invalid server"*)
               key=server
-              lead="the broker has no server called ${MT5_SERVER:-<none>} - take the exact spelling from Deriv's MT5 server list (e.g. Deriv-Demo)." ;;
+              lead="the broker has no server called ${MT5_SERVER:-<none>} - take the exact spelling from its login dialog, character for character." ;;
             *"account disabled"*|*"account banned"*)
               key=disabled
               lead="the broker has disabled ${MT5_LOGIN:-<none>}. Nothing in this container can undo that; it has to be re-enabled in the broker's portal." ;;
@@ -1269,7 +1274,7 @@ servers_known() { # DIR
   local base names seen=" " out="" n
   for base in "$1/Bases" "$1/bases"; do
     [ -d "$base" ] || continue
-    names="$(cd "$base" 2>/dev/null && ls -1 2>/dev/null)"
+    names="$(cd "$base" 2>/dev/null && ls -d */ 2>/dev/null | sed 's:/$::')"
     for n in $names; do
       case "$seen" in *" $n "*) continue ;; esac
       seen="$seen$n "
@@ -1315,7 +1320,7 @@ server_addressed() { # DIR SERVER
 # nothing printed a verdict on it. This does, once per boot, and separates the
 # three cases that need three different fixes: signed in, refused, never tried.
 login_report() { # DIR
-  local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line addressed=0
+  local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line addressed=0 wiped=""
   set +e
   set +o pipefail
   # BEFORE the two-minute wait, and before anyone reads the journal: is the
@@ -1339,7 +1344,7 @@ login_report() { # DIR
          fi
          ;;
       *) log "login: WARNING - MT5_SERVER=$MT5_SERVER is NOT one of the servers this terminal tree knows (${known% })"
-         log "login: WARNING - this tree is ONE broker's installer, and a name it has never seen is never dialled - not with the right password either. The chart then waits for data that cannot arrive and MT5 deletes the expert ('code 0 (execution canceled)'), which reads like an EA bug and is a data bug. Fix: MT5_SERVER set to one of the names above, or add the broker once on the VNC desktop (File -> Open an Account), or rebuild the tree from that broker's own installer. DEPLOY.md 6b" ;;
+         log "login: WARNING - this tree has no data directory for that server yet. MT5 does not dial such a name at boot, so the .ini login produces NO Network line - and until the name is in Bases/ there are no symbols and no ticks either, so the chart cannot be fed and MT5 deletes the expert ('code 0 (execution canceled)'), which reads like an EA bug and is a data bug. A login typed into the desktop dialog CAN still reach it (the journal then says 'authorization on …'), so the journal, not this line, decides whether the account itself is refused. Fix: add the broker once on the VNC desktop (File -> Open an Account), or rebuild the tree from the broker's own installer (MT5_FORCE_SEED=1 + MT5_SETUP_URL). DEPLOY.md 6b" ;;
     esac
   fi
 
@@ -1382,7 +1387,16 @@ login_report() { # DIR
       if [ "$tried" -eq 1 ]; then
         log "login: PENDING - ${who} - the terminal has Network lines but no 'authorized on' yet. Until that line appears the chart gets no ticks, and MT5 removes an expert from a chart with no data after a couple of minutes."
       else
-        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not. Servers this tree knows: ${known:-<none listed>} - a broker that is not in that list needs its own terminal tree (MT5_FORCE_SEED=1 + MT5_SETUP_URL, §6b) or one manual login on the VNC desktop (port 6080) before the .ini can keep it."
+        # "deleted due security reason" is the other half of a silent boot: MT5
+        # threw the cached account away before it applied the [Common] login, so
+        # there is nothing to apply it to and nothing to read. On 2026-11-16 that
+        # line and the empty journal were 40 lines apart in the same file.
+        wiped=""
+        case "$recent" in
+          *'deleted due security reason'*)
+            wiped=" MT5 also logged 'Accounts deleted due security reason' at startup - it discarded the cached account, and this run's [Common] login then had no account to apply itself to, which is why no Network line follows it. One manual login on the desktop (File -> Login to Trade Account) writes that account back to the volume, after which the .ini can keep it." ;;
+        esac
+        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not. Servers this tree knows: ${known:-<none listed>} - a broker that is not in that list needs its own terminal tree (MT5_FORCE_SEED=1 + MT5_SETUP_URL, §6b) or one manual login on the VNC desktop (port 6080) before the .ini can keep it.${wiped}"
         hex_push "LOGIN" "MT5 never tried to log in as ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}: no Network line at all, two minutes after boot. So the chart gets no data, the EA has nothing to trade, and MT5 deletes it - which is the restart loop. Servers this terminal tree knows: ${known:-<none listed>}. If your broker is not in that list, open the VNC desktop once (port 6080) and add it, or reseed the volume with a distro built from that broker's own terminal."
       fi
       ;;
