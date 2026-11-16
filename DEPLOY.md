@@ -595,7 +595,11 @@ then:
 
 - **Provider → Docker**: image `ghcr.io/thamitshepe/forex-hex-mt5:live`. The package
   is public only once it has been flipped to Public (§2), so check that first;
-  the registry credentials stay empty when it is.
+  the registry credentials stay empty when it is. This route re-pulls on every
+  deploy; the compose route only does when the **stored** YAML still carries
+  `pull_policy: always` — an app made from a copy pasted before that line existed
+  keeps re-creating the container from the cached image and reports a successful
+  deploy of a build it never pulled (2026-11-15: three commits behind, twice).
 - **Environment**: paste this, with your own demo account and a VNC password.
 
 ```dotenv
@@ -619,7 +623,7 @@ TZ=UTC
 **This route is one instance per application.** A Docker-Image application runs one
 container from one image, so it can hold `trade.thami.dev` *or* `trade2.thami.dev`,
 not both. Two accounts on two hostnames is a second application from the same image
-with its own volume, its own domain and the `MT4_INSTANCE=2` half of the env file —
+with its own volume, its own domain and the `MT5_INSTANCE=2` half of the env file —
 §“A second instance” below, whose steps are the ones above repeated with the `2`
 values. **Give the second application a different volume name.**
 - **Advanced → Restart Policy**: `Any`.
@@ -630,10 +634,10 @@ values. **Give the second application a different volume name.**
 - **Security** (recommended): basic auth on that domain. It is a trading terminal on a
   public hostname, and the VNC password would otherwise be the only lock.
 
-Then **Deploy**. The first start downloads the tarball (36 MB, once — it lands in the
-volume), compiles the EA with the container's own `metaeditor.exe`, logs the account
-in from `MT4_LOGIN`/`MT4_PASSWORD`, and prints `terminal.exe is up`. §7 is what to
-look at. `uname -m` on the VPS must say `x86_64`: the image is built for
+Then **Deploy**. The first start downloads the terminal tree (112 MB, once — it lands
+in the volume), compiles the EA with the container's own `metaeditor64.exe`, logs the
+account in from `MT5_LOGIN`/`MT5_PASSWORD`, and prints `terminal64.exe is up`. §7 is
+what to look at. `uname -m` on the VPS must say `x86_64`: the image is built for
 `linux/amd64` only.
 
 **What this route cannot set, and why the compose file still exists.** Dokploy's
@@ -642,10 +646,13 @@ Dokploy's source, and the compose route works only because it hands raw YAML to
 `docker compose`, which is what understands those keys. Neither is usually fatal —
 Wine wants `SYS_PTRACE` only to attach a debugger, and 64 MB of `/dev/shm` carries a
 1440x900 screen most of the time — but both fail as things that look like a broken
-EA, so the entrypoint reports them at boot:
+EA, so the boot prints both, read from `/proc`, next to the memory lines:
 
-    shm          : 64 MB (enough for Xvfb + Wine)     |  or the WARN that says otherwise
-    CAP_SYS_PTRACE: present                           |  or the WARN that says absent
+```
+runtime: /dev/shm=512 MB cap_sys_ptrace=yes     ← the compose route, as it should read
+runtime: /dev/shm=64 MB (64 MB is Docker's default and it is not enough - no compose file, no shm_size) cap_sys_ptrace=no
+                                                ← a Docker-Image app: no shm_size, no cap_add
+```
 
 If the desktop is blank, the log says `BadAccess (MIT-SHM)`, or the expert never
 attaches, switch this one service to the Compose app in `deploy/docker-compose.yml`:
@@ -697,8 +704,8 @@ at its dialog, which is visible on the desktop); the identity of the account is
 checked inside the container, because that check is the one that knows this app may
 be instance 2 reading `MT4_LOGIN2`.
 
-Volume: `hex-mt4-data`, at `/data` in the container and really
-`hex-mt4_hex-mt4-data` on the host, because Compose prefixes named volumes with the
+Volume: `hex-mt5-boom-data`, at `/data` in the container and really
+`<project>_hex-mt5-boom-data` on the host, because Compose prefixes named volumes with the
 project name. Everything that matters — the terminal, the profile with the chart,
 the compiled EA, the HEX-Logs CSVs — is under it, so a redeploy is not a restart of
 the demo. This is also the one place `DOKPLOY_APP` matters: it *is* that prefix, so

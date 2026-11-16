@@ -1201,6 +1201,49 @@ mql_tail() {
   tail -n 3 "$last" 2>/dev/null | tr -d '\000' | tr -d '\r' | tr '\n' ' '
 }
 
+# The two settings a Docker-Image app CANNOT carry and a Compose app can
+# (deploy/docker-compose.yml: `shm_size: 512m`, `cap_add: [SYS_PTRACE]`). Dokploy's
+# Application type has no field for either, and both fail as "the EA is broken": a
+# small /dev/shm is a blank Wine desktop (BadAccess MIT-SHM), and no ptrace is an
+# expert that never attaches. The boot says which route the container is really on,
+# so nobody has to guess whether the YAML took effect.
+caps_report() {
+  local d m t o rest shm="" mb="?" capeff="" ptrace=no
+  if [ -r /proc/mounts ]; then
+    while read -r d m t o rest; do
+      case "$m" in /dev/shm) shm="$o" ;; esac
+    done < /proc/mounts
+  fi
+  case "$shm" in
+    *size=*)
+      mb="${shm##*size=}"
+      mb="${mb%%,*}"
+      case "$mb" in
+        *k) mb=$(( ${mb%k} / 1024 )) ;;
+        *m) mb="${mb%m}" ;;
+        *g) mb=$(( ${mb%g} * 1024 )) ;;
+      esac
+      ;;
+  esac
+  if [ -r /proc/self/status ]; then
+    while read -r d m rest; do
+      case "$d" in CapEff:) capeff="$m" ;; esac
+    done < /proc/self/status
+  fi
+  # CAP_SYS_PTRACE is capability 19.
+  if [ -n "$capeff" ] && [ $(( 16#$capeff & 0x80000 )) -ne 0 ]; then
+    ptrace=yes
+  fi
+  local note=""
+  case "$mb" in
+    ''|*[!0-9]*) note=" (64 MB is Docker's default and it is not enough - no compose file, no shm_size)" ;;
+    *) if [ "$mb" -lt 256 ]; then
+         note=" (small: Xvfb+Wine want 256 MB+; the compose route sets 512m)"
+       fi ;;
+  esac
+  printf 'runtime: /dev/shm=%s MB%s cap_sys_ptrace=%s' "$mb" "$note" "$ptrace"
+}
+
 # Did the terminal actually SIGN IN?
 # Everything downstream of a terminal that never authorized looks like a broken
 # EA: an empty Market Watch, a chart that never receives a tick, and MT5 deleting
@@ -1930,6 +1973,10 @@ main() {
   # left. A boot that ends in `fork: Cannot allocate memory` is answered here.
   log "$(mem_report)"
   log "$(limits_report)"
+  # Which deploy route this container is really on: a Compose app carries
+  # shm_size/cap_add, a Docker-Image app cannot (DEPLOY.md §6), and both failures
+  # look like a broken EA. Two fields, both read from /proc, no fork.
+  log "$(caps_report)"
   mkdir -p "$MT5DIR"
   claim_volume
   write_lease

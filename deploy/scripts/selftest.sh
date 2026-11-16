@@ -651,6 +651,7 @@ MAINLOG="$TMP/main.log"
 load_fn "$ENTRYPOINT" terminal_evidence >/dev/null
 load_fn "$ENTRYPOINT" terminal_tails >/dev/null
 load_fn "$ENTRYPOINT" mem_report >/dev/null
+load_fn "$ENTRYPOINT" caps_report >/dev/null
 load_fn "$ENTRYPOINT" write_death_note >/dev/null
 load_fn "$ENTRYPOINT" main >/dev/null
 (
@@ -676,6 +677,8 @@ check_eq "the container leaves with the terminal's own status" "7" "$main_rc"
 check_contains "and says so, with how long it lived" \
   "terminal64.exe exited (rc=7) after 4" "$(cat "$MAINLOG")"
 check_contains "with the evidence printed before it goes" "[term]" "$(cat "$MAINLOG")"
+check_contains "and says which compose-only settings are actually in force" \
+  "cap_sys_ptrace=" "$(cat "$MAINLOG")"
 check_contains "and left on the volume for the boot after it" \
   "crashed in style" "$(cat "$MT5DIR/.hex-last-death")"
 
