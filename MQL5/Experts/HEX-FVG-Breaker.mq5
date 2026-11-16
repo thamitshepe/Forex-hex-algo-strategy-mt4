@@ -14,7 +14,12 @@
 //|       the position ticket; a pending is keyed by its order       |
 //|       ticket and adopted when it fills.                          |
 //|     * the bars/indicators: Time[i]/High[i] become iTime/iHigh,   |
-//|       and iATR/iMA become handles read with CopyBuffer.          |
+//|       the ATR is a handle read with CopyBuffer, and the two      |
+//|       trend EMAs are arithmetic on the trend timeframe's closes  |
+//|       (EmaCalc) - v4.03, because the terminal refuses to build   |
+//|       an indicator on a timeframe whose data it cannot deliver,  |
+//|       and refuses once per call: "cannot load indicator          |
+//|       'Moving Average' (XAUUSD) [4805]", twice a second, forever.|
 //|     * the CSV logs live under MQL5/Files/HEX-Logs so the         |
 //|       container can mirror them (MT4 wrote to Common\).           |
 //|     * pushes are sent by the CONTAINER from these CSVs (curl),   |
@@ -35,7 +40,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Forex-hex-algo-strategy-mt4"
 #property link      "https://github.com/Manged3/Forex-hex-algo-strategy-mt4"
-#property version   "4.02"
+#property version   "4.03"
 #property strict
 #property description "Trend trading through Fair Value Gaps, confirmed by Breaker and Mitigation blocks."
 
@@ -181,8 +186,6 @@ int       g_lastBreakDir = 0;   // last structure side that produced a breaker b
 // MT5 plumbing ------------------------------------------------------
 CTrade    trade;
 int       g_atrHandle   = INVALID_HANDLE;
-int       g_emaFastH    = INVALID_HANDLE;
-int       g_emaSlowH    = INVALID_HANDLE;
 string    g_csvName     = "";       // the event CSV the container mirrors
 datetime  g_startedAt   = 0;        // TimeLocal of OnInit (a chart that never ticks stalls too)
 datetime  g_lastTickLocal = 0;
@@ -212,6 +215,8 @@ datetime  g_icBar[HEX_IND_SLOTS];
 double    g_icVal[HEX_IND_SLOTS];
 bool      g_icValid[HEX_IND_SLOTS];
 datetime  g_lastIndWarn = 0;
+datetime  g_lastHandleTry = 0;      // see OnTimer: one retry a minute, not one a second
+bool      g_trendSeriesDead = false; // the trend timeframe never delivered (pushed once)
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                           |
@@ -793,21 +798,28 @@ string TerminalState()
 
 // Handles, retried instead of fatal.
 // A terminal that has not logged in yet has no data for the symbol, so
-// iATR/iMA answer INVALID_HANDLE. Returning INIT_FAILED for that makes MT5
+// iATR answers INVALID_HANDLE. Returning INIT_FAILED for that makes MT5
 // REMOVE the expert - and a removed expert never trades again until someone
 // re-attaches it by hand. The watchdog then sees an empty chart, restarts the
 // terminal, the container restarts, and a login that would have sorted itself
 // out in half a minute becomes a loop that trades nothing. So: create what is
 // missing, report what cannot be created, and stay attached.
+//
+// ONE handle only. The trend EMAs used to be iMA() handles on the trend
+// timeframe, and on a cold H1 series the terminal REFUSES to build them:
+//    HEX-FVG-Breaker (XAUUSD,M15) cannot load indicator 'Moving Average' (XAUUSD) [4805]
+// twice a second for the whole session (2026-11-16, first live boot) - once for
+// each handle, and once more for every retry that re-asked for the series it was
+// already fetching. The ATR on the chart's own timeframe was fine throughout,
+// which is what pointed at the timeframe rather than the symbol. So the EMAs are
+// arithmetic on H1 closes now (see EmaCalc): no handle, nothing for the terminal
+// to refuse, and the same numbers on a terminal whose indicator machinery is
+// unhappy - and it still only needs the bars, which CopyRates can request.
 bool EnsureHandles()
   {
    if(g_atrHandle == INVALID_HANDLE)
       g_atrHandle = iATR(_Symbol, PERIOD_CURRENT, 14);
-   if(g_emaFastH == INVALID_HANDLE)
-      g_emaFastH = iMA(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_emaSlowH == INVALID_HANDLE)
-      g_emaSlowH = iMA(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-   return(g_atrHandle != INVALID_HANDLE && g_emaFastH != INVALID_HANDLE && g_emaSlowH != INVALID_HANDLE);
+   return(g_atrHandle != INVALID_HANDLE);
   }
 
 int OnInit()
@@ -863,8 +875,9 @@ int OnInit()
                " - check MT5_LOGIN/MT5_PASSWORD/MT5_SERVER and that the account is authorized");
      }
    else
-      Print(Prefix, ": handles ok (atr=", g_atrHandle, " ema", FastEMAPeriod, "=", g_emaFastH,
-            " ema", SlowEMAPeriod, "=", g_emaSlowH, ")");
+      Print(Prefix, ": handles ok (atr=", g_atrHandle, "); trend EMA", FastEMAPeriod, "/",
+            SlowEMAPeriod, " is arithmetic on ", EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
+            " closes (", iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe), " bars there now)");
 
    if(!ClaimChart())
       return(INIT_FAILED);
@@ -889,14 +902,14 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.02 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
+   Print(Prefix, " v4.03 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
    // What this chart can actually SEE - before anything claims it is healthy.
    EnsureSubscribed();
 
-   LogEvent("INIT", StringFormat("v4.02 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   LogEvent("INIT", StringFormat("v4.03 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
             _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
@@ -1033,10 +1046,16 @@ void OnTimer()
       WriteHeartbeat();
 
    // A terminal that was still logging in when this chart opened: retry the
-   // handles once a minute, and say so when they arrive - that is the moment
-   // the EA starts trading, so it belongs in the CSV, not only in the journal.
-   if(g_notReady)
+   // handles ONCE A MINUTE - not once a second. A handle the terminal refuses is
+   // refused for a reason a second does not change, and MT5 writes a journal line
+   // for every attempt it refuses: on 2026-11-16 that was
+   // "cannot load indicator 'Moving Average' (XAUUSD) [4805]" twice a second for
+   // the whole session, because this branch re-asked for the H1 series every
+   // second and every re-ask was itself the refusal. The retry that matters is the
+   // one after the thing that was missing has arrived.
+   if(g_notReady && (g_lastHandleTry == 0 || (int)TimeLocal() - (int)g_lastHandleTry >= 60))
      {
+      g_lastHandleTry = TimeLocal();
       if(EnsureHandles())
         {
          g_notReady = false;
@@ -1045,11 +1064,11 @@ void OnTimer()
                   (int)((TimeLocal() - g_startedAt) / 60), TerminalState()));
          ComputePointEquivalents(g_atr);
         }
-      else if(g_lastNotReadyLog == 0 || TimeLocal() - g_lastNotReadyLog >= 300)
-        {
-         g_lastNotReadyLog = TimeLocal();
-         Print(Prefix, ": still NOT READY - ", g_notReadyWhy);
-        }
+     }
+   if(g_notReady && (g_lastNotReadyLog == 0 || TimeLocal() - g_lastNotReadyLog >= 300))
+     {
+      g_lastNotReadyLog = TimeLocal();
+      Print(Prefix, ": still NOT READY - ", g_notReadyWhy);
      }
 
    if(InpTickStallSec <= 0) return;
@@ -1104,8 +1123,6 @@ void OnDeinit(const int reason)
             TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
             DeinitReason(reason), SecondsSinceTick() / 60));
    if(g_atrHandle != INVALID_HANDLE)     IndicatorRelease(g_atrHandle);
-   if(g_emaFastH != INVALID_HANDLE)      IndicatorRelease(g_emaFastH);
-   if(g_emaSlowH != INVALID_HANDLE)      IndicatorRelease(g_emaSlowH);
    ObjectsDeleteAll(0, Prefix);
    Comment("");
   }
@@ -1224,13 +1241,97 @@ void IndNotReady(const ENUM_TIMEFRAMES tf, const int handle, const int shift)
          ". The download starts here; no entry is skipped silently while it runs.");
   }
 
-// One indicator value, cached per bar, asked for only when it can be answered.
-// MT5 logs a journal line for every failed CopyBuffer on a series that is still
-// downloading, and a strategy that reads the H1 EMAs on every tick turns one cold
-// series into a repeating wall of "cannot load ..." (2026-11-16, first live
-// session). So: nothing is asked twice per bar, nothing is asked at all while the
-// series is too short, and the one line that explains the wait comes out every
-// five minutes instead of every tick.
+// The trend timeframe has fewer bars than the EMA needs. Nobody is to blame and
+// nothing is broken: ask for the series (CopyRates is the request), and say so
+// once per five minutes with the count, because "no trend" with no number is
+// indistinguishable from a broken filter.
+void TrendSeriesMissing(const ENUM_TIMEFRAMES tf, const int need)
+  {
+   // After a quarter of an hour with an empty series this is no longer a warm-up,
+   // it is the reason the EA will not trade, and it earns a pushed ERROR once.
+   if(!g_trendSeriesDead && TimeLocal() - g_startedAt > 900 && iBars(_Symbol, tf) < need / 2)
+     {
+      g_trendSeriesDead = true;
+      LogEvent("ERROR", StringFormat("%s on %s still has %d bars after %dm - the trend filter "
+               "cannot run, so no trade can be taken. The chart timeframe is fine; the "
+               "terminal is not delivering this one.",
+               EnumToString(tf), _Symbol, iBars(_Symbol, tf),
+               (int)((TimeLocal() - g_startedAt) / 60)));
+     }
+   if(g_lastIndWarn > 0 && TimeLocal() - g_lastIndWarn < 300) return;
+   g_lastIndWarn = TimeLocal();
+   MqlRates r[];
+   CopyRates(_Symbol, tf, 0, need, r);
+   int err = GetLastError();
+   Print(Prefix, ": ", EnumToString(tf), " on ", _Symbol, " has ", iBars(_Symbol, tf),
+         " bars, the EMA needs ", need, " - asking the terminal for the series",
+         " (err=", err, "). No trend, no entry, until they arrive.");
+  }
+
+// EMA of the trend timeframe, computed here on H1 closes. Seeded with the SMA of
+// the oldest `period` bars - the convention iMA() itself uses - and then carried
+// forward, so the values agree with the terminal's own indicator to the last
+// digits. Returns 0.0 when the bars are not there yet; 0.0 is not a gold price,
+// so the caller cannot mistake it for one.
+double EmaCalc(const int period, const int shift)
+  {
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)TrendTimeframe;
+   int need = shift + period + 8;                 // warm-up, then the bars reported on
+   if(period < 1 || iBars(_Symbol, tf) < need)
+     {
+      TrendSeriesMissing(tf, need);
+      return(0.0);
+     }
+   double c[];
+   ArraySetAsSeries(c, true);
+   int got = CopyClose(_Symbol, tf, 0, need, c);
+   if(got < need)
+     {
+      TrendSeriesMissing(tf, need);
+      return(0.0);
+     }
+   int oldest = got - 1;                          // c[] runs newest-first
+   double sum = 0.0;
+   for(int k = oldest; k > oldest - period; k--) sum += c[k];
+   double ema = sum / period;
+   double a   = 2.0 / (period + 1.0);
+   for(int k = oldest - period; k >= shift; k--)
+      ema += a * (c[k] - ema);
+   return(ema);
+  }
+
+// Cached per (period, bar): the four readings below are asked for on every tick
+// and a closed bar's EMA never moves. A cache hit is validated on the bar time,
+// so a slot collision costs a recompute, never a wrong number.
+double Ema(const int period, const int shift)
+  {
+   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)TrendTimeframe;
+   datetime bar = iTime(_Symbol, tf, shift);
+   if(period < 1 || shift < 0 || bar == 0)
+     {
+      TrendSeriesMissing(tf, shift + period + 8);
+      return(0.0);
+     }
+   int key  = -period;                            // negative: never an indicator handle
+   int slot = (key + shift) % HEX_IND_SLOTS;
+   if(slot < 0) slot = -slot;
+   if(g_icValid[slot] && g_icHandle[slot] == key && g_icShift[slot] == shift &&
+      g_icBar[slot] == bar)
+      return(g_icVal[slot]);
+   double v = EmaCalc(period, shift);
+   if(v <= 0.0) return(0.0);                      // a miss is retried, never cached
+   g_icValid[slot]  = true;
+   g_icHandle[slot] = key;
+   g_icShift[slot]  = shift;
+   g_icBar[slot]    = bar;
+   g_icVal[slot]    = v;
+   return(v);
+  }
+
+// One indicator value (the ATR), cached per bar, asked for only when it can be
+// answered: MT5 logs a journal line for every failed CopyBuffer on a series that
+// is still being downloaded, so nothing is asked twice per bar and nothing is
+// asked at all while the series is too short to answer.
 double IndRead(const int handle, const ENUM_TIMEFRAMES tf, const int shift)
   {
    if(handle == INVALID_HANDLE || shift < 0) return(0.0);
@@ -1266,11 +1367,6 @@ double IndRead(const int handle, const ENUM_TIMEFRAMES tf, const int shift)
 double AtrVal(int shift)
   {
    return(IndRead(g_atrHandle, PERIOD_CURRENT, shift));
-  }
-
-double Ema(int handle, int shift)
-  {
-   return(IndRead(handle, (ENUM_TIMEFRAMES)TrendTimeframe, shift));
   }
 
 double BodySize(int shift)   { return(MathAbs(Cl(shift) - Op(shift))); }
@@ -1679,10 +1775,10 @@ bool ScanTrendSwings(double &h1, double &h2, double &l1, double &l2)
 
 int DetermineTrend()
   {
-   double fastNow = Ema(g_emaFastH, 1);
-   double slowNow = Ema(g_emaSlowH, 1);
-   double fastOld = Ema(g_emaFastH, 1 + TrendSlopeBars);
-   double slowOld = Ema(g_emaSlowH, 1 + TrendSlopeBars);
+   double fastNow = Ema(FastEMAPeriod, 1);
+   double slowNow = Ema(SlowEMAPeriod, 1);
+   double fastOld = Ema(FastEMAPeriod, 1 + TrendSlopeBars);
+   double slowOld = Ema(SlowEMAPeriod, 1 + TrendSlopeBars);
 
    // A zero price on a gold chart is not a price: it is an EMA that has no value
    // yet, because the trend timeframe is still downloading (IndNotReady has
@@ -2338,7 +2434,7 @@ void EvaluateSetup()
          if(rejReason == "") { rejReason = "TOO_FAR"; rejDetail = DoubleToString(dist / _Point, 0) + "pt from zone"; rejZone = i; }
          continue;
         }
-      double emaFast = Ema(g_emaFastH, 1);
+      double emaFast = Ema(FastEMAPeriod, 1);
       if(g_maxEmaDistPts > 0 && MathAbs(bid - emaFast) / _Point > g_maxEmaDistPts)
         {
          if(rejReason == "") { rejReason = "OVEREXTENDED"; rejDetail = "far from fast EMA"; rejZone = i; }
@@ -2828,7 +2924,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.02  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
+   s += Prefix + " FVG-Breaker v4.03  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";
