@@ -396,6 +396,16 @@ ensure_terminal() {
     else
       log "MT5_FORCE_SEED=1 but $MT5DIR is already this distro - not re-seeding"
     fi
+  elif [ "$MT5_FORCE_SEED" = "1" ] && [ -n "$MT5_SETUP_URL" ]; then
+    # The other half of FORCE_SEED: rebuild from an installer instead of a
+    # tarball. This is how a volume that was seeded from broker A's terminal is
+    # moved to broker B's, and it is the only cure for "the server name is not in
+    # this tree" (login_report says so at boot): MT5 only ever understands the
+    # servers of the installer that built it. .hex-instance stays, so the volume
+    # is still recognised as ours.
+    log "MT5_FORCE_SEED=1: rebuilding $MT5DIR from $MT5_SETUP_URL (a tree only knows its own broker's servers)"
+    find "$MT5DIR" -mindepth 1 -maxdepth 1 ! -name '.hex-instance' -exec rm -rf {} +
+    install_fresh_terminal
   fi
   if have_terminal; then
     log "terminal64.exe found in $MT5DIR"
@@ -1244,6 +1254,31 @@ caps_report() {
   printf 'runtime: /dev/shm=%s MB%s cap_sys_ptrace=%s' "$mb" "$note" "$ptrace"
 }
 
+# Which servers this terminal tree has ever seen.
+# MT5 keeps one directory per server under Bases/ (capital B on the volume; a
+# few trees spell it `bases`). A tree is built by ONE broker's installer and
+# knows that broker's servers and nobody else's - and a login for a name the
+# tree has never seen produces NO journal line at all: not "invalid server", not
+# "no connection", nothing. So the first question about a login that never
+# happens is "is this name even in the tree", and that is what this answers.
+servers_known() { # DIR
+  # Both spellings, deduplicated by name: MT5 uses Bases/ and a couple of trees
+  # ship `bases`, and on a case-insensitive filesystem (a mac running the tests)
+  # the two globs are the same directory - listing it twice would read like two
+  # different brokers.
+  local base names seen=" " out="" n
+  for base in "$1/Bases" "$1/bases"; do
+    [ -d "$base" ] || continue
+    names="$(cd "$base" 2>/dev/null && ls -1 2>/dev/null)"
+    for n in $names; do
+      case "$seen" in *" $n "*) continue ;; esac
+      seen="$seen$n "
+      out="$out$n "
+    done
+  done
+  printf '%s' "$out"
+}
+
 # Did the terminal actually SIGN IN?
 # Everything downstream of a terminal that never authorized looks like a broken
 # EA: an empty Market Watch, a chart that never receives a tick, and MT5 deleting
@@ -1256,6 +1291,21 @@ login_report() { # DIR
   local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line
   set +e
   set +o pipefail
+  # BEFORE the two-minute wait, and before anyone reads the journal: is the
+  # server name in this tree at all? On 2026-11-16 that question cost a whole
+  # evening - the account was TradeMaxGlobal-Demo, the tree was a Deriv one, the
+  # terminal never dialled (zero Network lines, ever), the chart never got a tick,
+  # and MT5 then deleted the expert with "initializing ... failed with code 0
+  # (execution canceled)" - which reads like an EA bug and is a data bug.
+  local known="$(servers_known "${MT5DIR:-/data/mt5}")"
+  if [ -n "${MT5_SERVER:-}" ] && [ -n "$known" ]; then
+    case " $known " in
+      *" $MT5_SERVER "*) ;;
+      *) log "login: WARNING - MT5_SERVER=$MT5_SERVER is NOT one of the servers this terminal tree knows (${known% })"
+         log "login: WARNING - this tree is ONE broker's installer, and a name it has never seen is never dialled - not with the right password either. The chart then waits for data that cannot arrive and MT5 deletes the expert ('code 0 (execution canceled)'), which reads like an EA bug and is a data bug. Fix: MT5_SERVER set to one of the names above, or add the broker once on the VNC desktop (File -> Open an Account), or rebuild the tree from that broker's own installer. DEPLOY.md 6b" ;;
+    esac
+  fi
+
   # Up to two minutes: a first login on a cold Wine terminal legitimately takes
   # tens of seconds, and "never tried" is only an honest verdict after that.
   while [ "$i" -lt 40 ] && [ -z "$verdict" ]; do
@@ -1295,11 +1345,7 @@ login_report() { # DIR
       if [ "$tried" -eq 1 ]; then
         log "login: PENDING - ${who} - the terminal has Network lines but no 'authorized on' yet. Until that line appears the chart gets no ticks, and MT5 removes an expert from a chart with no data after a couple of minutes."
       else
-        local known=""
-        if [ -d "${MT5DIR:-/data/mt5}/bases" ]; then
-          known=$(ls -1 "${MT5DIR:-/data/mt5}/bases" 2>/dev/null | head -6 | tr '\n' ' ')
-        fi
-        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not. Servers this tree knows: ${known:-<none listed>} - a broker that is not in that list needs its own terminal tree (MT5_DISTRO_URL, §4C) or one manual login on the VNC desktop (port 6080) before the .ini can keep it."
+        log "login: NOT ATTEMPTED - ${who} - two minutes in, the journal has no 'authorized on' and not one Network line. The terminal never tried to connect: a server name its tree has never seen fails exactly like this, right password or not. Servers this tree knows: ${known:-<none listed>} - a broker that is not in that list needs its own terminal tree (MT5_FORCE_SEED=1 + MT5_SETUP_URL, §6b) or one manual login on the VNC desktop (port 6080) before the .ini can keep it."
         hex_push "LOGIN" "MT5 never tried to log in as ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<from volume>}: no Network line at all, two minutes after boot. So the chart gets no data, the EA has nothing to trade, and MT5 deletes it - which is the restart loop. Servers this terminal tree knows: ${known:-<none listed>}. If your broker is not in that list, open the VNC desktop once (port 6080) and add it, or reseed the volume with a distro built from that broker's own terminal."
       fi
       ;;
@@ -1928,6 +1974,14 @@ alert_watcher() {
 repair_symbol_bases() {
   local seed="${HEX_DISTRO_SEED:-/opt/mt5-distro}/Bases"
   [ -d "$seed/Deriv-Demo" ] || return 0
+  # Only for the broker that seed belongs to: dropping Deriv's symbol history into
+  # a tree that is about to log in somewhere else would only add a Bases/ entry for
+  # a server this container never uses - and then servers_known() would report it as
+  # a server "the tree knows", in the very line that is supposed to explain a login.
+  case "${MT5_SERVER:-Deriv-Demo}" in
+    Deriv*) ;;
+    *) return 0 ;;
+  esac
   mkdir -p "$MT5DIR/Bases" 2>/dev/null || true
   if [ -d "$MT5DIR/Bases/Deriv-Demo/history/$MT5_SYMBOL" ]; then
     return 0

@@ -412,6 +412,7 @@ MT5DIR="$TMP/mt5"
 echo "login_report: the terminal's own journal decides whether anything downstream can work"
 LR="$TMP/lr-logs"; mkdir -p "$LR"
 MT5_SERVER=TradeMaxGlobal-Demo; MT5_LOGIN=60169775
+load_fn "$ENTRYPOINT" servers_known >/dev/null
 load_fn "$ENTRYPOINT" login_report >/dev/null
 lr_run() { # DIR
   ( sleep() { return 0; }
@@ -450,6 +451,18 @@ mkdir -p "$TMP/mt5/bases/Deriv-Demo" "$TMP/mt5/bases/MetaQuotes-Demo"
 out="$(lr_run "$LR" 2>&1)"
 check_contains "and it names the servers this terminal tree actually knows" \
   "Servers this tree knows: Deriv-Demo MetaQuotes-Demo" "$out"
+# 2026-11-16, the boot that made this a rule: the account was TradeMaxGlobal-Demo,
+# the tree was a Deriv one, and the terminal never dialled - not one Network line -
+# so the chart never got a tick and MT5 deleted the expert. The journal cannot
+# explain that (it has nothing in it), so the tree's own server list has to be
+# compared with MT5_SERVER before the two-minute wait, not after it.
+check_contains "a server the tree has never seen is called out at once, before the wait" \
+  "login: WARNING - MT5_SERVER=TradeMaxGlobal-Demo is NOT one of the servers this terminal tree knows" "$out"
+check_contains "and the warning names what the tree does know" "(Deriv-Demo MetaQuotes-Demo)" "$out"
+mkdir -p "$TMP/mt5/Bases/TradeMaxGlobal-Demo"   # capital B: MT5's own spelling
+out="$(lr_run "$LR" 2>&1)"
+check_eq "once the tree knows the server, that warning is gone" "0" \
+  "$(printf '%s' "$out" | grep -c 'is NOT one of the servers' || true)"
 
 echo "ea_watchdog: an EA that fails its OWN init does not get the container restarted forever"
 # The 2026-11-15 20:15 boot: "initializing of HEX-FVG-Breaker (XAUUSD,M15) failed

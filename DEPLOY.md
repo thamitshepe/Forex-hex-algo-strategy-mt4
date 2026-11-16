@@ -740,6 +740,61 @@ ssh -L 6080:localhost:6080 user@server
 # then browse http://localhost:6080/vnc.html
 ```
 
+### 6b. When the broker's server is not in the terminal tree
+
+A terminal tree is built by **one** broker's installer and knows that broker's servers
+and nobody else's: MT5 keeps one directory per server it has ever used under
+`/data/mt5/Bases/`. Give it a `MT5_SERVER` that is not in that list and it does not
+dial, does not refuse, and does not print one `Network` line — the journal is silent.
+What follows is the expensive part: the chart never gets a tick, so MT5 refuses to
+initialize the expert on it and then deletes it —
+
+```
+Experts  expert HEX-FVG-Breaker (XAUUSD,M15) loaded successfully
+Experts  initializing of HEX-FVG-Breaker (XAUUSD,M15) failed with code 0 (execution canceled)
+Experts  expert HEX-FVG-Breaker (XAUUSD,M15) removed
+```
+
+— which is `OnInit` never being called at all (no `OnInit on …` line, no MQL5 log), and
+reads like an EA bug for as long as you look at it. The boot now answers this before
+the two-minute login verdict does:
+
+```
+login: WARNING - MT5_SERVER=TradeMaxGlobal-Demo is NOT one of the servers this terminal tree knows (Deriv-Demo)
+login: WARNING - this tree is ONE broker's installer, and a name it has never seen is never dialled - ...
+```
+
+Two cures, and the first one is usually enough:
+
+**(a) Add the broker once, on the desktop.** Open the noVNC desktop (§3), then
+*File → Open an Account* → in the broker search type the broker's name → MT5 downloads
+that broker's server list from MetaQuotes. Log in with the account you already have
+(*File → Login to Trade Account*), or open a fresh demo there and put the new number and
+password in `MT5_LOGIN`/`MT5_PASSWORD`. The moment `/data/mt5/Bases/<server>/` exists the
+`.ini` login works on every boot afterwards, with no clicks at all. If the account is
+older than a month it is probably expired — demos are deleted after inactivity, and a
+dead demo answers `authorization failed` no matter how right the password is.
+
+**(b) Rebuild the volume's tree from that broker's own installer.**
+
+```
+MT5_FORCE_SEED=1
+MT5_SETUP_URL=https://<broker>/path/to/mt5setup.exe
+```
+
+This wipes `/data/mt5` (everything except `.hex-instance`), runs the installer under
+Wine with `/auto`, and copies the resulting tree — which carries *that* broker's server
+list — into the volume. `HEX-Logs` lives under `/data/mt5/MQL5/Files/`, so **copy it out
+first** if there are trades in it worth keeping:
+
+```bash
+docker run --rm -v <project>_hex-mt5-boom-data:/data -v "$PWD":/out alpine \
+  cp -a /data/mt5/MQL5/Files/HEX-Logs /out/
+```
+
+Unset `MT5_FORCE_SEED` once it has run: on every boot with it set, the tree is rebuilt
+again from scratch.
+
 If you do publish it, put it behind Dokploy's proxy with TLS and leave
 `VNC_PASSWORD` set: the entrypoint refuses to start a desktop without one.
 
@@ -1325,6 +1380,7 @@ shows the EA's prints, and a rebuild is a `git push`.
 | `terminal64.exe is up (pid N)` and then, about 2 s later, `the entrypoint ended without reaching its shutdown (rc=1)` followed by `/opt/hex/entrypoint.sh: fork: Cannot allocate memory` - on every boot, forever | the shell cannot create a **process**: `fork` returned ENOMEM because the container has used all the memory its cgroup allows, or because the host has none left. Nothing to do with the feed or the EA - MetaTrader under Wine needs roughly 1-1.5 GB, and this happened 2 s after the terminal started (2026-11-11) | every boot now prints `mem: limit=… current=…(N% of the limit) pids=… host: … MB free of … MB oom_kills=…` before anything else; the death note keeps that line plus `the command that failed last was: …`, and both are written with bash **builtins**, so they land even when no process can be started, and `CRASHLOOP` quotes them. `limit=N MB` with `current` at ~100% = raise or remove the app's memory limit in Dokploy. `limit=unlimited` with a small `host:` figure = the VPS itself is out of memory: add swap or resize it. `ENABLE_VNC=0` gives back x11vnc+websockify's share |
 
 | `terminal64.exe is up`, then the journal reads `expert HEX-FVG-Breaker (XAUUSD,M15) loaded successfully`, and ~2 minutes later `initializing of HEX-FVG-Breaker (XAUUSD,M15) failed with code 0 (execution canceled)` + `expert HEX-FVG-Breaker (XAUUSD,M15) removed`, then `WATCHDOG: the EA left the chart (attempt 1/6)` and `terminal64.exe exited (rc=143) after 183s` - next boot, forever. The boot line says `ceiling: maxproc=unlimited maxas=unlimited maxres=unlimited … commit=18755 MB of 26135 MB`, so no limit is tight (2026-11-15 19:0x) | two faults stacked, neither of them a limit. (a) **the terminal never signed in**: its journal has no `authorized on` and not one `Network` line, so Market Watch is empty, the chart has no data, and MT5 deletes an expert from a chart it cannot feed. (b) **the EA treated that as fatal**: `iATR`/`iMA` on a symbol the terminal cannot see answer `INVALID_HANDLE`, `OnInit` returned `INIT_FAILED`, and an expert MT5 removed is gone for good - so the watchdog killed the terminal, the container exited with it, and the "6 attempts" cap never bound because the count lived in memory | fixed (2026-11-15): `OnInit` logs `OnInit on XAUUSD M15 \| connected=… trade_allowed=… algo=… account=… server=… symbols=…` as its **first** line, and missing handles are **NOT READY**, not fatal: the EA stays attached, says what it is waiting for, and retries every minute from `OnTimer` (`READY - recovered after Nm`); every failure path now `Print`s as well as `Alert`s (an `Alert` on an invisible desktop is silence). The entrypoint adds one verdict line, `login: OK \| REFUSED \| PENDING \| NOT ATTEMPTED - account … @ …`, read from the journal for you, and the EA-restart budget moved onto the volume (`/data/mt5/.hex-ea-restarts`) so 6 really is 6. The login itself is env: `MT5_SERVER` has to be a server this terminal's tree can dial at all - **§4C** |
+| the same `code 0 (execution canceled)` removal, but `OnInit on …` never reaches the MQL5 log either, and the journal has **no `Network` line at all** - not even an error (2026-11-16) | the expert is removed *before* `OnInit` runs: MT5 will not initialize an expert on a chart with no data, and the chart has no data because the terminal never dialled. A server name this tree has never seen is not dialled - not refused, not attempted - so there is nothing in the journal to read and the password is irrelevant. On 2026-11-16 the account was `TradeMaxGlobal-Demo` and the tree was a `Deriv-Demo` one | `ls /data/mt5/Bases` is the whole answer, and the boot now says it within seconds: `login: WARNING - MT5_SERVER=… is NOT one of the servers this terminal tree knows (…)`. Fix in **§6b** - add the broker once on the desktop (`File → Open an Account`), or rebuild the tree from that broker's own installer (`MT5_FORCE_SEED=1` + `MT5_SETUP_URL`). An expired demo answers with a real `authorization failed` instead, which is a different fault |
 | `healthcheck` says `NOT SUBSCRIBED (SYMBOL_SELECT=0)`, and the EA's CSV has `SUB … was not subscribed` | the chart's symbol is not in Market Watch, so the terminal subscribes nothing and receives no quotes at all - it looks exactly like a dead feed, but restarting the terminal cannot fix it | the EA selects it itself (`SymbolSelect(_Symbol, true)`) at init and on every stall; if it comes back `FAILED`, add the symbol once in the desktop's Market Watch. Persisting across restarts is a volume whose `Bases/Deriv-Demo/symbols.sel` lost the selection - the volume's base is copied out of the image only when it has no history for the symbol |
 | `ERROR` row: `… is NOT in the server's symbol list (725 symbols on Deriv-Demo) … Names on this server containing "Boom": …` | the chart's name is not (or no longer) offered by the server. MT5 still opens a chart for it out of the terminal's cache, the expert still loads and beats, and **no quote can ever arrive** - the sync line's `0 spreads` is the same fact | the row lists the names the server does carry: set `MT5_SYMBOL` to the exact one and redeploy (the container re-opens the chart). This is the fault `alert_watcher` cannot restart away, and it says so: the third attempt ends in one `NEEDS-YOU` naming the symbol |
 | `ERROR` row: `… is on the server but DISABLED for trading on this account` | the symbol exists and can be ticked, but the broker has trading disabled on it for this account | nothing in this container can change it - the broker has to enable it, or use another symbol |
