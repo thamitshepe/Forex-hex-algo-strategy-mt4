@@ -1279,6 +1279,33 @@ servers_known() { # DIR
   printf '%s' "$out"
 }
 
+# Does the tree know an ADDRESS for this server, or only its data directory?
+# `Bases/<server>/` appears as soon as an account has been created there, been
+# carried in from a distro, or the server was selected once - but the addresses MT5
+# actually dials live in config/servers.dat. A tree can hold the first without the
+# second (a distro built from a terminal that never connected, a Bases/ copied in by
+# hand), and the symptom is EXACTLY "the login dialog lists my broker, the login is
+# filled in, I press Login, and nothing happens": there is no address to dial, so
+# nothing is sent and the journal stays empty - no 'no connection', no error.
+# 0 = addressed, 1 = listed in Bases/ only, 2 = no servers.dat to ask.
+server_addressed() { # DIR SERVER
+  local dir="${1:-/data/mt5}" s found=0
+  # servers.dat is the normal home; a broker that ships .srv files keeps the same
+  # names there, so both are read before this says "no address".
+  [ -f "$dir/config/servers.dat" ] || return 2
+  for s in "$dir/config/servers.dat" "$dir"/config/*.srv; do
+    [ -f "$s" ] || continue
+    # tr first: the file is binary, and grep calls binary files "binary file matches"
+    # (or skips them entirely with -q under some builds), which would read as "no".
+    if tr -c '[:print:]' '\n' < "$s" 2>/dev/null | grep -qF "$2"; then
+      found=1
+      break
+    fi
+  done
+  [ "$found" -eq 1 ] || return 1
+  return 0
+}
+
 # Did the terminal actually SIGN IN?
 # Everything downstream of a terminal that never authorized looks like a broken
 # EA: an empty Market Watch, a chart that never receives a tick, and MT5 deleting
@@ -1288,7 +1315,7 @@ servers_known() { # DIR
 # nothing printed a verdict on it. This does, once per boot, and separates the
 # three cases that need three different fixes: signed in, refused, never tried.
 login_report() { # DIR
-  local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line
+  local dir="$1" cur="" f recent="" verdict="" tried=0 i=0 line addressed=0
   set +e
   set +o pipefail
   # BEFORE the two-minute wait, and before anyone reads the journal: is the
@@ -1300,7 +1327,17 @@ login_report() { # DIR
   local known="$(servers_known "${MT5DIR:-/data/mt5}")"
   if [ -n "${MT5_SERVER:-}" ] && [ -n "$known" ]; then
     case " $known " in
-      *" $MT5_SERVER "*) ;;
+      *" $MT5_SERVER "*)
+         # Listed. But is it addressable? See server_addressed: a tree can carry
+         # Bases/<server>/ and no address for it, and the login dialog then accepts
+         # the click and dials nothing - which is the one failure with no journal
+         # line at all, so it has to be said here or nowhere.
+         addressed=0
+         server_addressed "${MT5DIR:-/data/mt5}" "$MT5_SERVER" || addressed=$?
+         if [ "$addressed" -eq 1 ]; then
+           log "login: WARNING - $MT5_SERVER has a data directory but config/servers.dat carries no address for it. The dialog lists the broker, the login can be filled in, and pressing the button does NOTHING: no journal line, no error, because there is no address to dial. Fix: on the VNC desktop use File -> Open an Account and let MT5 download this broker's server list (watch config/servers.dat's timestamp change), or set MT5_FORCE_SEED=1 + MT5_SETUP_URL to rebuild the tree from the broker's own installer. DEPLOY.md 6b"
+         fi
+         ;;
       *) log "login: WARNING - MT5_SERVER=$MT5_SERVER is NOT one of the servers this terminal tree knows (${known% })"
          log "login: WARNING - this tree is ONE broker's installer, and a name it has never seen is never dialled - not with the right password either. The chart then waits for data that cannot arrive and MT5 deletes the expert ('code 0 (execution canceled)'), which reads like an EA bug and is a data bug. Fix: MT5_SERVER set to one of the names above, or add the broker once on the VNC desktop (File -> Open an Account), or rebuild the tree from that broker's own installer. DEPLOY.md 6b" ;;
     esac
@@ -1350,6 +1387,45 @@ login_report() { # DIR
       fi
       ;;
   esac
+}
+
+# The click that "does nothing", narrated.
+# On 2026-11-16 the desktop showed the right broker, the login was filled in, the
+# button was pressed, and nothing happened: no journal line, no error, no verdict.
+# The one question that decided the whole evening - did the press reach the
+# terminal at all? - had no answer anywhere in the log, because login_report gives
+# its verdict ONCE, two minutes into the boot, and never speaks again. So keep
+# watching while the terminal is not signed in: either it lands (and this says so,
+# with the journal's line) or ten minutes go by in silence and this says the press
+# never landed - which is a desktop fault, not an account fault.
+login_watch() { # DIR
+  local dir="$1" f cur recent i=0
+  set +e
+  set +o pipefail
+  # Already signed in? Then login_report owns that verdict; say nothing twice.
+  for f in "$dir"/*.log; do [ -f "$f" ] && cur="$f"; done
+  if [ -n "${cur:-}" ] && tail -n 200 "$cur" 2>/dev/null | tr -d '\000' | grep -q 'authorized on'; then
+    return 0
+  fi
+  while [ "$i" -lt 120 ]; do          # 120 x 30s = one hour, then it stands down
+    i=$((i + 1))
+    cur=""
+    for f in "$dir"/*.log; do [ -f "$f" ] && cur="$f"; done
+    if [ -n "$cur" ]; then
+      recent=$(tail -n 200 "$cur" 2>/dev/null | tr -d '\000')
+      case "$recent" in
+        *'authorized on'*)
+          log "login: OK - the terminal authorized while the container was up. The desktop login took; the EA can create its handles from the next OnTimer."
+          return 0
+          ;;
+      esac
+    fi
+    # Every ten minutes, and only while the journal is still silent.
+    if [ "$i" -eq 20 ] || [ "$i" -eq 40 ] || [ "$i" -eq 80 ]; then
+      log "login: still not signed in after $(( i / 2 )) min - the journal has no 'authorized on'. If you pressed Login on the desktop and THIS is the only line that moved, the press never reached the terminal: look at the desktop itself (does Market Watch tick? does the clock move?), not at the account. Pressing it again is free - a second press while a first is still dialling is ignored for a minute."
+    fi
+    sleep 30
+  done
 }
 
 ea_watchdog() { # DIR
@@ -2074,6 +2150,9 @@ main() {
   # did the terminal sign in? See login_report for why silence here was read as
   # "the EA is broken" for six boots.
   login_report "$MT5DIR/logs" &
+  # ...and the same question asked again, later, and out loud: the verdict above is
+  # two minutes into the boot, and the operator's login happens after it.
+  login_watch "$MT5DIR/logs" &
   ea_watchdog "$MT5DIR/logs" &
   desktop_keeper &
   push_watcher &

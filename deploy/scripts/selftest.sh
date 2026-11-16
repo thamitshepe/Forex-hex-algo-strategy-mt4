@@ -413,6 +413,7 @@ echo "login_report: the terminal's own journal decides whether anything downstre
 LR="$TMP/lr-logs"; mkdir -p "$LR"
 MT5_SERVER=TradeMaxGlobal-Demo; MT5_LOGIN=60169775
 load_fn "$ENTRYPOINT" servers_known >/dev/null
+load_fn "$ENTRYPOINT" server_addressed >/dev/null
 load_fn "$ENTRYPOINT" login_report >/dev/null
 lr_run() { # DIR
   ( sleep() { return 0; }
@@ -463,6 +464,45 @@ mkdir -p "$TMP/mt5/Bases/TradeMaxGlobal-Demo"   # capital B: MT5's own spelling
 out="$(lr_run "$LR" 2>&1)"
 check_eq "once the tree knows the server, that warning is gone" "0" \
   "$(printf '%s' "$out" | grep -c 'is NOT one of the servers' || true)"
+# 2026-11-16, second half: "the broker and the login ARE there, I press Login and it
+# does nothing". A Bases/ directory proves MT5 has SEEN the server; the address it
+# dials lives in config/servers.dat, and the two can disagree - in which case the
+# dialog accepts the click, sends nothing, and journals nothing.
+mkdir -p "$TMP/mt5/config"
+printf 'MetaQuotes-Demo\0\0\0some.other.server\0\0' > "$TMP/mt5/config/servers.dat"
+out="$(lr_run "$LR" 2>&1)"
+check_contains "a server with a data directory but no address is called out" \
+  "has a data directory but config/servers.dat carries no address for it" "$out"
+check_contains "and the symptom it predicts is the operator's own words" \
+  "pressing the button does NOTHING" "$out"
+printf 'MetaQuotes-Demo\0TradeMaxGlobal-Demo\0\0' > "$TMP/mt5/config/servers.dat"
+out="$(lr_run "$LR" 2>&1)"
+check_eq "once the address is there, that warning is gone too" "0" \
+  "$(printf '%s' "$out" | grep -c 'carries no address' || true)"
+
+echo "login_watch: the login that 'does nothing' still gets an answer"
+# The 2026-11-16 evening: the desktop had the broker, the login was filled in, the
+# button was pressed, and the journal stayed empty. login_report had already given
+# its verdict two minutes earlier, so nothing in the container ever mentioned the
+# press again - which is why "it does nothing" was indistinguishable from "the click
+# never reached the terminal". One of these two lines ends that.
+LW="$TMP/lw"; mkdir -p "$LW"
+load_fn "$ENTRYPOINT" login_watch >/dev/null
+printf '0\t06:17:56\tStartup\tsuccessfully initialized from start config\n' > "$LW/20261116.log"
+out="$( ( sleep() { return 0; }; login_watch "$LW" ) 2>&1 )"
+check_contains "a journal that never authorizes is reported as still not signed in" \
+  "login: still not signed in after 10 min" "$out"
+check_contains "and it says which of the two faults that is" \
+  "the press never reached the terminal" "$out"
+check_not_contains "and it does not claim a login that never happened" "login: OK" "$out"
+# ...and the same watcher, with a login that lands a minute and a half in.
+out="$( ( n=0
+          sleep() { n=$((n + 1))
+                    [ "$n" -ge 3 ] && printf "0\t06:20:00\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo through Access Server 1\n" >> "$LW/20261116.log"
+                    return 0; }
+          login_watch "$LW" ) 2>&1 )"
+check_contains "a login that lands after the boot is reported as signed in" \
+  "login: OK - the terminal authorized" "$out"
 
 echo "ea_watchdog: an EA that fails its OWN init does not get the container restarted forever"
 # The 2026-11-15 20:15 boot: "initializing of HEX-FVG-Breaker (XAUUSD,M15) failed

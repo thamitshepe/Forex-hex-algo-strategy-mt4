@@ -766,6 +766,20 @@ login: WARNING - this tree is ONE broker's installer, and a name it has never se
 
 Two cures, and the first one is usually enough:
 
+**Listed is not the same as addressable.** The login dialog can *list* a broker and
+still send nothing: the list comes from `Bases/<server>/`, while the address it dials
+lives in `config/servers.dat`. A tree that was copied, seeded from a terminal that never
+connected, or carried in from another machine has the first without the second — the
+dialog accepts the click, the journal stays empty, and "I press Login and nothing
+happens" is the literal truth. The boot names that one too:
+
+```
+login: WARNING - TradeMaxGlobal-Demo has a data directory but config/servers.dat carries no address for it. … pressing the button does NOTHING
+```
+
+Both warnings are printed within seconds of the banner, before the two-minute verdict,
+because neither is a thing a person can see on a desktop.
+
 **(a) Add the broker once, on the desktop.** Open the noVNC desktop (§3), then
 *File → Open an Account* → in the broker search type the broker's name → MT5 downloads
 that broker's server list from MetaQuotes. Log in with the account you already have
