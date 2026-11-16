@@ -1149,10 +1149,23 @@ journal_hints() { # DIR
       [ -f "$f" ] || continue
       s="$state/$(basename "$f").seen"
       n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
-      p=$(cat "$s" 2>/dev/null | tr -d '[:space:]')
       case "$n" in ''|*[!0-9]*) n=0 ;; esac
-      case "$p" in ''|*[!0-9]*) p=0 ;; esac
-      [ "$n" -lt "$p" ] && p=0
+      if [ -f "$s" ]; then
+        p=$(cat "$s" 2>/dev/null | tr -d '[:space:]')
+        case "$p" in ''|*[!0-9]*) p=0 ;; esac
+        [ "$n" -lt "$p" ] && p=0
+      else
+        # FIRST SIGHTING: everything already in this file was written by an EARLIER
+        # run. The volume keeps its journals across restarts and nothing rotates
+        # them, so starting at line 1 means reporting yesterday's refusal as this
+        # run's fault - which is exactly what happened on 2026-11-16: this watcher
+        # read a previous session's "authorization on TradeMaxGlobal-Demo failed
+        # (Invalid account)" and announced the account dead at 10:19:42, while the
+        # same boot authorized at 10:19:50. A hint that names the wrong fault is
+        # worse than none. Take the baseline here and only speak about what is
+        # appended while the container runs.
+        p=$n
+      fi
       if [ "$n" -gt "$p" ]; then
         tail -n "+$((p + 1))" "$f" 2>/dev/null | while IFS= read -r line; do
           key=""; lead=""
@@ -1645,6 +1658,42 @@ hex_push() { # TITLE BODY
     2*) log "push sent ($title)" ;;
     *)  warn "push FAILED ($title): HTTP $code from $MT5_NOTIFY_URL" ;;
   esac
+}
+
+# Is the phone actually ON the channel - not "is a URL set".
+# A boot that only logs "push held (UP): the same title went out Ns ago" cannot
+# tell anybody whether the earlier one arrived, and a mistyped topic fails exactly
+# like a missing one: silently. So ask ntfy itself. Read-only (poll, not publish),
+# so it cannot spend the topic's quota; it either hands back the messages it has
+# cached or it does not.
+notify_check() {
+  local base code file n last
+  if [ -z "${MT5_NOTIFY_URL:-}" ]; then
+    log "notify: OFF - MT5_NOTIFY_URL is empty, so no push reaches a phone (the EA's rows still land in the CSV)"
+    return 0
+  fi
+  base="${MT5_NOTIFY_URL%%\?*}"
+  file="${TMPDIR:-/tmp}/hex-ntfy.json"
+  code=$(curl -s -o "$file" -w '%{http_code}' --max-time 10 \
+         -H 'Accept: application/json' "${base}?poll=1&since=12h" 2>/dev/null) || code=000
+  case "$code" in
+    200)
+      n=$(grep -o '"event":"message"' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      last=$(grep -o '"title":"[^"]*"' "$file" 2>/dev/null | tail -n 1 | sed 's/^"title":"//; s/"$//')
+      if [ "$n" -gt 0 ]; then
+        log "notify: OK - topic ${base##*/} answers and holds $n message(s) from the last 12h, so pushes are landing${last:+ (last: $last)}"
+      else
+        log "notify: WARNING - topic ${base##*/} answers but is EMPTY for the last 12h: either nothing has been pushed yet, or the phone is subscribed to a different topic (the name after the last / must match exactly)"
+      fi
+      ;;
+    404) warn "notify: FAILED - ntfy has no topic ${base##*/} (HTTP 404). A typo in MT5_NOTIFY_URL is silent, not absent." ;;
+    401|403) warn "notify: FAILED - ntfy answered $code for ${base##*/}: that topic needs credentials the container does not send" ;;
+    000) warn "notify: FAILED - nothing answered at ${base##*/} (DNS, firewall, or MT5_NOTIFY_URL is not an http(s) URL)" ;;
+    *) warn "notify: FAILED - ntfy answered HTTP $code for ${base##*/}" ;;
+  esac
+  rm -f "$file" 2>/dev/null || true
+  return 0
 }
 
 # One push per distinct message SHAPE per HEX_ALERT_REPEAT_HOURS (6h).
@@ -2174,6 +2223,11 @@ main() {
   # It replaces silence_watcher + feed_watchdog, which each buzzed about the same
   # incident on their own timer (see "one alert" above).
   alert_watcher &
+  # Before the first push goes out, whether the channel exists at all: "push held"
+  # lines prove only that a stamp file exists, not that the phone is on the topic.
+  # Called here, under `set +e` with every watcher already forked, so a DNS hang or
+  # a refusing ntfy cannot take the terminal down on its way to a clean bill.
+  notify_check
   hex_push "UP" "HEX-FVG-Breaker container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You get a buzz on every BUY, CLOSE, ADD and BLOWN, one per distinct ERROR/SKIP (not one per tick), and exactly ONE alert if the robot stops - with the reason and what was done about it - plus one when it is back. Nothing in between."
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.

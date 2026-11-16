@@ -16,7 +16,7 @@
 //|     * the bars/indicators: Time[i]/High[i] become iTime/iHigh,   |
 //|       the ATR is a handle read with CopyBuffer, and the two      |
 //|       trend EMAs are arithmetic on the trend timeframe's closes  |
-//|       (EmaCalc) - v4.03, because the terminal refuses to build   |
+//|       (EmaCalc) - v4.03-4.04, because the terminal refuses to build   |
 //|       an indicator on a timeframe whose data it cannot deliver,  |
 //|       and refuses once per call: "cannot load indicator          |
 //|       'Moving Average' (XAUUSD) [4805]", twice a second, forever.|
@@ -40,7 +40,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Forex-hex-algo-strategy-mt4"
 #property link      "https://github.com/Manged3/Forex-hex-algo-strategy-mt4"
-#property version   "4.03"
+#property version   "4.04"
 #property strict
 #property description "Trend trading through Fair Value Gaps, confirmed by Breaker and Mitigation blocks."
 
@@ -209,6 +209,7 @@ datetime  g_lastNotReadyLog = 0;
 //  (2) A closed bar's indicator value never changes. Recomputing it twenty times
 //      per tick is waste, and it is waste on the thread that also sends orders.
 #define HEX_IND_SLOTS 12
+#define TREND_PRIME_BARS 1000   // how much of the trend series to ask for, in one request
 int       g_icHandle[HEX_IND_SLOTS];
 int       g_icShift[HEX_IND_SLOTS];
 datetime  g_icBar[HEX_IND_SLOTS];
@@ -217,6 +218,7 @@ bool      g_icValid[HEX_IND_SLOTS];
 datetime  g_lastIndWarn = 0;
 datetime  g_lastHandleTry = 0;      // see OnTimer: one retry a minute, not one a second
 bool      g_trendSeriesDead = false; // the trend timeframe never delivered (pushed once)
+datetime  g_lastTrendWarn = 0;      // its own one-a-minute throttle: this number is watched
 
 //+------------------------------------------------------------------+
 //| INPUTS                                                           |
@@ -796,6 +798,32 @@ string TerminalState()
           SymbolsTotal(false)));
   }
 
+// "H1", not "ENUM_TIMEFRAMES::60": this build's EnumToString qualifies every enum
+// value, and a boot log that says "arithmetic on ENUM_TIMEFRAMES::60 closes (0 bars
+// there now)" is a paragraph where one word belongs (2026-11-16).
+string TfName(const ENUM_TIMEFRAMES tf)
+  {
+   switch(tf)
+     {
+      case PERIOD_CURRENT: return(TfName((ENUM_TIMEFRAMES)Period()));
+      case PERIOD_M1:      return("M1");
+      case PERIOD_M5:      return("M5");
+      case PERIOD_M15:     return("M15");
+      case PERIOD_M30:     return("M30");
+      case PERIOD_H1:      return("H1");
+      case PERIOD_H2:      return("H2");
+      case PERIOD_H3:      return("H3");
+      case PERIOD_H4:      return("H4");
+      case PERIOD_H6:      return("H6");
+      case PERIOD_H8:      return("H8");
+      case PERIOD_H12:     return("H12");
+      case PERIOD_D1:      return("D1");
+      case PERIOD_W1:      return("W1");
+      case PERIOD_MN1:     return("MN1");
+     }
+   return(StringFormat("TF%d", (int)tf));
+  }
+
 // Handles, retried instead of fatal.
 // A terminal that has not logged in yet has no data for the symbol, so
 // iATR answers INVALID_HANDLE. Returning INIT_FAILED for that makes MT5
@@ -829,7 +857,7 @@ int OnInit()
    // First line out, before anything can fail: if the journal shows this and
    // nothing after it, the fault is below; if the journal shows "loaded
    // successfully" and never this, the terminal never called OnInit at all.
-   Print(Prefix, ": OnInit on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()),
+   Print(Prefix, ": OnInit on ", _Symbol, " ", TfName(PERIOD_CURRENT),
          " | ", TerminalState());
 
    if(StringLen(TradeSymbol) > 0 && TradeSymbol != _Symbol)
@@ -876,7 +904,7 @@ int OnInit()
      }
    else
       Print(Prefix, ": handles ok (atr=", g_atrHandle, "); trend EMA", FastEMAPeriod, "/",
-            SlowEMAPeriod, " is arithmetic on ", EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
+            SlowEMAPeriod, " is arithmetic on ", TfName((ENUM_TIMEFRAMES)TrendTimeframe),
             " closes (", iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe), " bars there now)");
 
    if(!ClaimChart())
@@ -902,16 +930,29 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.03 on ", _Symbol, " ", EnumToString((ENUM_TIMEFRAMES)Period()), " | digits=", _Digits,
+   Print(Prefix, " v4.04 on ", _Symbol, " ", TfName(PERIOD_CURRENT), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
    // What this chart can actually SEE - before anything claims it is healthy.
    EnsureSubscribed();
 
-   LogEvent("INIT", StringFormat("v4.03 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   // The one series this terminal has to be ASKED for. The trend timeframe is not
+   // the chart's own, so nothing else has requested it - and on 2026-11-16 a fresh
+   // account still had 0 H1 bars a minute after authorizing, which is the whole
+   // reason the EA sat still. Ask at boot (once) instead of waiting for the first
+   // tick to need it, and put the number in the boot log, where it can be read
+   // without waiting for a throttled line.
+   MqlRates prime[];
+   int primed = CopyRates(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, 0, TREND_PRIME_BARS, prime);
+   Print(Prefix, ": trend series ", TfName((ENUM_TIMEFRAMES)TrendTimeframe), " on ", _Symbol,
+         " -> ", iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe), " bars now, asked for ",
+         TREND_PRIME_BARS, " (got ", primed, ", err=", GetLastError(),
+         "). The EMAs are computed from these, so this is the number that decides when trading starts.");
+
+   LogEvent("INIT", StringFormat("v4.04 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
-            _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
+            _Symbol, TfName(PERIOD_CURRENT),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
             EnumToString(TrendMode), EnumToString(EntryModel),
             Tp1Percent, Tp1RR, Tp2RR, (LetWinnersRun ? " (target removed once locked)" : ""),
@@ -1242,30 +1283,33 @@ void IndNotReady(const ENUM_TIMEFRAMES tf, const int handle, const int shift)
   }
 
 // The trend timeframe has fewer bars than the EMA needs. Nobody is to blame and
-// nothing is broken: ask for the series (CopyRates is the request), and say so
-// once per five minutes with the count, because "no trend" with no number is
-// indistinguishable from a broken filter.
+// nothing is broken: request the series (CopyRates IS the request), and say so
+// once a MINUTE while it lasts - this is the number that decides whether the EA
+// can trade at all, so it has to be watchable, not buried behind a 5-minute
+// throttle (2026-11-16: H1 was still at 0 bars a minute after authorizing).
 void TrendSeriesMissing(const ENUM_TIMEFRAMES tf, const int need)
   {
-   // After a quarter of an hour with an empty series this is no longer a warm-up,
-   // it is the reason the EA will not trade, and it earns a pushed ERROR once.
-   if(!g_trendSeriesDead && TimeLocal() - g_startedAt > 900 && iBars(_Symbol, tf) < need / 2)
+   // After a quarter of an hour this is no longer a warm-up: it is the reason the
+   // EA will not trade, and it earns one pushed ERROR. Guarded on g_startedAt, so
+   // the prime call from OnInit cannot fire it before the clock has started.
+   if(g_startedAt > 0 && !g_trendSeriesDead &&
+      TimeLocal() - g_startedAt > 900 && iBars(_Symbol, tf) < need)
      {
       g_trendSeriesDead = true;
       LogEvent("ERROR", StringFormat("%s on %s still has %d bars after %dm - the trend filter "
                "cannot run, so no trade can be taken. The chart timeframe is fine; the "
                "terminal is not delivering this one.",
-               EnumToString(tf), _Symbol, iBars(_Symbol, tf),
+               TfName(tf), _Symbol, iBars(_Symbol, tf),
                (int)((TimeLocal() - g_startedAt) / 60)));
      }
-   if(g_lastIndWarn > 0 && TimeLocal() - g_lastIndWarn < 300) return;
-   g_lastIndWarn = TimeLocal();
+   if(g_lastTrendWarn > 0 && TimeLocal() - g_lastTrendWarn < 60) return;
+   g_lastTrendWarn = TimeLocal();
    MqlRates r[];
-   CopyRates(_Symbol, tf, 0, need, r);
+   int got = CopyRates(_Symbol, tf, 0, TREND_PRIME_BARS, r);
    int err = GetLastError();
-   Print(Prefix, ": ", EnumToString(tf), " on ", _Symbol, " has ", iBars(_Symbol, tf),
-         " bars, the EMA needs ", need, " - asking the terminal for the series",
-         " (err=", err, "). No trend, no entry, until they arrive.");
+   Print(Prefix, ": ", TfName(tf), " on ", _Symbol, " has ", iBars(_Symbol, tf),
+         " bars, the EMA needs ", need, " - asked the terminal for ", TREND_PRIME_BARS,
+         " (got ", got, ", err=", err, "). No trend, no entry, until they arrive.");
   }
 
 // EMA of the trend timeframe, computed here on H1 closes. Seeded with the SMA of
@@ -1789,8 +1833,8 @@ int DetermineTrend()
       LogSkip("ema-no-data",
               StringFormat("%s EMA%d/%d on %s has no value yet (bars on %s=%d) - no trend, no entry",
                            _Symbol, FastEMAPeriod, SlowEMAPeriod,
-                           EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
-                           EnumToString((ENUM_TIMEFRAMES)TrendTimeframe),
+                           TfName((ENUM_TIMEFRAMES)TrendTimeframe),
+                           TfName((ENUM_TIMEFRAMES)TrendTimeframe),
                            iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe)));
       g_trendMsg = "ema=no-data";
       return(0);
@@ -2924,7 +2968,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.03  " + _Symbol + "  " + EnumToString((ENUM_TIMEFRAMES)Period()) + "\n";
+   s += Prefix + " FVG-Breaker v4.04  " + _Symbol + "  " + TfName(PERIOD_CURRENT) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";

@@ -557,36 +557,44 @@ check_eq "and nothing is killed" "0" "$(grep -c '^kill 5555' "$ACT" || true)"
 check_eq "and it is pushed once" "1" "$(grep -c '^push EA-INIT' "$ACT" || true)"
 MT5DIR="$TMP/mt5"
 
-echo "journal_hints: MetaQuotes' community login is not the broker login"
+echo "journal_hints: only lines that arrive while the container runs are reported"
 JH="$TMP/jh-logs"; mkdir -p "$JH"
-MT5_SERVER=Deriv-Demo; MT5_LOGIN=41311895; MT5_INSTANCE=1
+MT5_SERVER=TradeMaxGlobal-Demo; MT5_LOGIN=60169775; MT5_INSTANCE=1
 load_fn "$ENTRYPOINT" journal_hints >/dev/null
-jh_run() { # DIR STATE
+# The watcher takes a baseline the first time it sees a file and reads only what
+# arrives after that, because the volume keeps every earlier run's journal and
+# nothing rotates it. So a fixture line has to ARRIVE - on the first pass - the way
+# the terminal writes it, not sit in the file before the watcher starts.
+jh_run() { # DIR STATE [LINE-ARRIVING]
   ( i=0
-    sleep() { i=$((i + 1)); [ "$i" -ge 2 ] && exit 0; }
+    JLINE="${3:-}"; JFILE="$1/20261106.log"
+    sleep() { i=$((i + 1)); if [ "$i" -eq 1 ] && [ -n "$JLINE" ]; then printf '%s\n' "$JLINE" >> "$JFILE"; fi; [ "$i" -ge 2 ] && exit 0; return 0; }
     TMPDIR="$2"
     journal_hints "$1" )
 }
-printf '2\t03:38:26.115\tMQL5.community\tauthorization failed\n' > "$JH/20261106.log"
-out="$(jh_run "$JH" "$TMP/jh-state-a" 2>&1)"
+JH_REFUSAL="2 09:59:00.000 Network '60169775': authorization on TradeMaxGlobal-Demo failed (Invalid account)"
+# (a) The false alarm of 2026-11-16: a refusal left in the file by the PREVIOUS run
+# was announced as this run's at 10:19:42, while this run authorized at 10:19:50.
+printf '2 09:28:34.359 Network %s\n' "'60169775': no connection to TradeMaxGlobal-Demo" > "$JH/20261106.log"
+printf '%s\n' "$JH_REFUSAL" >> "$JH/20261106.log"
+out="$(jh_run "$JH" "$TMP/jh-state-stale" 2>&1)"
+check_not_contains "a refusal already in the file belongs to an earlier run, not this one" \
+  "refused login" "$out"
+check_eq "and this run's stale journal produces no hint at all" "0" \
+  "$(printf '%s' "$out" | grep -c . || true)"
+# (b) ...but one that arrives while the container is up still does, quoting the
+# broker's own verdict.
+out="$(jh_run "$JH" "$TMP/jh-state-live" "$JH_REFUSAL" 2>&1)"
+check_contains "a refusal that arrives while the container runs IS reported" "refused login" "$out"
+check_contains "and it quotes the server's own verdict" "Invalid account" "$out"
+check_contains "and says plainly that a dead account is not a container fault" \
+  "nothing here can make a dead account live" "$out"
+# (c) MetaQuotes' community login is not the broker login.
+out="$(jh_run "$JH" "$TMP/jh-state-comm" "2 03:38:26.115 MQL5.community authorization failed" 2>&1)"
 check_not_contains "a failed community login is NOT reported as a refused broker login" \
   "refused login" "$out"
 check_eq "and it says nothing at all about it" "0" \
   "$(printf '%s' "$out" | grep -c . || true)"
-printf "2\t03:38:30.000\tNetwork\t'41311895': authorization failed\n" >> "$JH/20261106.log"
-out="$(jh_run "$JH" "$TMP/jh-state-b" 2>&1)"
-check_contains "a broker refusal that names the account still gets the hint" \
-  "refused login" "$out"
-# 2026-11-16, the line that answered the whole session - and produced no hint,
-# because MT5 capitalised it: "authorization on <server> failed (Invalid account)"
-# matches neither "authorization failed" nor "invalid account" case-sensitively.
-printf "2\\t09:28:34.359\\tNetwork\\t'60169775': authorization on TradeMaxGlobal-Demo failed (Invalid account)\\n" >> "$JH/20261106.log"
-out="$(jh_run "$JH" "$TMP/jh-state-c" 2>&1)"
-check_contains "a refusal worded 'authorization on <server> failed' is still a refusal" \
-  "refused login" "$out"
-check_contains "and it quotes the server's own verdict" "Invalid account" "$out"
-check_contains "and says plainly that a dead account is not a container fault" \
-  "nothing here can make a dead account live" "$out"
 
 echo "hex_push: a boot loop cannot burn the topic's quota"
 MT5DIR="$TMP/push"; mkdir -p "$MT5DIR"
@@ -608,6 +616,39 @@ hp_run CLOSE >/dev/null
 check_eq "a BUY and a CLOSE are never held" "3" "$(wc -l < "$SENT" | tr -d ' ')"
 hp_run DIFFERENT-TITLE >/dev/null
 check_eq "a different title has its own window" "4" "$(wc -l < "$SENT" | tr -d ' ')"
+
+echo "notify_check: a boot says whether the phone is really on the topic"
+# "push held (UP): the same title went out 153s ago" proves a stamp file exists -
+# not that the phone is subscribed. A mistyped topic fails exactly like a missing
+# one, silently, so the boot asks ntfy for the topic's own cache (a poll, never a
+# publish: no quota spent, and it cannot ring anybody).
+load_fn "$ENTRYPOINT" notify_check >/dev/null
+nc_run() { # URL CODE BODY
+  ( MT5_NOTIFY_URL="${1:-}"; TMPDIR="$TMP"; NC_CODE="${2:-}"; NC_BODY="${3:-}"; NC_FILE=""
+    curl() {
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "-o" ] && [ "$#" -gt 1 ]; then NC_FILE="$2"; shift 2; else shift; fi
+      done
+      [ -n "$NC_FILE" ] && printf '%s' "$NC_BODY" > "$NC_FILE"
+      printf '%s' "$NC_CODE"
+    }
+    notify_check )
+}
+out="$(nc_run "" 200 "" 2>&1)"
+check_contains "an unset URL is said out loud, not left to silence" "notify: OFF" "$out"
+out="$(nc_run "https://ntfy.sh/hex-test" 200 '{"id":"a","event":"message","title":"HEX-FVG-Breaker UP"}' 2>&1)"
+check_contains "a topic with cached messages proves the channel works" "notify: OK" "$out"
+check_contains "and it names the topic it asked about" "topic hex-test" "$out"
+check_contains "and shows the last title, so the phone can be matched to it" "HEX-FVG-Breaker UP" "$out"
+out="$(nc_run "https://ntfy.sh/hex-test" 200 '[]' 2>&1)"
+check_contains "a reachable but empty topic is a WARNING, not a clean bill" "EMPTY for the last 12h" "$out"
+out="$(nc_run "https://ntfy.sh/hex-typo" 404 '' 2>&1)"
+check_contains "a topic that does not exist is named as the fault" "ntfy has no topic hex-typo" "$out"
+out="$(nc_run "https://ntfy.sh/hex-test" 000 '' 2>&1)"
+check_contains "no answer at all is its own verdict (DNS, firewall, bad URL)" "nothing answered" "$out"
+check_eq "and none of these ever turn into a push of their own" "0" \
+  "$(printf '%s' "$out" | grep -c 'push ' || true)"
+MT5_NOTIFY_URL="https://ntfy.sh/hex-test"
 
 
 echo "push_once_shape: one buzz per fault, not one per tick"
