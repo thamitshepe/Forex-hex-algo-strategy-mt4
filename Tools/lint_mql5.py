@@ -112,6 +112,7 @@ if for while switch return else do
 
 RETURN_TYPES = set("""
 void int long ulong short ushort char uchar bool double float string datetime color
+ENUM_TIMEFRAMES
 """.split())
 
 PROBLEMS = []
@@ -196,6 +197,16 @@ def check(path):
 
     for m in re.finditer(r"\bextern\b", code):
         PROBLEMS.append("'extern' at line %d -> use input/sinput in MQL5" % lineno(code, m.start()))
+
+    # A timeframe input written in MINUTES must never be cast to
+    # ENUM_TIMEFRAMES: MQL5's PERIOD_H1 is 16385, so a cast of 60 asks for a
+    # series that does not exist and the terminal answers iBars 0 / CopyRates -1
+    # (4401) / iMA 4805 - which reads exactly like a dead feed (2026-11-16).
+    # TfFromMinutes()/TrendTF() is the only door.
+    for m in re.finditer(r"\(\s*ENUM_TIMEFRAMES\s*\)\s*TrendTimeframe\b", code):
+        PROBLEMS.append("(ENUM_TIMEFRAMES)TrendTimeframe at line %d -> the input is "
+                        "minutes; use TrendTF()/TfFromMinutes()"
+                        % lineno(code, m.start()))
 
     # Function definitions: "<type> name(" at the start of a line.
     defs = {}

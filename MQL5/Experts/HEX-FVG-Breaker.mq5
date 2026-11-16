@@ -20,6 +20,12 @@
 //|       an indicator on a timeframe whose data it cannot deliver,  |
 //|       and refuses once per call: "cannot load indicator          |
 //|       'Moving Average' (XAUUSD) [4805]", twice a second, forever.|
+//|       ...and the real cause, found 2026-11-16 (v4.05): the       |
+//|       TrendTimeframe input is MINUTES, and 60 was being cast to  |
+//|       ENUM_TIMEFRAMES, where H1 is 16385. The terminal answered  |
+//|       iBars 0 / CopyRates -1 err 4401 / iMA 4805 for a timeframe|
+//|       that does not exist - every symptom of a dead feed, none   |
+//|       of them one. TfFromMinutes() now resolves it.              |
 //|     * the CSV logs live under MQL5/Files/HEX-Logs so the         |
 //|       container can mirror them (MT4 wrote to Common\).           |
 //|     * pushes are sent by the CONTAINER from these CSVs (curl),   |
@@ -571,12 +577,20 @@ void WriteHeartbeat()
    // mtime answers "is the EA loaded"; tick_age answers "is the chart being
    // fed" - the two silences of 2026-11-02 that looked identical from outside;
    // sel=0 means the symbol is not subscribed at all, which no restart can fix.
-   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d|sel=%d|spread=%d|open=%d|zones=%d|trend=%d\n",
+   // sync=/ping=/srv= were added last and appended at the end, because a reader
+   // that splits on '|' by position must keep working: srv is the last tick's own
+   // timestamp, so two heartbeats a minute apart say whether it is moving.
+   MqlTick ht;
+   bool hok = SymbolInfoTick(_Symbol, ht);
+   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d|sel=%d|spread=%d|open=%d|zones=%d|trend=%d|sync=%d|ping=%d|srv=%s\n",
                    TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
                    SecondsSinceTick(), AccountInfoDouble(ACCOUNT_EQUITY), g_tradesToday,
                    (int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT),
                    (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-                   CountPositions(), ArraySize(g_zones), g_trend));
+                   CountPositions(), ArraySize(g_zones), g_trend,
+                   (int)SymbolIsSynchronized(_Symbol),
+                   (int)TerminalInfoInteger(TERMINAL_PING_LAST),
+                   (hok && ht.time > 0) ? TimeToString(ht.time, TIME_DATE | TIME_SECONDS) : "none"));
    FileClose(h);
   }
 
@@ -775,7 +789,20 @@ void RetrySubscribe()
       if(!symbolNameReported) EnsureSubscribed();
       return;
      }
-   if((int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT) != 0) return;
+   if((int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT) != 0)
+     {
+      // Selected and still silent: a subscription that is present but no longer
+      // wired to the feed. Dropping it for one call and taking it again re-asks the
+      // server, which is the only repair available from inside the terminal. It
+      // runs from the stall line, so at most every five minutes.
+      if(SymbolIsSynchronized(_Symbol)) return;
+      SymbolSelect(_Symbol, false);
+      bool back = SymbolSelect(_Symbol, true);
+      LogEvent(back ? "INIT" : "ERROR", StringFormat("%s: symbol not synchronized with the server - "
+               "dropped and re-took the Market Watch subscription -> %s", _Symbol,
+               back ? "ok" : "FAILED"));
+      return;
+     }
    bool ok = SymbolSelect(_Symbol, true);
    LogEvent(ok ? "INIT" : "ERROR", StringFormat("the stall is a lost subscription - re-selecting %s "
             "in Market Watch -> %s", _Symbol, ok ? "ok" : "FAILED"));
@@ -798,6 +825,25 @@ string TerminalState()
           SymbolsTotal(false)));
   }
 
+// The feed's own account of itself, for the case where ticks have stopped.
+// Three causes look identical in the journal and this line separates them:
+// `srv=` frozen at the same second on two stall lines means the terminal is
+// receiving nothing (a server/route problem, no EA-side repair exists); `srv=`
+// advancing while tick_age climbs means ticks arrive and OnTick is not being
+// called (a chart problem); `sync=0` means the symbol never synchronized with
+// the server, which is the state that also refuses every history request - a
+// timeframe that will not build and a feed that will not tick are then the same
+// fault, and it is the terminal's, not the EA's.
+string FeedState()
+  {
+   MqlTick t;
+   bool ok = SymbolInfoTick(_Symbol, t);
+   string when = (ok && t.time > 0) ? TimeToString(t.time, TIME_DATE | TIME_SECONDS) : "none";
+   return(StringFormat("sync=%d ping=%dms srv=%s bid=%s",
+          (int)SymbolIsSynchronized(_Symbol),
+          (int)TerminalInfoInteger(TERMINAL_PING_LAST), when,
+          ok ? DoubleToString(t.bid, _Digits) : "-"));
+  }
 // "H1", not "ENUM_TIMEFRAMES::60": this build's EnumToString qualifies every enum
 // value, and a boot log that says "arithmetic on ENUM_TIMEFRAMES::60 closes (0 bars
 // there now)" is a paragraph where one word belongs (2026-11-16).
@@ -807,8 +853,15 @@ string TfName(const ENUM_TIMEFRAMES tf)
      {
       case PERIOD_CURRENT: return(TfName((ENUM_TIMEFRAMES)Period()));
       case PERIOD_M1:      return("M1");
+      case PERIOD_M2:      return("M2");
+      case PERIOD_M3:      return("M3");
+      case PERIOD_M4:      return("M4");
       case PERIOD_M5:      return("M5");
+      case PERIOD_M6:      return("M6");
+      case PERIOD_M10:     return("M10");
+      case PERIOD_M12:     return("M12");
       case PERIOD_M15:     return("M15");
+      case PERIOD_M20:     return("M20");
       case PERIOD_M30:     return("M30");
       case PERIOD_H1:      return("H1");
       case PERIOD_H2:      return("H2");
@@ -823,6 +876,48 @@ string TfName(const ENUM_TIMEFRAMES tf)
      }
    return(StringFormat("TF%d", (int)tf));
   }
+
+// The trend timeframe, resolved from an input that is written in MINUTES.
+//
+// 60 is not a timeframe: MQL5's PERIOD_H1 is 16385, and casting the minute count
+// straight to ENUM_TIMEFRAMES asks the terminal for a series that cannot exist.
+// It says so three different ways - iBars() 0, CopyRates() -1 with err=4401
+// (ERR_HISTORY_NOT_FOUND), iMA() 4805 (ERR_INDICATOR_CANNOT_CREATE) - and every
+// one of them reads like a terminal with no data. That is what a whole session
+// was spent chasing on 2026-11-16: the feed was fine, the filter was asking for
+// `TF60`. 1..30 are the same number in both readings, so only the rest needs a
+// table; 16385 is honoured as well, because that is what a .set saved from an
+// ENUM_TIMEFRAMES input carries. Anything else is H1, the documented default,
+// rather than a silent 0 bars.
+ENUM_TIMEFRAMES TfFromMinutes(const int v)
+  {
+   switch(v)
+     {
+      case 0:      return(PERIOD_CURRENT);
+      case PERIOD_M1:  case PERIOD_M2:  case PERIOD_M3:  case PERIOD_M4:
+      case PERIOD_M5:  case PERIOD_M6:  case PERIOD_M10: case PERIOD_M12:
+      case PERIOD_M15: case PERIOD_M20: case PERIOD_M30:
+                   return((ENUM_TIMEFRAMES)v);        // valid enum, and the same minutes
+      case 60:     return(PERIOD_H1);
+      case 120:    return(PERIOD_H2);
+      case 180:    return(PERIOD_H3);
+      case 240:    return(PERIOD_H4);
+      case 360:    return(PERIOD_H6);
+      case 480:    return(PERIOD_H8);
+      case 720:    return(PERIOD_H12);
+      case 1440:   return(PERIOD_D1);
+      case 10080:  return(PERIOD_W1);
+      case 43200:  return(PERIOD_MN1);
+      case PERIOD_H1:  case PERIOD_H2:  case PERIOD_H3:  case PERIOD_H4:
+      case PERIOD_H6:  case PERIOD_H8:  case PERIOD_H12:
+      case PERIOD_D1:  case PERIOD_W1:  case PERIOD_MN1:
+                   return((ENUM_TIMEFRAMES)v);        // already an enum value
+     }
+   return(PERIOD_H1);
+  }
+
+// One place for it, so no call site can cast the input again.
+ENUM_TIMEFRAMES TrendTF() { return(TfFromMinutes(TrendTimeframe)); }
 
 // Handles, retried instead of fatal.
 // A terminal that has not logged in yet has no data for the symbol, so
@@ -904,8 +999,8 @@ int OnInit()
      }
    else
       Print(Prefix, ": handles ok (atr=", g_atrHandle, "); trend EMA", FastEMAPeriod, "/",
-            SlowEMAPeriod, " is arithmetic on ", TfName((ENUM_TIMEFRAMES)TrendTimeframe),
-            " closes (", iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe), " bars there now)");
+            SlowEMAPeriod, " is arithmetic on ", TfName(TrendTF()),
+            " closes (", iBars(_Symbol, TrendTF()), " bars there now)");
 
    if(!ClaimChart())
       return(INIT_FAILED);
@@ -930,7 +1025,7 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.04 on ", _Symbol, " ", TfName(PERIOD_CURRENT), " | digits=", _Digits,
+   Print(Prefix, " v4.05 on ", _Symbol, " ", TfName(PERIOD_CURRENT), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
@@ -944,13 +1039,15 @@ int OnInit()
    // tick to need it, and put the number in the boot log, where it can be read
    // without waiting for a throttled line.
    MqlRates prime[];
-   int primed = CopyRates(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe, 0, TREND_PRIME_BARS, prime);
-   Print(Prefix, ": trend series ", TfName((ENUM_TIMEFRAMES)TrendTimeframe), " on ", _Symbol,
-         " -> ", iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe), " bars now, asked for ",
-         TREND_PRIME_BARS, " (got ", primed, ", err=", GetLastError(),
-         "). The EMAs are computed from these, so this is the number that decides when trading starts.");
+   int primed = CopyRates(_Symbol, TrendTF(), 0, TREND_PRIME_BARS, prime);
+   int primeErr = GetLastError();
+   Print(Prefix, ": trend series ", TfName(TrendTF()), " on ", _Symbol,
+         " -> ", iBars(_Symbol, TrendTF()), " bars now, asked for ",
+         TREND_PRIME_BARS, " (got ", primed, ", err=", primeErr,
+         "; input TrendTimeframe=", TrendTimeframe, " minutes). The EMAs are computed from",
+         " these, so this is the number that decides when trading starts.");
 
-   LogEvent("INIT", StringFormat("v4.04 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   LogEvent("INIT", StringFormat("v4.05 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
             _Symbol, TfName(PERIOD_CURRENT),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
@@ -1126,8 +1223,8 @@ void OnTimer()
       g_stallSince  = TimeLocal();
      }
    LogSkip("no-ticks", StringFormat("%dm without a tick on %s - the EA is attached and beating, "
-           "the chart is not being fed (no entry, no exit, nothing trading)",
-           idle / 60, _Symbol));
+           "the chart is not being fed (no entry, no exit, nothing trading) | %s",
+           idle / 60, _Symbol, FeedState()));
    // ...and the one repair the EA can attempt itself: a chart that lost its Market
    // Watch selection receives nothing, and re-selecting it starts the quotes again
    // without anyone touching the desktop.
@@ -1319,7 +1416,7 @@ void TrendSeriesMissing(const ENUM_TIMEFRAMES tf, const int need)
 // so the caller cannot mistake it for one.
 double EmaCalc(const int period, const int shift)
   {
-   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)TrendTimeframe;
+   ENUM_TIMEFRAMES tf = TrendTF();
    int need = shift + period + 8;                 // warm-up, then the bars reported on
    if(period < 1 || iBars(_Symbol, tf) < need)
      {
@@ -1349,7 +1446,7 @@ double EmaCalc(const int period, const int shift)
 // so a slot collision costs a recompute, never a wrong number.
 double Ema(const int period, const int shift)
   {
-   ENUM_TIMEFRAMES tf = (ENUM_TIMEFRAMES)TrendTimeframe;
+   ENUM_TIMEFRAMES tf = TrendTF();
    datetime bar = iTime(_Symbol, tf, shift);
    if(period < 1 || shift < 0 || bar == 0)
      {
@@ -1788,7 +1885,7 @@ bool ScanTrendSwings(double &h1, double &h2, double &l1, double &l2)
   {
    int fh = 0, fl = 0;
    int need = TrendSwingLookback;
-   ENUM_TIMEFRAMES ttf = (ENUM_TIMEFRAMES)TrendTimeframe;
+   ENUM_TIMEFRAMES ttf = TrendTF();
    int maxS = (int)MathMin(240.0, (double)(iBars(_Symbol, ttf) - 2 * need - 2));
    for(int s = 1 + need; s <= maxS; s++)
      {
@@ -1833,9 +1930,8 @@ int DetermineTrend()
       LogSkip("ema-no-data",
               StringFormat("%s EMA%d/%d on %s has no value yet (bars on %s=%d) - no trend, no entry",
                            _Symbol, FastEMAPeriod, SlowEMAPeriod,
-                           TfName((ENUM_TIMEFRAMES)TrendTimeframe),
-                           TfName((ENUM_TIMEFRAMES)TrendTimeframe),
-                           iBars(_Symbol, (ENUM_TIMEFRAMES)TrendTimeframe)));
+                           TfName(TrendTF()), TfName(TrendTF()),
+                           iBars(_Symbol, TrendTF())));
       g_trendMsg = "ema=no-data";
       return(0);
      }
@@ -2968,7 +3064,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.04  " + _Symbol + "  " + TfName(PERIOD_CURRENT) + "\n";
+   s += Prefix + " FVG-Breaker v4.05  " + _Symbol + "  " + TfName(PERIOD_CURRENT) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";

@@ -1326,6 +1326,21 @@ if [ -f "$EA" ]; then
     "$(python3 "$HERE/../../Tools/check_preset.py" "$EA" "$SET" >/dev/null 2>&1; echo $?)"
   check_eq "the MQL5 port has no MQL4-only API left in it" "0" \
     "$(python3 "$HERE/../../Tools/lint_mql5.py" "$EA" >/dev/null 2>&1; echo $?)"
+  # 2026-11-16: TrendTimeframe is an input in MINUTES, and casting it straight to
+  # ENUM_TIMEFRAMES asks the terminal for a series that cannot exist - MQL5's
+  # PERIOD_H1 is 16385, not 60. The terminal answered iBars 0, CopyRates -1 with
+  # err=4401 and, before that, iMA 4805: three different ways of saying "no such
+  # timeframe", every one of which reads like a dead feed. The feed was fine.
+  check_contains "the trend timeframe input is resolved from minutes" \
+    "ENUM_TIMEFRAMES TfFromMinutes(const int v)" "$(cat "$EA")"
+  check_contains "60 minutes is H1 - the enum's own 16385 is honoured too" \
+    "case 60:     return(PERIOD_H1);" "$(cat "$EA")"
+  check_contains "and there is one door to it, so no call site can cast again" \
+    "ENUM_TIMEFRAMES TrendTF() { return(TfFromMinutes(TrendTimeframe)); }" "$(cat "$EA")"
+  check_eq "no call site casts the minutes input to a timeframe" "0" \
+    "$(grep -c '(ENUM_TIMEFRAMES)TrendTimeframe' "$EA")"
+  check_eq "and the shipped preset's 60 still means H1" "0" \
+    "$(grep -q '^TrendTimeframe=60$' "$SET" && echo 0 || echo 1)"
 else
   bad "EA exists at MQL5/Experts/HEX-FVG-Breaker.mq5"
 fi
@@ -1348,6 +1363,18 @@ check_contains "the EA says why it left the chart" "void OnDeinit(" "$(cat "$EA"
 check_contains "with the reason named, not a number" "REASON_REMOVE" "$(cat "$EA")"
 check_contains "the reason the EA left still reaches the phone" \
   '*,DEINIT,*)' "$(cat "$ENTRYPOINT")"
+# A stall has three causes and they need three different fixes: the terminal is
+# receiving nothing (a route/server fault), ticks arrive and OnTick is not called
+# (a chart fault), or the symbol never synchronized (which is also what refuses
+# every history request - a timeframe that will not build). The stall line now
+# carries the facts that separate them, and the EA re-takes a subscription that is
+# selected but no longer wired to the feed.
+check_contains "a stall says whether the symbol is synchronized" \
+  'sync=%d ping=%dms srv=%s' "$(cat "$EA")"
+check_contains "and the last tick's own timestamp, so two lines can be compared" \
+  'srv=' "$(cat "$EA")"
+check_contains "a selected-but-dead subscription is dropped and re-taken" \
+  "dropped and re-took the Market Watch subscription" "$(cat "$EA")"
 check_contains "and so does the recovery when ticks come back" \
   '*,FEED,*)' "$(cat "$ENTRYPOINT")"
 check_contains "the container restarts the terminal when the feed stalls" \
