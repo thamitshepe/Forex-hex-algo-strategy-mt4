@@ -253,6 +253,30 @@ check_eq "and one in the middle, whatever follows it" "660" "$(hb_field "$HB" ti
 check_eq "a field this build does not write is unknown, not 0" "" "$(hb_field "$HB" nope)"
 check_eq "a missing file is not an error either" "" "$(hb_field "$TMP/nope.txt" sel)"
 
+# offline:no-ticks is one name for two faults with different fixes, and on
+# 2026-11-17 that cost three terminal restarts for a feed that was demonstrably
+# alive. srvage is the symbol's own tick age against the server clock: 0-5s means
+# the terminal IS being fed and the CHART is the thing with no data.
+load_fn "$ENTRYPOINT" alert_what >/dev/null
+load_fn "$ENTRYPOINT" alert_feed >/dev/null
+HBF="$TMP/hb-feed.txt"
+printf '2026.11.17 09:32:04|tick_age=900|equity=10.00|trades=0|sel=1|spread=16|sync=1|conn=1|msync=1|mbars=0|srvage=0|ping=92345\n' > "$HBF"
+out="$(alert_what offline:no-ticks 15 15 XAUUSD "$HBF")"
+check_contains "a stalled chart on a live feed names the CHART, not the feed" \
+  "The SYMBOL is being fed" "$out"
+check_contains "and counts the bars on the chart's own timeframe" \
+  "0 bars on the chart timeframe" "$out"
+check_contains "while still naming the stall in minutes" "15 minutes" "$out"
+printf '2026.11.17 09:32:04|tick_age=900|equity=10.00|trades=0|sel=1|spread=16|sync=1|conn=0|msync=0|mbars=0|srvage=7412|ping=92345\n' > "$HBF"
+out="$(alert_what offline:no-ticks 15 15 XAUUSD "$HBF")"
+check_contains "a symbol that is not ticked either blames the terminal" \
+  "terminal itself is receiving nothing" "$out"
+out="$(alert_what offline:no-ticks 15 15 XAUUSD)"
+check_not_contains "a beat from a build without the new fields says nothing extra" \
+  "being fed" "$out"
+out="$(alert_what offline:no-symbol 15 15 XAUUSD "$HBF")"
+check_contains "and the other states are untouched by it" "not subscribed" "$out"
+
 # The decision, not just the parsing. ONE thing pushes about the robot stopping
 # now, and it pushes when the STATE CHANGES: two watchers on two timers used to
 # buzz about the same incident, and a refused order (which the EA logs on every
@@ -267,7 +291,7 @@ ACTIONS="$TMP/aw-actions"
 MT5_SYMBOL="Volatility Boom 400 Index"; TERMINAL_PID=999999
 HEX_TICK_STALL_MIN=15; HEX_SILENCE_GRACE_MIN=0; HEX_ALERT_REPEAT_HOURS=6
 for fn in file_mtime hb_tick_age hb_field alert_read_state alert_write_state \
-          alert_what alert_facts alert_span alert_watcher; do
+          alert_what alert_feed alert_facts alert_span alert_watcher; do
   load_fn "$ENTRYPOINT" "$fn" >/dev/null
 done
 aw_run() { # one or two loop passes, whatever the status line says
@@ -278,14 +302,19 @@ aw_run() { # one or two loop passes, whatever the status line says
     alert_watcher )
 }
 : > "$ACTIONS"
-printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1|sel=1|spread=7\n' > "$AW"
+printf '2026.11.02 22:04:19|tick_age=3720|equity=9994.29|trades=1|sel=1|spread=7|sync=1|conn=1|msync=1|mbars=0|srvage=0|ping=92345\n' > "$AW"
 aw_run
 check_eq "a stalled feed raises exactly ONE alert" "1" "$(grep -c '^push ' "$ACTIONS")"
 check_contains "and it is titled OFFLINE" "push OFFLINE|" "$(cat "$ACTIONS")"
 check_contains "naming the stall in minutes, not the fault it is not" \
-  "has not ticked for 62 minutes" "$(cat "$ACTIONS")"
+  "has not been handed a tick for 62 minutes" "$(cat "$ACTIONS")"
 check_contains "with the figures that make it countable" "Equity 9994.29" "$(cat "$ACTIONS")"
 check_contains "and what was done about it" "attempt 1/3" "$(cat "$ACTIONS")"
+# The same numbers, read off the beat, say whether a restart can help at all.
+check_contains "and it says the terminal IS being fed, so the chart is the fault" \
+  "The SYMBOL is being fed" "$(cat "$ACTIONS")"
+check_contains "counting the bars on the chart's own timeframe" \
+  "0 bars on the chart timeframe" "$(cat "$ACTIONS")"
 check_eq "and restarts the terminal once, by pid" "1" "$(grep -c '^kill 999999' "$ACTIONS")"
 check_eq "and records the attempt on the volume" "1" \
   "$(grep -c '^1 ' "$MT5DIR/.hex-alert-tries")"
@@ -411,9 +440,14 @@ MT5DIR="$TMP/mt5"
 
 echo "login_report: the terminal's own journal decides whether anything downstream can work"
 LR="$TMP/lr-logs"; mkdir -p "$LR"
+# No baseline was taken in these fixtures, so every line in the file is this run's -
+# which is what the tests below are about (the stale-line case has its own block).
+JOURNAL_BASE="$TMP/lr-base-never-created"
 MT5_SERVER=TradeMaxGlobal-Demo; MT5_LOGIN=60169775
 load_fn "$ENTRYPOINT" servers_known >/dev/null
 load_fn "$ENTRYPOINT" server_addressed >/dev/null
+load_fn "$ENTRYPOINT" journal_baseline >/dev/null
+load_fn "$ENTRYPOINT" journal_since >/dev/null
 load_fn "$ENTRYPOINT" login_report >/dev/null
 lr_run() { # DIR
   ( sleep() { return 0; }
@@ -596,6 +630,70 @@ check_not_contains "a failed community login is NOT reported as a refused broker
 check_eq "and it says nothing at all about it" "0" \
   "$(printf '%s' "$out" | grep -c . || true)"
 
+echo "journal_since: a previous run's journal can never be this run's verdict"
+# 2026-11-17 09:25:32, from the live boot: three seconds in, before the terminal had
+# dialled, the container announced "login: OK - account 60169775 ..." and quoted a
+# line timestamped 09:06:55 - the PREVIOUS container's own successful login, still
+# sitting in the same daily file (the volume never rotates them). The mirror-image
+# bug came ten minutes later: login_watch's tail -n 200 window had scrolled past this
+# run's "authorized on", so it told the operator the desktop press "never reached the
+# terminal" while the journal said the account had been authorized all along.
+JB="$TMP/jb-logs"; mkdir -p "$JB"
+JOURNAL_BASE="$TMP/jb-base"
+load_fn "$ENTRYPOINT" journal_baseline >/dev/null
+load_fn "$ENTRYPOINT" journal_since >/dev/null
+load_fn "$ENTRYPOINT" login_report >/dev/null
+load_fn "$ENTRYPOINT" login_watch >/dev/null
+printf 'old line 1\nold line 2\n' > "$JB/20261117.log"
+journal_baseline "$JB"
+printf 'new line 1\nnew line 2\n' >> "$JB/20261117.log"
+check_eq "only the lines appended after the baseline are read" "new line 1 new line 2" \
+  "$(journal_since "$JB" | tr '\n' ' ' | sed 's/ $//')"
+printf 'x\n' > "$JB/20261118.log"
+check_eq "and a file the terminal creates AFTER the baseline is read whole" "x" \
+  "$(journal_since "$JB" | tail -1)"
+
+# (a) the lie of 09:25:32: a stale 'authorized on' in the file, and this run's own
+# verdict (a refusal) arriving after it. The old code saw both and said OK.
+printf "0\t09:06:55.839\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo through Access Server - US\n" > "$JB/20261117.log"
+rm -f "$JB/20261118.log"
+journal_baseline "$JB"
+printf "2\t09:25:38.253\tNetwork\t'60169775': no connection to TradeMaxGlobal-Demo\n" >> "$JB/20261117.log"
+out="$( ( sleep() { return 0; }; hex_push() { printf 'push %s\n' "$1"; }; login_report "$JB" ) 2>&1 )"
+check_contains "this run's refusal is the verdict, not the previous run's login" \
+  "login: REFUSED" "$out"
+check_not_contains "and the boot does not announce a login it never made" "login: OK" "$out"
+
+# (b) ...and the happy path still works: a login that arrives after the baseline IS
+# this run's, and is reported with the journal's own line.
+printf "0\t09:06:55.839\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo through Access Server - US\n" > "$JB/20261117.log"
+journal_baseline "$JB"
+printf "0\t09:25:38.253\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo through Access Server - US\n" >> "$JB/20261117.log"
+out="$( ( sleep() { return 0; }; hex_push() { :; }; login_report "$JB" ) 2>&1 )"
+check_contains "a login that arrives while the container runs is still an OK" "login: OK" "$out"
+check_contains "with the terminal's own line quoted" "Access Server - US" "$out"
+
+# (c) login_watch reads the whole run, not a 200-line window: on 2026-11-17 the
+# terminal wrote 300+ lines after authorizing, and the old window told the operator
+# to go and press Login again.
+printf 'previous run\n' > "$JB/20261117.log"
+journal_baseline "$JB"
+{ printf "0\t09:25:38.253\tNetwork\t'60169775': authorized on TradeMaxGlobal-Demo\n"; seq 1 300 | sed 's/^/chatter /'; } >> "$JB/20261117.log"
+out="$( ( sleep() { return 0; }; login_watch "$JB" ) 2>&1 )"
+check_eq "a login 300 lines back is still found, so nothing is claimed about a missing one" "0" \
+  "$(printf '%s' "$out" | grep -c . || true)"
+
+# The wiring, not just the mechanism: the baseline has to be taken BEFORE the terminal
+# can write its first line, and the verdict functions must not fall back to a window.
+check_eq "the baseline is taken before the terminal starts" "1" \
+  "$(awk '/journal_baseline "\$MT5DIR\/logs"/{b=NR} /^  launch_terminal$/{l=NR} END{print (b && l && b < l) ? 1 : 0}' "$ENTRYPOINT")"
+check_eq "no verdict is read out of a tail window any more" "0" \
+  "$(grep -cE 'tail -n (400|200) "\$cur"' "$ENTRYPOINT")"
+check_contains "the boot verifies the push it just sent, not only its HTTP code" \
+  'notify_verify "UP"' "$(cat "$ENTRYPOINT")"
+check_contains "and the offline alert gets the beat, so it can name feed vs chart" \
+  '"$tickm" "$sym" "$hb")' "$(cat "$ENTRYPOINT")"
+
 echo "hex_push: a boot loop cannot burn the topic's quota"
 MT5DIR="$TMP/push"; mkdir -p "$MT5DIR"
 MT5_NOTIFY_URL="https://ntfy.sh/hex-test"
@@ -622,17 +720,27 @@ echo "notify_check: a boot says whether the phone is really on the topic"
 # not that the phone is subscribed. A mistyped topic fails exactly like a missing
 # one, silently, so the boot asks ntfy for the topic's own cache (a poll, never a
 # publish: no quota spent, and it cannot ring anybody).
+load_fn "$ENTRYPOINT" ntfy_poll >/dev/null
+load_fn "$ENTRYPOINT" ntfy_count >/dev/null
+load_fn "$ENTRYPOINT" ntfy_peek >/dev/null
+load_fn "$ENTRYPOINT" ntfy_json >/dev/null
 load_fn "$ENTRYPOINT" notify_check >/dev/null
 nc_run() { # URL CODE BODY
   ( MT5_NOTIFY_URL="${1:-}"; TMPDIR="$TMP"; NC_CODE="${2:-}"; NC_BODY="${3:-}"; NC_FILE=""
+    NC_URL_FILE="$TMP/nc-url"; rm -f "$NC_URL_FILE"
     curl() {
+      # The URL goes to a FILE, not a shell variable: ntfy_poll calls curl from a
+      # command substitution, so anything the stub assigns to a variable dies with
+      # that subshell - the same trap ntfy_poll itself had to be fixed for.
+      printf '%s\n' "$*" > "$NC_URL_FILE"
       while [ "$#" -gt 0 ]; do
         if [ "$1" = "-o" ] && [ "$#" -gt 1 ]; then NC_FILE="$2"; shift 2; else shift; fi
       done
       [ -n "$NC_FILE" ] && printf '%s' "$NC_BODY" > "$NC_FILE"
       printf '%s' "$NC_CODE"
     }
-    notify_check )
+    notify_check
+    printf 'url:%s\n' "$(cat "$NC_URL_FILE" 2>/dev/null)" )
 }
 out="$(nc_run "" 200 "" 2>&1)"
 check_contains "an unset URL is said out loud, not left to silence" "notify: OFF" "$out"
@@ -640,8 +748,28 @@ out="$(nc_run "https://ntfy.sh/hex-test" 200 '{"id":"a","event":"message","title
 check_contains "a topic with cached messages proves the channel works" "notify: OK" "$out"
 check_contains "and it names the topic it asked about" "topic hex-test" "$out"
 check_contains "and shows the last title, so the phone can be matched to it" "HEX-FVG-Breaker UP" "$out"
+# The URL is the bug that made every boot report EMPTY on 2026-11-17: ntfy serves the
+# topic URL itself as its web app (a 4.5 kB HTML page, HTTP 200, no messages in it), and
+# the machine-readable cache is only at <topic>/json?poll=1.
+check_contains "the poll asks ntfy's JSON API, not the web app" \
+  "/json?poll=1&since=12h" "$out"
+out="$(nc_run "https://ntfy.sh/hex-test" 200 '<!doctype html><html>ntfy web</html>' 2>&1)"
+check_contains "a 200 that is not JSON is named as a URL fault, not an empty topic" \
+  "is NOT an empty topic" "$out"
+check_not_contains "and it is not reported as an empty topic" "holds NO message" "$out"
+# A self-hosted ntfy needs ?auth=…; the poll must carry it, and the log must not.
+out="$(nc_run "https://ntfy.sh/hex-test?auth=tok123" 200 '[]' 2>&1)"
+check_contains "an access token on the URL is carried into the poll" "auth=tok123" "$out"
+check_not_contains "but the log line never prints it" "tok123" \
+  "$(printf '%s' "$out" | grep -v '^url:')"
 out="$(nc_run "https://ntfy.sh/hex-test" 200 '[]' 2>&1)"
-check_contains "a reachable but empty topic is a WARNING, not a clean bill" "EMPTY for the last 12h" "$out"
+check_contains "a reachable but empty topic is a WARNING, not a clean bill" "holds NO message in 12h" "$out"
+# 2026-11-17: the boot said EMPTY while the same volume had been pushing for hours,
+# and there was no way to tell a truly empty topic from a poll that failed to parse
+# its answer. The verdict now carries its evidence.
+check_contains "and it shows the body the poll actually returned" "2 byte(s): []" "$out"
+out="$(nc_run "https://ntfy.sh/hex-test" 200 '{"event": "message", "title": "HEX-FVG-Breaker UP"}' 2>&1)"
+check_contains "a JSON answer with spaces is still read as a message" "notify: OK" "$out"
 out="$(nc_run "https://ntfy.sh/hex-typo" 404 '' 2>&1)"
 check_contains "a topic that does not exist is named as the fault" "ntfy has no topic hex-typo" "$out"
 out="$(nc_run "https://ntfy.sh/hex-test" 000 '' 2>&1)"
@@ -650,6 +778,34 @@ check_eq "and none of these ever turn into a push of their own" "0" \
   "$(printf '%s' "$out" | grep -c 'push ' || true)"
 MT5_NOTIFY_URL="https://ntfy.sh/hex-test"
 
+
+echo "notify_verify: a 2xx is not proof the push landed - the topic has to hold it"
+# "push sent (UP)" only means ntfy answered. On 2026-11-17 the boot's own poll of the
+# topic found NOTHING while the same volume had been pushing for hours, and neither
+# line could tell the operator whether the URL, the topic or the phone was wrong. So
+# the boot now asks for the message it just sent, by title.
+load_fn "$ENTRYPOINT" notify_verify >/dev/null
+nv_run() { # BODY
+  ( MT5_NOTIFY_URL="https://ntfy.sh/hex-test"; TMPDIR="$TMP"; NV_BODY="$1"; NV_FILE=""
+    sleep() { return 0; }
+    curl() {
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "-o" ] && [ "$#" -gt 1 ]; then NV_FILE="$2"; shift 2; else shift; fi
+      done
+      [ -n "$NV_FILE" ] && printf '%s' "$NV_BODY" > "$NV_FILE"
+      printf 200
+    }
+    notify_verify "UP" )
+}
+out="$(nv_run '{"id":"a","event":"message","title":"HEX-FVG-Breaker UP","message":"up"}' 2>&1)"
+check_contains "a push that the topic really holds is VERIFIED" "notify: VERIFIED" "$out"
+check_contains "and it names the message it looked for" "HEX-FVG-Breaker UP" "$out"
+out="$(nv_run '{"event":"message","title":"HEX-FVG-Breaker SKIP"}' 2>&1)"
+check_contains "a 2xx whose message is NOT in the topic is a warning" "does not hold it" "$out"
+check_contains "and it shows what the topic handed back instead" "HEX-FVG-Breaker SKIP" "$out"
+out="$( MT5_NOTIFY_URL=""; notify_verify "UP" 2>&1 )"
+check_eq "with no URL configured it says nothing at all" "0" \
+  "$(printf '%s' "$out" | grep -c . || true)"
 
 echo "push_once_shape: one buzz per fault, not one per tick"
 MT5DIR="$TMP/shape"; mkdir -p "$MT5DIR"
@@ -774,9 +930,15 @@ load_fn "$ENTRYPOINT" main >/dev/null
   boot_guard() { :; }; start_desktop() { :; }; ensure_terminal() { :; }
   repair_symbol_bases() { :; }; sync_ea() { :; }; compile_ea() { :; }
   ensure_single_chart() { :; }; write_mt5_ini() { :; }; launch_terminal() { :; }
+  journal_baseline() { :; }
   wait_for_terminal() { :; }; report_isolation() { :; }; lease_keeper() { :; }
   mirror_dir() { :; }; journal_hints() { :; }; login_report() { :; }; ea_watchdog() { :; }
   desktop_keeper() { :; }; push_watcher() { :; }; alert_watcher() { :; }
+  # notify_check and notify_verify are the boot's only real network calls, and they
+  # are defined by the tests above, so without a stub main would spend a minute on
+  # ntfy.sh here - which is also how this test broke: the uptime in the exit line is
+  # the real $SECONDS.
+  notify_check() { :; }; notify_verify() { :; }
   hex_push() { :; }
   wait_terminal_gone() { TERMINAL_RC=7; }   # the terminal died, rc 7
   main
@@ -1369,10 +1531,38 @@ check_contains "the reason the EA left still reaches the phone" \
 # every history request - a timeframe that will not build). The stall line now
 # carries the facts that separate them, and the EA re-takes a subscription that is
 # selected but no longer wired to the feed.
-check_contains "a stall says whether the symbol is synchronized" \
-  'sync=%d ping=%dms srv=%s' "$(cat "$EA")"
+#
+# 2026-11-17 added the fact that settles it: srvage, the age of the SYMBOL's own
+# last tick on the server clock. On the live account that morning srvage was 0-1s
+# for sixteen minutes (bid moving, sync=1, 248 symbols) while OnTick was never
+# called once - so the feed was perfect and the CHART was the fault, and the
+# container spent three terminal restarts on "no ticks", the repair for the other
+# one. mbars/msync name what the chart is missing.
+check_contains "a stall says whether the symbol is synchronized" 'sync=%d conn=%d' "$(cat "$EA")"
+check_contains "the chart's own series state, and the bars it has" \
+  'msync=%d mbars=%d srvage=%d' "$(cat "$EA")"
 check_contains "and the last tick's own timestamp, so two lines can be compared" \
   'srv=' "$(cat "$EA")"
+check_contains "the beat carries the same facts, so the alert can name the fault" \
+  '|conn=%d|msync=%d|mbars=%d|srvage=%d|' "$(cat "$EA")"
+check_contains "a chart whose series never synchronized is asked for it" \
+  'CopyRates(_Symbol, PERIOD_CURRENT, 0, 64, cr)' "$(cat "$EA")"
+check_contains "and a chart the terminal simply does not tick is named as that" \
+  "the terminal HAS ticks for" "$(cat "$EA")"
+# ...and then the EA reloads the chart itself, because the container's only lever is
+# a terminal restart, and a restart re-opens the chart the same way it was opened the
+# first time. Bounded to once per terminal start: a temporary global variable survives
+# the re-init the reload causes and dies with the terminal.
+check_contains "a chart that is fed at the symbol level is reloaded by the EA" \
+  "ChartSetSymbolPeriod(0, _Symbol, PERIOD_CURRENT)" "$(cat "$EA")"
+check_contains "and only when the symbol really is being ticked" \
+  "srvage >= 0 && srvage <= 5" "$(cat "$EA")"
+check_contains "with the bound on the volume, not on the EA's memory" \
+  "GlobalVariableCheck(once)" "$(cat "$EA")"
+check_eq "a self-inflicted reload is not announced as the expert leaving" "1" \
+  "$(grep -c 'if(g_reinitRequested)' "$EA")"
+check_eq "saying it once per EA load, not once per stall line" "1" \
+  "$(grep -c 'g_feedVerdictSaid = true' "$EA")"
 check_contains "a selected-but-dead subscription is dropped and re-taken" \
   "dropped and re-took the Market Watch subscription" "$(cat "$EA")"
 check_contains "and so does the recovery when ticks come back" \

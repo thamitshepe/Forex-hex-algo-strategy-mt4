@@ -83,10 +83,10 @@ MathAbs MathMax MathMin MathFloor MathCeil MathRound MathSqrt MathPow MathMod Ma
 MathIsValidNumber NormalizeDouble DoubleToString IntegerToString StringFormat StringLen StringFind
 StringSubstr StringReplace StringToUpper StringToLower StringTrimLeft StringTrimRight StringSplit
 StringToCharArray StringToShortArray StringGetCharacter CharToString StringConcatenate EnumToString
-TimeCurrent TimeLocal TimeToStruct StructToTime TimeToString StringToTime PeriodSeconds Period
+TimeCurrent TimeLocal TimeTradeServer TimeToStruct StructToTime TimeToString StringToTime PeriodSeconds Period
 Bars iBars iBarShift iTime iOpen iHigh iLow iClose iTickVolume iRealVolume iSpread iHighest iLowest
 iATR iMA iRSI iMACD iStochastic iBands iADX IndicatorRelease CopyBuffer CopyRates CopyTime CopyClose
-BarsCalculated
+BarsCalculated SeriesInfoInteger
 CopyHigh CopyLow CopyOpen ArrayResize ArraySize ArraySetAsSeries ArrayCopy ArrayInitialize
 AccountInfoDouble AccountInfoInteger AccountInfoString AccountCurrency
 SymbolInfoDouble SymbolInfoInteger SymbolInfoString SymbolInfoTick SymbolSelect SymbolIsSynchronized
@@ -99,7 +99,7 @@ HistoryDealGetInteger HistoryDealGetString HistoryOrdersTotal HistoryOrderGetTic
 GlobalVariableSet GlobalVariableGet GlobalVariableCheck GlobalVariableDel GlobalVariableTemp
 FileOpen FileClose FileSeek FileWriteString FileWrite FileReadString FileSize FileIsEnding FolderCreate
 ObjectCreate ObjectDelete ObjectSetInteger ObjectSetDouble ObjectSetString ObjectsDeleteAll
-ChartRedraw ChartID ChartSymbol ChartPeriod
+ChartRedraw ChartID ChartSymbol ChartPeriod ChartSetSymbolPeriod
 Print PrintFormat Comment Alert SendNotification WebRequest Sleep ResetLastError GetLastError
 EventSetTimer EventKillTimer EventSetMillisecondTimer
 TerminalInfoInteger TerminalInfoDouble TerminalInfoString MQLInfoInteger MQLInfoString

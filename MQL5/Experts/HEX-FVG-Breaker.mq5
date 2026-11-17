@@ -26,6 +26,13 @@
 //|       iBars 0 / CopyRates -1 err 4401 / iMA 4805 for a timeframe|
 //|       that does not exist - every symptom of a dead feed, none   |
 //|       of them one. TfFromMinutes() now resolves it.              |
+//|       v4.06 then answered the next question the log asked: the   |
+//|       H1 series was fine (5193 bars), the SYMBOL had a fresh     |
+//|       tick every second and the chart had none - so the beat now |
+//|       carries srvage/msync/mbars/conn, the stall asks for the    |
+//|       CHART's series the way it asked for H1's, and a chart the  |
+//|       terminal never ticked is reported as a chart fault instead |
+//|       of costing three terminal restarts for a feed that was up. |
 //|     * the CSV logs live under MQL5/Files/HEX-Logs so the         |
 //|       container can mirror them (MT4 wrote to Common\).           |
 //|     * pushes are sent by the CONTAINER from these CSVs (curl),   |
@@ -46,7 +53,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Forex-hex-algo-strategy-mt4"
 #property link      "https://github.com/Manged3/Forex-hex-algo-strategy-mt4"
-#property version   "4.04"
+#property version   "4.06"
 #property strict
 #property description "Trend trading through Fair Value Gaps, confirmed by Breaker and Mitigation blocks."
 
@@ -195,6 +202,14 @@ int       g_atrHandle   = INVALID_HANDLE;
 string    g_csvName     = "";       // the event CSV the container mirrors
 datetime  g_startedAt   = 0;        // TimeLocal of OnInit (a chart that never ticks stalls too)
 datetime  g_lastTickLocal = 0;
+// One utterance per EA load for "the terminal has ticks and this chart has none" -
+// a fault the container's own alert used to blame on the feed.
+bool      g_feedVerdictSaid = false;
+// Stalls seen since this EA load, and whether the deinit about to happen is the
+// expert reloading the chart itself (a reload must not read as "the expert left the
+// chart" to the container, which pushes a DEINIT row to the phone).
+int       g_stallCount = 0;
+bool      g_reinitRequested = false;
 datetime  g_lastHeartbeat = 0;
 int       g_lastStallLog  = 0;
 string    g_lastSkipKey   = "";
@@ -574,21 +589,29 @@ void WriteHeartbeat()
    int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI);
    if(h == INVALID_HANDLE) return;
    // "<local time>|tick_age=<s>|equity=..|trades=..|sel=..|spread=..".
-   // mtime answers "is the EA loaded"; tick_age answers "is the chart being
-   // fed" - the two silences of 2026-11-02 that looked identical from outside;
-   // sel=0 means the symbol is not subscribed at all, which no restart can fix.
-   // sync=/ping=/srv= were added last and appended at the end, because a reader
-   // that splits on '|' by position must keep working: srv is the last tick's own
-   // timestamp, so two heartbeats a minute apart say whether it is moving.
+   // mtime answers "is the EA loaded"; tick_age answers "is the chart being fed" -
+   // the two silences of 2026-11-02 that looked identical from outside; sel=0 means
+   // the symbol is not subscribed at all, which no restart can fix.
+   //
+   // Added 2026-11-17, all appended at the end and all plain numbers, because the
+   // container's hb_field() reads "<key>=<digits>": sync (symbol), conn (terminal),
+   // msync (the CHART's series), mbars (bars on the chart's own timeframe), srvage
+   // (age of the symbol's last tick on the server clock). srvage is what separates
+   // "the feed is dead" from "the chart is not being ticked although the feed is
+   // alive" - a distinction the three restarts of 2026-11-17 spent on the wrong one.
    MqlTick ht;
    bool hok = SymbolInfoTick(_Symbol, ht);
-   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d|sel=%d|spread=%d|open=%d|zones=%d|trend=%d|sync=%d|ping=%d|srv=%s\n",
+   int hsrvage = (hok && ht.time > 0) ? (int)(TimeTradeServer() - ht.time) : -1;
+   FileWriteString(h, StringFormat("%s|tick_age=%d|equity=%.2f|trades=%d|sel=%d|spread=%d|open=%d|zones=%d|trend=%d|sync=%d|conn=%d|msync=%d|mbars=%d|srvage=%d|ping=%d|srv=%s\n",
                    TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
                    SecondsSinceTick(), AccountInfoDouble(ACCOUNT_EQUITY), g_tradesToday,
                    (int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT),
                    (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
                    CountPositions(), ArraySize(g_zones), g_trend,
                    (int)SymbolIsSynchronized(_Symbol),
+                   (int)TerminalInfoInteger(TERMINAL_CONNECTED),
+                   (int)SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED),
+                   iBars(_Symbol, PERIOD_CURRENT), hsrvage,
                    (int)TerminalInfoInteger(TERMINAL_PING_LAST),
                    (hok && ht.time > 0) ? TimeToString(ht.time, TIME_DATE | TIME_SECONDS) : "none"));
    FileClose(h);
@@ -781,6 +804,15 @@ void EnsureSubscribed()
 // about a lost subscription from inside. A name the server does not carry cannot
 // be fixed in this loop - but if the list was still empty when OnInit ran (a
 // terminal that had not synchronized yet), the fault is named here instead, once.
+//
+// Rewritten 2026-11-17, because the first version repaired the wrong thing and
+// said nothing about it. Measured on the live account that morning: the SYMBOL was
+// being fed perfectly (SymbolInfoTick fresh to the second, bid moving, sync=1,
+// 248 symbols), while OnTick was never called once in sixteen minutes - and the
+// container spent three terminal restarts on "no ticks", the fix for a dead feed.
+// The chart is the thing that has no data, so ask for the chart's own series (the
+// same request that built the H1 series, and the only one available in-process),
+// then say out loud which of the two faults this is.
 void RetrySubscribe()
   {
    int total = SymbolsTotal(false);
@@ -789,13 +821,36 @@ void RetrySubscribe()
       if(!symbolNameReported) EnsureSubscribed();
       return;
      }
-   if((int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT) != 0)
+   if((int)SymbolInfoInteger(_Symbol, SYMBOL_SELECT) == 0)
+     {
+      bool ok = SymbolSelect(_Symbol, true);
+      LogEvent(ok ? "INIT" : "ERROR", StringFormat("the stall is a lost subscription - re-selecting %s "
+               "in Market Watch -> %s", _Symbol, ok ? "ok" : "FAILED"));
+      return;
+     }
+
+   // The chart's series, asked for by name. A chart [StartUp] opened while the
+   // account was still authorizing can carry a series the terminal never built;
+   // MT5 then delivers ticks for the symbol and none for the chart. CopyRates is
+   // what turns SERIES_SYNCHRONIZED from 0 to 1, and it costs one call.
+   if((int)SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED) == 0)
+     {
+      MqlRates cr[];
+      ResetLastError();
+      int got = CopyRates(_Symbol, PERIOD_CURRENT, 0, 64, cr);
+      int err = (got < 0) ? GetLastError() : 0;
+      LogEvent("INIT", StringFormat("the CHART's series %s %s is not synchronized (%d bars there): "
+               "asked the terminal for 64 bars -> %d (err=%d). A chart opened before the account "
+               "signed in can sit like this for ever, and its ticks never start.",
+               _Symbol, TfName(PERIOD_CURRENT), iBars(_Symbol, PERIOD_CURRENT), got, err));
+     }
+
+   if(!SymbolIsSynchronized(_Symbol))
      {
       // Selected and still silent: a subscription that is present but no longer
       // wired to the feed. Dropping it for one call and taking it again re-asks the
       // server, which is the only repair available from inside the terminal. It
       // runs from the stall line, so at most every five minutes.
-      if(SymbolIsSynchronized(_Symbol)) return;
       SymbolSelect(_Symbol, false);
       bool back = SymbolSelect(_Symbol, true);
       LogEvent(back ? "INIT" : "ERROR", StringFormat("%s: symbol not synchronized with the server - "
@@ -803,9 +858,51 @@ void RetrySubscribe()
                back ? "ok" : "FAILED"));
       return;
      }
-   bool ok = SymbolSelect(_Symbol, true);
-   LogEvent(ok ? "INIT" : "ERROR", StringFormat("the stall is a lost subscription - re-selecting %s "
-            "in Market Watch -> %s", _Symbol, ok ? "ok" : "FAILED"));
+
+   // Both subscriptions are fine. Then the fault is MT5 not handing this chart the
+   // ticks it plainly has. Two escalating levers, both bounded, because the container
+   // only restarts the terminal three times and a restart reproduces a chart that was
+   // opened before the account signed in:
+   //
+   //   1. from the second stall on, ask the terminal to RELOAD this chart
+   //      (ChartSetSymbolPeriod with the chart's own symbol and period is the
+   //      documented "reload" idiom). It re-initialises the expert once, which is
+   //      why it happens at most once per terminal start - a temporary global
+   //      variable survives the re-init and dies with the terminal.
+   //   2. otherwise say the truth once, with the numbers, so the container's alert
+   //      can stop blaming the feed.
+   MqlTick t;
+   bool ok = SymbolInfoTick(_Symbol, t);
+   int srvage = (ok && t.time > 0) ? (int)(TimeTradeServer() - t.time) : -1;
+   if(srvage >= 0 && srvage <= 5)
+     {
+      string once = "HEX-reload-" + _Symbol;
+      if(g_stallCount >= 2 && !GlobalVariableCheck(once))
+        {
+         GlobalVariableTemp(once);
+         GlobalVariableSet(once, (double)TimeLocal());
+         g_reinitRequested = true;
+         LogEvent("INIT", StringFormat("the terminal has ticks for %s (%ds old) and this chart has none: "
+                  "reloading the chart (ChartSetSymbolPeriod %s %s) to make the terminal re-request its "
+                  "series. Once per terminal start; the expert re-initialises. Bars on %s=%d, series sync=%d.",
+                  _Symbol, srvage, _Symbol, TfName(PERIOD_CURRENT),
+                  TfName(PERIOD_CURRENT), iBars(_Symbol, PERIOD_CURRENT),
+                  (int)SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED)));
+         ChartSetSymbolPeriod(0, _Symbol, PERIOD_CURRENT);
+         return;
+        }
+     }
+   if(g_feedVerdictSaid) return;
+   if(srvage < 0 || srvage > 5) return;            // no tick either: that IS a dead feed
+   g_feedVerdictSaid = true;
+   LogEvent("ERROR", StringFormat("the terminal HAS ticks for %s (its last tick is %ds old on the "
+            "server clock, bid %s) and the chart series is synchronized, but this chart has been "
+            "handed none of them for %dm - so the feed is not the fault and restarting for \"no "
+            "ticks\" cannot fix it. The chart is: re-open it on the desktop (Ctrl+E the expert back "
+            "on), or restart the terminal. Bars on %s=%d, series sync=%d.",
+            _Symbol, srvage, ok ? DoubleToString(t.bid, _Digits) : "-",
+            SecondsSinceTick() / 60, TfName(PERIOD_CURRENT), iBars(_Symbol, PERIOD_CURRENT),
+            (int)SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED)));
   }
 
 //+------------------------------------------------------------------+
@@ -827,20 +924,30 @@ string TerminalState()
 
 // The feed's own account of itself, for the case where ticks have stopped.
 // Three causes look identical in the journal and this line separates them:
-// `srv=` frozen at the same second on two stall lines means the terminal is
-// receiving nothing (a server/route problem, no EA-side repair exists); `srv=`
-// advancing while tick_age climbs means ticks arrive and OnTick is not being
-// called (a chart problem); `sync=0` means the symbol never synchronized with
-// the server, which is the state that also refuses every history request - a
-// timeframe that will not build and a feed that will not tick are then the same
-// fault, and it is the terminal's, not the EA's.
+//
+//   srvage   the SYMBOL's own last tick against the server clock (TimeTradeServer
+//            needs no feed to work). 0-2 seconds = the terminal IS being fed, so a
+//            chart with no OnTick is a CHART fault, not a feed one - which is
+//            exactly what 2026-11-17 looked like: sync=1, bid moving every second,
+//            srv=now, and not one OnTick in sixteen minutes while the container
+//            restarted the terminal three times for "no ticks".
+//   msync    whether the CHART's series is synchronized. A chart opened by
+//            [StartUp] before the account had authorized can sit with a series the
+//            terminal never built, and MT5 then never starts ticks for it.
+//   conn     the terminal's own connection flag, so "offline mode" cannot hide
+//            behind a live symbol tick.
 string FeedState()
   {
    MqlTick t;
    bool ok = SymbolInfoTick(_Symbol, t);
    string when = (ok && t.time > 0) ? TimeToString(t.time, TIME_DATE | TIME_SECONDS) : "none";
-   return(StringFormat("sync=%d ping=%dms srv=%s bid=%s",
+   int srvage = (ok && t.time > 0) ? (int)(TimeTradeServer() - t.time) : -1;
+   return(StringFormat("sync=%d conn=%d msync=%d mbars=%d srvage=%d ping=%dms srv=%s bid=%s",
           (int)SymbolIsSynchronized(_Symbol),
+          (int)TerminalInfoInteger(TERMINAL_CONNECTED),
+          (int)SeriesInfoInteger(_Symbol, PERIOD_CURRENT, SERIES_SYNCHRONIZED),
+          iBars(_Symbol, PERIOD_CURRENT),
+          srvage,
           (int)TerminalInfoInteger(TERMINAL_PING_LAST), when,
           ok ? DoubleToString(t.bid, _Digits) : "-"));
   }
@@ -949,6 +1056,13 @@ int OnInit()
   {
    EnsureFolders();
 
+   // Globals are re-initialised by MQL5 on every (re)init, but say it out loud: this
+   // flag decides whether the deinit that a chart reload causes is announced as an
+   // INIT (self-inflicted) or a DEINIT (which the container pushes to the phone).
+   g_reinitRequested = false;
+   g_feedVerdictSaid  = false;
+   g_stallCount       = 0;
+
    // First line out, before anything can fail: if the journal shows this and
    // nothing after it, the fault is below; if the journal shows "loaded
    // successfully" and never this, the terminal never called OnInit at all.
@@ -1025,7 +1139,7 @@ int OnInit()
    EventSetTimer(1);
 
    if(DryRun) Print(Prefix, ": DRY RUN - signals are logged and drawn, no orders are sent.");
-   Print(Prefix, " v4.05 on ", _Symbol, " ", TfName(PERIOD_CURRENT), " | digits=", _Digits,
+   Print(Prefix, " v4.06 on ", _Symbol, " ", TfName(PERIOD_CURRENT), " | digits=", _Digits,
          " | $", DoubleToString(UsdPerPointPerLot(), 4), " per point per lot | contract=",
          DoubleToString(ContractSize(), 0));
    Print(Prefix, ": logs -> ", LogDir(), " (events) and ", AnalysisDir(), " (tables)");
@@ -1039,15 +1153,20 @@ int OnInit()
    // tick to need it, and put the number in the boot log, where it can be read
    // without waiting for a throttled line.
    MqlRates prime[];
+   ResetLastError();
    int primed = CopyRates(_Symbol, TrendTF(), 0, TREND_PRIME_BARS, prime);
-   int primeErr = GetLastError();
+   // Only a FAILED copy has anything to say. GetLastError() is not cleared by a
+   // successful call, so reading it anyway printed a leftover code beside "got 1000"
+   // on 2026-11-17 (err=4502 next to a full 1000-bar copy) - a number that invites
+   // exactly the wrong investigation.
+   int primeErr = (primed < 0) ? GetLastError() : 0;
    Print(Prefix, ": trend series ", TfName(TrendTF()), " on ", _Symbol,
          " -> ", iBars(_Symbol, TrendTF()), " bars now, asked for ",
          TREND_PRIME_BARS, " (got ", primed, ", err=", primeErr,
          "; input TrendTimeframe=", TrendTimeframe, " minutes). The EMAs are computed from",
          " these, so this is the number that decides when trading starts.");
 
-   LogEvent("INIT", StringFormat("v4.05 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
+   LogEvent("INIT", StringFormat("v4.06 %s %s | fvg=%d breaker=%d mit=%d | trend=%s | entries=%s | "
             "tp1 %.0f%% @%.2fR, runner %.2fR%s | lock ladder %s | trail %.2fxATR from %.2fR",
             _Symbol, TfName(PERIOD_CURRENT),
             (int)UseFVG, (int)UseBreaker, (int)UseMitigation,
@@ -1228,6 +1347,7 @@ void OnTimer()
    // ...and the one repair the EA can attempt itself: a chart that lost its Market
    // Watch selection receives nothing, and re-selecting it starts the quotes again
    // without anyone touching the desktop.
+   g_stallCount++;
    RetrySubscribe();
   }
 
@@ -1257,9 +1377,20 @@ void OnDeinit(const int reason)
    // The row's own timestamp is TimeCurrent() like every other row, so the local
    // clock goes in the text: on a dead feed the server clock is frozen and the
    // one thing that matters is when this actually happened.
-   LogEvent("DEINIT", StringFormat("unloaded at %s local: %s; last tick %dm ago",
-            TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
-            DeinitReason(reason), SecondsSinceTick() / 60));
+   //
+   // A reload the EA asked for is an INIT, not a DEINIT: the container pushes every
+   // DEINIT row to the phone ("the EA left the chart - nothing is managing the
+   // trade"), and announcing a self-inflicted reload that way would be a false
+   // alarm on the one night the feed was already suspect.
+   if(g_reinitRequested)
+      LogEvent("INIT", StringFormat("chart reloaded on purpose at %s local to re-request a series that "
+               "was not being ticked: %s; last tick %dm ago",
+               TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+               DeinitReason(reason), SecondsSinceTick() / 60));
+   else
+      LogEvent("DEINIT", StringFormat("unloaded at %s local: %s; last tick %dm ago",
+               TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+               DeinitReason(reason), SecondsSinceTick() / 60));
    if(g_atrHandle != INVALID_HANDLE)     IndicatorRelease(g_atrHandle);
    ObjectsDeleteAll(0, Prefix);
    Comment("");
@@ -1402,8 +1533,9 @@ void TrendSeriesMissing(const ENUM_TIMEFRAMES tf, const int need)
    if(g_lastTrendWarn > 0 && TimeLocal() - g_lastTrendWarn < 60) return;
    g_lastTrendWarn = TimeLocal();
    MqlRates r[];
+   ResetLastError();
    int got = CopyRates(_Symbol, tf, 0, TREND_PRIME_BARS, r);
-   int err = GetLastError();
+   int err = (got < 0) ? GetLastError() : 0;
    Print(Prefix, ": ", TfName(tf), " on ", _Symbol, " has ", iBars(_Symbol, tf),
          " bars, the EMA needs ", need, " - asked the terminal for ", TREND_PRIME_BARS,
          " (got ", got, ", err=", err, "). No trend, no entry, until they arrive.");
@@ -3064,7 +3196,7 @@ void RenderDashboard()
                 : g_dayKilled ? ("FLAT TODAY: " + g_dayReason)
                 : (DryRun ? "DRY RUN" : "LIVE");
    string s = "";
-   s += Prefix + " FVG-Breaker v4.05  " + _Symbol + "  " + TfName(PERIOD_CURRENT) + "\n";
+   s += Prefix + " FVG-Breaker v4.06  " + _Symbol + "  " + TfName(PERIOD_CURRENT) + "\n";
    s += "state      : " + state + "\n";
    s += "trend (H1) : " + DirName(g_trend) + "   " + g_trendMsg + "\n";
    s += "setup      : " + g_setupMsg + "   dist=" + DoubleToString(g_setupDist, 0) + "pt\n";

@@ -1324,6 +1324,57 @@ server_addressed() { # DIR SERVER
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# A journal line written by an EARLIER container must never be read as this run's
+# verdict.
+#
+# The volume keeps every run's journal, and nothing rotates them: 2026-11-17's
+# logs/20261117.log already held the 09:06 boot's own "authorized on
+# TradeMaxGlobal-Demo" when the 09:25 boot read it. login_report takes the newest
+# file's last 400 lines, so three seconds into a boot whose terminal had not dialled
+# yet it announced "login: OK - account 60169775 ..." and quoted a line timestamped
+# 09:06:55 - the previous container's login, not this one's. That is the same lie as
+# the stale "Invalid account" HINT of 2026-11-16, and it is worse: a false OK hides
+# the failure that matters. login_watch has the mirror-image bug - its window is
+# tail -n 200, so by 09:35 the terminal's own "authorized on" had scrolled out of it
+# and it told the operator the desktop press "never reached the terminal" while the
+# journal said the account had been authorized ten minutes earlier.
+#
+# So: snapshot where every log file stands BEFORE the terminal starts, and let the
+# two of them read only what was appended after that.
+JOURNAL_BASE="${TMPDIR:-/tmp}/hex-journal-base"
+journal_baseline() { # DIR [BASE]
+  # The base directory is a parameter (falling back to the global) so this can be
+  # exercised from outside the script that defines it. A base that cannot be
+  # written is not fatal: journal_since then reads each file whole, which is the
+  # old behaviour and cannot invent a verdict.
+  local base="${2:-${JOURNAL_BASE:-${TMPDIR:-/tmp}/hex-journal-base}}" f n
+  rm -rf "$base" 2>/dev/null || true
+  mkdir -p "$base" 2>/dev/null || true
+  for f in "$1"/*.log; do
+    [ -f "$f" ] || continue
+    n=$(wc -l < "$f" 2>/dev/null | tr -d '[:space:]')
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    printf '%s\n' "$n" > "$base/$(basename "$f")" 2>/dev/null || true
+  done
+}
+
+# The newest log file's lines from the baseline on. A file the terminal created AFTER
+# the baseline has no entry and is read whole, which is right: all of it is ours.
+journal_since() { # DIR [BASE]
+  local base="${2:-${JOURNAL_BASE:-${TMPDIR:-/tmp}/hex-journal-base}}" f last="" b
+  for f in "$1"/*.log; do
+    [ -f "$f" ] || continue
+    last="$f"
+  done
+  [ -n "$last" ] || return 0
+  b=$(cat "$base/$(basename "$last")" 2>/dev/null | tr -d '[:space:]')
+  case "$b" in ''|*[!0-9]*) b=0 ;; esac
+  # tr -d '\000' first: one NUL makes grep call the journal a binary file and print
+  # nothing, which would read as "never tried".
+  tail -n "+$(( b + 1 ))" "$last" 2>/dev/null | tr -d '\000' | tr -d '\r'
+}
+
 # Did the terminal actually SIGN IN?
 # Everything downstream of a terminal that never authorized looks like a broken
 # EA: an empty Market Watch, a chart that never receives a tick, and MT5 deleting
@@ -1373,9 +1424,10 @@ login_report() { # DIR
       fi
     done
     if [ -n "$cur" ]; then
-      # tr -d '\000' first: one NUL makes grep call the journal a binary file and
-      # print nothing, which would read as "never tried".
-      recent=$(tail -n 400 "$cur" 2>/dev/null | tr -d '\000')
+      # THIS run's lines only. See journal_baseline: reading the newest file from
+      # its top made a boot that had not dialled yet report the previous
+      # container's login as its own (2026-11-17 09:25:32).
+      recent=$(journal_since "$dir")
       case "$recent" in
         *'authorized on'*) verdict=ok ;;
         *'no connection'*|*'failed to connect'*|*'invalid server'*|*'authorization failed'*) verdict=refused ;;
@@ -1429,9 +1481,12 @@ login_watch() { # DIR
   local dir="$1" f cur recent i=0
   set +e
   set +o pipefail
-  # Already signed in? Then login_report owns that verdict; say nothing twice.
-  for f in "$dir"/*.log; do [ -f "$f" ] && cur="$f"; done
-  if [ -n "${cur:-}" ] && tail -n 200 "$cur" 2>/dev/null | tr -d '\000' | grep -q 'authorized on'; then
+  # Already signed in - THIS run - then login_report owns that verdict; say
+  # nothing twice. journal_since, not a tail window: at 09:35 on 2026-11-17 the
+  # last 200 lines no longer held this run's "authorized on" (the terminal writes
+  # more than that in ten minutes) and this warned that the operator's login press
+  # "never reached the terminal" while the journal said otherwise.
+  if journal_since "$dir" | grep -q 'authorized on'; then
     return 0
   fi
   while [ "$i" -lt 120 ]; do          # 120 x 30s = one hour, then it stands down
@@ -1439,7 +1494,7 @@ login_watch() { # DIR
     cur=""
     for f in "$dir"/*.log; do [ -f "$f" ] && cur="$f"; done
     if [ -n "$cur" ]; then
-      recent=$(tail -n 200 "$cur" 2>/dev/null | tr -d '\000')
+      recent=$(journal_since "$dir")
       case "$recent" in
         *'authorized on'*)
           log "login: OK - the terminal authorized while the container was up. The desktop login took; the EA can create its handles from the next OnTimer."
@@ -1660,38 +1715,151 @@ hex_push() { # TITLE BODY
   esac
 }
 
+# The topic's cached messages, in a file, and the HTTP code that fetched them.
+# One helper for both notify calls, because they differ only in what they look for.
+ntfy_poll() { # SINCE FILE -> prints the HTTP code, writes the body to FILE
+  local c q=""
+  # The file is an ARGUMENT, not something this sets: it is called from a command
+  # substitution ($(ntfy_poll ...)), and an assignment made in that subshell is gone
+  # by the time the caller reads the body - which would have made every poll read an
+  # empty file and report a healthy topic as EMPTY, the precise false verdict this
+  # pair of functions exists to end.
+  #
+  # The "/json" path is not decoration. ntfy serves the topic URL - /mytopic with
+  # Accept: application/json - as its WEB APP, a 4.5 kB HTML page, and every poll was
+  # therefore "answer 200, no message", i.e. a healthy channel reported as EMPTY for
+  # twelve hours on 2026-11-17 while the same volume was pushing into it. The
+  # machine-readable cache is only at /json?poll=1, and that is what this asks for.
+  #
+  # A query on MT5_NOTIFY_URL (an ntfy access token: ?auth=…) is carried over, but
+  # never printed: the log names the topic, not the secret.
+  case "${MT5_NOTIFY_URL:-}" in
+    *\?*) q="&${MT5_NOTIFY_URL#*\?}" ;;
+  esac
+  c=$(curl -s -o "$2" -w '%{http_code}' --max-time 10 \
+      -H 'Accept: application/json' "${NTFY_BASE}/json?poll=1&since=$1${q}" 2>/dev/null) || c=000
+  case "$c" in ''|*[!0-9]*) c=000 ;; esac
+  printf '%s' "$c"
+}
+
+# Did the poll answer with JSON at all? A 200 that is not JSON means the URL is
+# pointing at something that is not ntfy's API (the web app, a proxy's error page, a
+# captive portal) - which reads exactly like an empty topic unless it is said out
+# loud, and "empty topic" sends the operator to check the phone's subscription for a
+# fault that is in the URL.
+ntfy_json() { # FILE
+  local first
+  first=$(head -c 200 "$1" 2>/dev/null | tr -d '[:space:]' | cut -c1)
+  case "$first" in
+    '['|'{') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# How many messages the poll returned. Tolerant of whitespace: ntfy's own JSON is
+# compact today, but a `"event": "message"` (one space) would have made this count
+# 0 and turned a working topic into a warning - the exact kind of silent verdict
+# this function exists to end.
+ntfy_count() { # FILE
+  local n
+  n=$(grep -oE '"event"[[:space:]]*:[[:space:]]*"message"' "$1" 2>/dev/null | wc -l | tr -d '[:space:]')
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+# First 160 characters of the body, for the log line that has to be readable.
+ntfy_peek() { # FILE
+  local s
+  s=$(head -c 400 "$1" 2>/dev/null | tr -d '\000' | tr '\n\r' '  ')
+  printf '%s' "${s:0:160}"
+}
+
 # Is the phone actually ON the channel - not "is a URL set".
 # A boot that only logs "push held (UP): the same title went out Ns ago" cannot
 # tell anybody whether the earlier one arrived, and a mistyped topic fails exactly
 # like a missing one: silently. So ask ntfy itself. Read-only (poll, not publish),
 # so it cannot spend the topic's quota; it either hands back the messages it has
 # cached or it does not.
+#
+# 2026-11-17 added the evidence to the EMPTY verdict. The boot printed "topic
+# hex-fvg-breaker-174b0bfce1 answers but is EMPTY for the last 12h" while the same
+# volume had sent pushes three hours earlier, and there was no way to tell from the
+# line whether the topic really is empty, whether the poll parsed its answer, or
+# whether the messages went somewhere else. It now prints the byte count and the
+# first 160 characters of whatever came back, so "empty" is a fact and not a guess.
 notify_check() {
-  local base code file n last
+  local code file
   if [ -z "${MT5_NOTIFY_URL:-}" ]; then
     log "notify: OFF - MT5_NOTIFY_URL is empty, so no push reaches a phone (the EA's rows still land in the CSV)"
     return 0
   fi
-  base="${MT5_NOTIFY_URL%%\?*}"
+  NTFY_BASE="${MT5_NOTIFY_URL%%\?*}"
   file="${TMPDIR:-/tmp}/hex-ntfy.json"
-  code=$(curl -s -o "$file" -w '%{http_code}' --max-time 10 \
-         -H 'Accept: application/json' "${base}?poll=1&since=12h" 2>/dev/null) || code=000
+  code=$(ntfy_poll 12h "$file")
   case "$code" in
     200)
-      n=$(grep -o '"event":"message"' "$file" 2>/dev/null | wc -l | tr -d '[:space:]')
-      case "$n" in ''|*[!0-9]*) n=0 ;; esac
-      last=$(grep -o '"title":"[^"]*"' "$file" 2>/dev/null | tail -n 1 | sed 's/^"title":"//; s/"$//')
+      local n last sz
+      if ! ntfy_json "$file"; then
+        warn "notify: FAILED - ${NTFY_BASE}/json answered HTTP 200 with something that is not JSON ($(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') byte(s): $(ntfy_peek "$file")). This is NOT an empty topic: the poll asked the JSON API and got a web page or a proxy's answer, so the URL/host is the fault."
+        rm -f "$file" 2>/dev/null || true
+        return 0
+      fi
+      n=$(ntfy_count "$file")
+      last=$(grep -oE '"title"[[:space:]]*:[[:space:]]*"[^"]*"' "$file" 2>/dev/null | tail -n 1 | sed 's/.*:[[:space:]]*"//; s/"$//')
       if [ "$n" -gt 0 ]; then
-        log "notify: OK - topic ${base##*/} answers and holds $n message(s) from the last 12h, so pushes are landing${last:+ (last: $last)}"
+        log "notify: OK - topic ${NTFY_BASE##*/} answers and holds $n message(s) from the last 12h, so pushes are landing${last:+ (last: $last)}"
       else
-        log "notify: WARNING - topic ${base##*/} answers but is EMPTY for the last 12h: either nothing has been pushed yet, or the phone is subscribed to a different topic (the name after the last / must match exactly)"
+        sz=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')
+        log "notify: WARNING - topic ${NTFY_BASE##*/} answers but holds NO message in 12h (body: ${sz:-0} byte(s): $(ntfy_peek "$file")). Either nothing has been pushed on this URL yet, or the phone is subscribed to a different topic - the name after the last / must match exactly."
       fi
       ;;
-    404) warn "notify: FAILED - ntfy has no topic ${base##*/} (HTTP 404). A typo in MT5_NOTIFY_URL is silent, not absent." ;;
-    401|403) warn "notify: FAILED - ntfy answered $code for ${base##*/}: that topic needs credentials the container does not send" ;;
-    000) warn "notify: FAILED - nothing answered at ${base##*/} (DNS, firewall, or MT5_NOTIFY_URL is not an http(s) URL)" ;;
-    *) warn "notify: FAILED - ntfy answered HTTP $code for ${base##*/}" ;;
+    404) warn "notify: FAILED - ntfy has no topic ${NTFY_BASE##*/} (HTTP 404). A typo in MT5_NOTIFY_URL is silent, not absent." ;;
+    401|403) warn "notify: FAILED - ntfy answered $code for ${NTFY_BASE##*/}: that topic needs credentials the container does not send" ;;
+    000) warn "notify: FAILED - nothing answered at ${NTFY_BASE##*/} (DNS, firewall, or MT5_NOTIFY_URL is not an http(s) URL)" ;;
+    *) warn "notify: FAILED - ntfy answered HTTP $code for ${NTFY_BASE##*/}" ;;
   esac
+  rm -f "$file" 2>/dev/null || true
+  return 0
+}
+
+# Did the push the container just sent actually LAND - on ntfy's side?
+#
+# This is the half notify_check cannot answer: it polls before the first push, so it
+# only ever says what the topic held from an earlier run. "push sent (UP)" proves a
+# 2xx and nothing more. Called with the title it just pushed, immediately after, this
+# looks for that exact message in the topic's cache: if it is there, the URL, the
+# topic and the publish are all correct and a silent phone is a subscription problem
+# at the other end; if it is not, the container is pushing into nothing.
+notify_verify() { # TITLE
+  [ -n "${MT5_NOTIFY_URL:-}" ] || return 0
+  local code n i=0 file want="HEX-FVG-Breaker $1"
+  # Its own NTFY_BASE: this is called on the boot path right after notify_check, but
+  # depending on another function's global for the URL made it fail outright when it
+  # was called on its own (and `set -u` turns that into a silent non-verdict).
+  NTFY_BASE="${MT5_NOTIFY_URL%%\?*}"
+  file="${TMPDIR:-/tmp}/hex-ntfy.json"
+  # Three polls, not thirty: ntfy caches synchronously, so a message that landed is
+  # visible on the first ask. The bound matters because this runs on the boot path,
+  # and the terminal's death must not be noticed a minute late.
+  while [ "$i" -lt 3 ]; do
+    i=$(( i + 1 ))
+    code=$(ntfy_poll 10m "$file")
+    case "$code" in
+      200)
+        ntfy_json "$file" || break
+        n=$(grep -cF "\"$want\"" "$file" 2>/dev/null | tr -d '[:space:]')
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        if [ "$n" -gt 0 ]; then
+          log "notify: VERIFIED - the topic ${NTFY_BASE##*/} holds the push this container just sent (\"$want\"), so the URL and the publish are right; a silent phone now means the subscription is on another topic"
+          rm -f "$file" 2>/dev/null || true
+          return 0
+        fi
+        ;;
+      *) break ;;
+    esac
+    sleep 2
+  done
+  warn "notify: the push answered HTTP 2xx but the topic ${NTFY_BASE##*/} does not hold it (poll $code, body: $(ntfy_peek "$file")). Pushes are going out and nowhere near this topic."
   rm -f "$file" 2>/dev/null || true
   return 0
 }
@@ -1912,12 +2080,35 @@ alert_write_state() { # FILE STATE
 # The fault in one sentence, for the phone. The numbers are the ones read on the
 # pass that noticed the change: the age of the status line, the minutes since the
 # last tick (0 when the build does not write it), and the symbol.
-alert_what() { # STATE FILE_AGE_MIN TICK_MIN SYMBOL
+#
+# The fifth argument is the status file, used only by offline:no-ticks - the one
+# state where the two very different faults have one name. On 2026-11-17 the
+# container restarted the terminal three times for "no ticks" while the terminal
+# was demonstrably being fed (the symbol's last tick was one second old, bid moving
+# every second) and the chart was the thing getting nothing. srvage, which is the
+# symbol's own tick age against the server clock, is what tells those apart.
+alert_feed() { # STATUS FILE
+  local age sync bars
+  age=$(hb_field "$1" srvage)
+  case "${age:-}" in ''|*[!0-9]*) return 0 ;; esac
+  sync=$(hb_field "$1" msync)
+  bars=$(hb_field "$1" mbars)
+  if [ "$age" -le 5 ]; then
+    printf 'The SYMBOL is being fed (its last tick is %ss old, so the terminal has a live feed), which makes this the CHART: ' "$age"
+  else
+    printf 'The symbol has not ticked either (%ss), so the terminal itself is receiving nothing: ' "$age"
+  fi
+  printf 'chart series sync=%s, %s bars on the chart timeframe (mbars).' "${sync:-?}" "${bars:-?}"
+  return 0
+}
+
+alert_what() { # STATE FILE_AGE_MIN TICK_MIN SYMBOL [HEARTBEAT]
   case "$1" in
     offline:no-ea)
       printf 'Nothing has written the EA status line for %s minutes: the expert is not on the chart (removed, or its terminal thread is stuck), so nothing is managing the trade.' "$2" ;;
     offline:no-ticks)
-      printf 'The EA is alive and its status line is moving, but %s has not ticked for %s minutes - no entry, no exit, nothing trading.' "$4" "$3" ;;
+      printf 'The EA is alive and its status line is moving, but %s has not been handed a tick for %s minutes - no entry, no exit, nothing trading.' "$4" "$3"
+      if [ -n "${5:-}" ]; then printf ' '; alert_feed "$5"; fi ;;
     offline:no-symbol)
       printf '%s is not subscribed (SYMBOL_SELECT=0), so no quote can arrive however long we wait - nothing can trade.' "$4" ;;
     blown)
@@ -2064,7 +2255,7 @@ alert_watcher() {
           ;;
         *)
           if [ "$restart" = "1" ]; then title="OFFLINE"; else title="NEEDS-YOU"; fi
-          body="$(alert_what "$st" "$age" "$tickm" "$sym") $action"
+          body="$(alert_what "$st" "$age" "$tickm" "$sym" "$hb") $action"
           # The figures, when there are any: an alert that cannot be counted is
           # an alert that gets ignored.
           facts="$(alert_facts "$hb")"
@@ -2083,12 +2274,12 @@ alert_watcher() {
         # would only cost another boot.
         printf '4 %s %s\n' "$now" "$st" > "$budget" 2>/dev/null || true
         title="NEEDS-YOU"
-        body="$(alert_what "$st" "$age" "$tickm" "$sym") $action"
+        body="$(alert_what "$st" "$age" "$tickm" "$sym" "$hb") $action"
         log "ALERT: still $st after 3 terminal restarts - telling the operator once, then stopping"
       elif [ "${repeat_h:-6}" -gt 0 ] && [ "$now" -ge "$reps" ]; then
         reps=$(( now + ${repeat_h:-6} * 3600 ))
         title="STILL-OFFLINE"
-        body="$(alert_what "$st" "$age" "$tickm" "$sym") It has been like this for $down. $(alert_facts "$hb")"
+        body="$(alert_what "$st" "$age" "$tickm" "$sym" "$hb") It has been like this for $down. $(alert_facts "$hb")"
         log "ALERT: still $st for $down - one reminder per ${repeat_h}h"
       fi
     fi
@@ -2186,6 +2377,10 @@ main() {
   compile_ea
   ensure_single_chart
   write_mt5_ini
+  # Where every log file stood BEFORE the terminal could write anything: login_report
+  # and login_watch read only from here on, so a previous container's "authorized on"
+  # can never be reported as this run's (2026-11-17).
+  journal_baseline "$MT5DIR/logs"
   launch_terminal
   wait_for_terminal
   report_isolation
@@ -2229,6 +2424,11 @@ main() {
   # a refusing ntfy cannot take the terminal down on its way to a clean bill.
   notify_check
   hex_push "UP" "HEX-FVG-Breaker container is up: ${MT5_SYMBOL} ${MT5_PERIOD}, account ${MT5_LOGIN:-<unset>} @ ${MT5_SERVER:-<volume>}, build ${HEX_BUILD:-unknown}. You get a buzz on every BUY, CLOSE, ADD and BLOWN, one per distinct ERROR/SKIP (not one per tick), and exactly ONE alert if the robot stops - with the reason and what was done about it - plus one when it is back. Nothing in between."
+  # ...and then ask the topic whether that push is in it. "push sent" is a 2xx and
+  # nothing more: on 2026-11-17 the boot polled the topic, found it empty while the
+  # same volume had been pushing for hours, and left the operator to guess whether
+  # the fault was the URL, the topic, or the phone.
+  notify_verify "UP"
   # Wait on the terminal: when it dies, tear the desktop down and exit non-zero
   # so Docker's restart policy decides. No silent self-restarts.
   #
